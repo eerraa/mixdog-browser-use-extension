@@ -1,0 +1,18 @@
+{
+  "name": "win-browser",
+  "title": "Independent Windows Browser",
+  "version": "0.1.0",
+  "description": "Independent interactive web browsing with owned Windows browser windows, explicit human handoff and scoped permissions.",
+  "license": "Apache-2.0",
+  "skills": "./skills",
+  "mcpServers": {
+    "win-browser": {
+      "type": "stdio",
+      "command": "${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe",
+      "args": ["--mcp"],
+      "cwd": "${MIXDOG_PLUGIN_ROOT}",
+      "startupTimeoutMs": 30000,
+      "timeoutMs": 120000
+    }
+  }
+}

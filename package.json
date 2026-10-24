@@ -1,0 +1,33 @@
+{
+  "name": "independent-windows-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent Windows browser automation for a folder-installed Mixdog plugin.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "vendor": "node scripts/upstream.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/core/*.test.mjs tests/authority*.test.mjs tests/rpc.test.mjs tests/sdk-adapter.test.mjs tests/companion-termination.test.mjs",
+    "test:browser": "node tests/browser/run.mjs",
+    "test:native": "node --test tests/native-consent.test.mjs",
+    "test:live": "node --test tests/live/*.test.mjs",
+    "test:package": "node --test tests/package/*.test.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  },
+  "devDependencies": {
+    "electron": "44.9.1",
+    "esbuild": "0.28.2"
+  },
+  "allowScripts": {
+    "electron@44.9.1": true,
+    "esbuild@0.28.2": true
+  }
+}
