@@ -12,7 +12,7 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 | `npm run test:live` | `tests/live/*.test.mjs` (5 files, 6 tests) | `npm run build`, `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Baseline at the initial commit: `npm test` 27, `test:browser` 111, `test:live` 6, `test:package` 8 passing; `test:native` 1 (v0.1.0 build). A lower count means skipped or lost tests.
+- Baseline at v0.2.0: `npm test` 27, `test:browser` 111, `test:live` 6, `test:package` 8, `test:native` 1 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 

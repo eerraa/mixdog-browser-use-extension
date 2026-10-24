@@ -50,14 +50,17 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
 
 ## Release (explicit user request only)
 
-1. Clean tree on `main`; all suites pass; the package is built from that commit.
-2. Zip the `win-browser` folder (folder at the archive root) as `win-browser-v<ver>-windows-x64.zip`. Write `<zip>.sha256` containing `<sha256>  <zip name>` (two spaces).
-3. Tag `v<ver>`; create the GitHub release on `eerraa/mixdog-browser-use-extension` with both assets. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler.
-4. Users re-register the new folder themselves; existing registrations are never replaced automatically.
+1. Bump the version (Versioning). All suites pass on that tree; build the package with the clean package build.
+2. Copy the package's `win-browser` folder to `dist/releases/v<ver>/win-browser`. This path has no random part and matches the ZIP content.
+3. In `dist/releases/v<ver>` run `tar -a -c -f win-browser-v<ver>-windows-x64.zip win-browser`, which puts the folder at the archive root with `/` separators. Write `<zip>.sha256` containing `<sha256>  <zip name>` (two spaces, LF).
+4. Extract the ZIP to a fresh temp dir and run `test:package` on the extracted `win-browser`.
+5. Commit exactly that tree, tag `v<ver>`, push, then create the GitHub release on `eerraa/mixdog-browser-use-extension` with both assets. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler. Check that the uploaded asset digest equals the local sha256.
+6. Users register the new folder themselves; existing registrations are never replaced automatically.
 
 | Release | Commit | Assets |
 | --- | --- | --- |
 | v0.1.0 | `f9ed383`, before the history reset; not an ancestor of `main` | `win-browser-v0.1.0-windows-x64.zip` (sha256 `78aa171135fb61cec9e700c7039d0e41eb98db5173eba4a7eb6464724cff414b`) and its `.sha256` |
+| v0.2.0 | tag `v0.2.0` on `main` | `win-browser-v0.2.0-windows-x64.zip` (sha256 `7c270649a7ac1463c51a2428a037520a7249349fe3b4ae648593a8fc4445da80`) and its `.sha256` |
 
 ## Licensing
 

@@ -15,7 +15,7 @@ sections it names → `testing.md` matrix.
 | Runtime | Own Electron 44.9.1 companion per MCP connection; one window per page (toolbar + live page + input shield) |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
-| Release state | `v0.1.0` released; its tag points outside `main`'s single initial commit. `main` adds the single-window toolbar UI (unreleased) |
+| Version | `0.2.0`: single-window toolbar UI. Release history and tags: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
 ## Doc system
