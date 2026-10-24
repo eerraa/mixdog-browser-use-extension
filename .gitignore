@@ -1,0 +1,8 @@
+node_modules/
+build/
+dist/
+vendor/mixdog/
+test-results/
+*.log
+.mixdog/
+NEW_SESSION_PROMPT.md

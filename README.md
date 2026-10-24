@@ -1,0 +1,153 @@
+# Independent Windows Browser
+
+Mixdog의 빌트인 Browser Use와 별개로 실행되는 Windows 브라우저 플러그인입니다.
+배포 폴더에는 Electron 런타임과 실행기가 포함되므로 사용자는 Node.js 설치나
+수동 빌드를 하지 않습니다.
+
+## 에이전트에게 제공되는 도구
+
+공개 MCP 도구는 `mcp__plugin-win-browser__browse` 하나이며 `action`으로 동작을 고릅니다.
+관련 웹 작업에는 `independent-browser` 스킬이 안내를 제공합니다.
+훅은 내부 인증·호출 수명 처리용이지 추가 에이전트 도구가 아닙니다.
+
+| 범위 | action |
+| --- | --- |
+| 페이지·탭 | `open`, `navigate`, `list_tabs`, `close_tab` |
+| 관측·읽기 | `observe`, `read`, `evaluate` |
+| 입력·폼 | `click`, `fill`, `type`, `press`, `select`, `scroll` |
+| HTML 업로드·다운로드 상태·대화상자 | `upload`, `downloads`, `handle_dialog` |
+| 요청·권한 | `requests`, `respond`, `permissions` |
+| 표시·사람 인계·상태·회수 | `hide`, `show`, `handoff`, `status`, `revoke` |
+
+`read`는 웹페이지 읽기이며 일반 파일 읽기가 아닙니다.
+일반 OS 파일 작업과 지원하지 않는 API의 대체 도구 선택은 에이전트가 판단합니다.
+소스·테스트·임시 산출물 전체가 자동으로 MCP 도구나 스킬 내용으로 전달되지는 않습니다.
+
+## 설치와 사용
+
+[GitHub Releases](https://github.com/eerraa/mixdog-browser-use-extension/releases)에서
+Windows x64 ZIP을 받아 압축을 풉니다. 공개된 SHA256 파일로 다운로드를 확인할 수 있습니다.
+
+1. **배포된 플러그인 폴더**를 Mixdog의 로컬 플러그인 설정에 등록하고 MCP를 활성화합니다.
+   소스 저장소 폴더가 아니라 `bin`, `runtime`, `app`, `skills`, `hooks`, `plugin.json`이
+   함께 들어 있는, 패키저가 출력한 경로 끝의 `win-browser` 폴더를 등록합니다.
+   고유 번호가 붙은 상위 폴더를 등록하거나 `win-browser` 이름을 바꾸면 안 됩니다.
+   기본 패키지는 `browser-policy.json`에 명시된 자동화 위임을 포함합니다. 등록·활성화하면
+   인증된 에이전트가 자신이 소유한 페이지에서 새 HID·USB 장치와 알림·위치 권한을
+   선택할 수 있습니다. 요청마다 별도 사람 확인을 요구하는 패키지가 아닙니다.
+2. 빌트인 Browser Use 비활성화와 필요한 앱 재시작은 사용자가 직접 진행합니다.
+3. 새 대화에서 원하는 웹 작업을 평소처럼 요청합니다. 특정 도구명이나 스킬명을
+   지시할 필요는 없습니다. 기본 MCP 이름과 플러그인 이름은 바꾸지 않습니다.
+
+정상 등록 시 MCP 서버 이름은 `plugin-win-browser`여야 합니다. 별칭이나 중복 등록으로
+다른 이름이 붙는 구성은 지원하지 않습니다. 비활성화된 이전 등록도 이름 충돌을
+일으킬 수 있으므로, 충돌이 있으면 사용자가 지원되는 플러그인 설정에서 확인해야 합니다.
+새 경로의 패키지를 등록하면 별도 플러그인 ID·데이터를 사용하며 기존 로그인·설정을
+자동으로 이전하지 않습니다.
+
+자동화 중 보이는 창은 페이지의 미리보기입니다. 이 창을 조작하면 자동 입력이
+안전하게 끝날 때까지 기다린 뒤 **같은 페이지의 실제 브라우저 창**으로 인계합니다.
+첫 조작은 페이지에 전달하지 않으므로 실제 창이 열린 다음 다시 조작합니다.
+
+로그인·비밀번호·CAPTCHA·2FA는 그 실제 창에서 직접 처리합니다. 인계 중에는
+에이전트의 페이지 읽기와 입력이 차단됩니다. 끝나면 네이티브 메뉴의
+`Resume automation`을 선택합니다. `Stop automation`은 해당 페이지를 중단하며,
+창을 숨기거나 다시 보여주는 것만으로 해제되지 않습니다.
+
+## 권한과 안전 경계
+
+- 자체 프로필만 사용하며 다른 브라우저나 Mixdog의 쿠키·계정·프로필을 복사하지 않습니다.
+- 웹페이지에는 실제 내장 Chromium 버전의 브라우저 식별 값을 사용합니다.
+  Electron 앱 전용 연동으로 잘못 분류되는 것을 막으며 장치 권한·Windows 승인은 바꾸지 않습니다.
+  이 기본값은 플러그인 전용 실행기 안에만 적용되며 Mixdog 본체와 다른 브라우저는 변경하지 않습니다.
+- 사이트 버튼 클릭, HTML 파일 입력의 파일 선택, JS 대화상자, HID·USB와 알림·위치 요청을 하나의
+  `requests`/`respond` 인터페이스로 처리합니다. 실제 브라우저 이벤트에서 나온 요청과
+  선택지만 사용할 수 있으며, 장치를 이름이나 첫 번째 항목만 보고 임의 선택하지 않습니다.
+  파일 선택은 해당 사이트에 파일 내용을 공개하므로 작업에 필요한 명시적 파일만 전달합니다.
+- 기본 정책은 특정 사이트를 미리 승인하는 대신 현재 연결의 인증된 caller generation에
+  origin과 실제 제공된 선택지를 고르는 권한을 위임합니다. 장치 연결·읽기·설정 쓰기는
+  서로 다른 결과이며, 이 위임이 장치 프로토콜의 쓰기를 기술적으로 차단하지는 않습니다.
+  Chromium의 기존 장치 허가는 origin/session 수명이며 문서별 독점 접근을 보장하지 않습니다.
+- 정책은 고정된 패키지 경로에서 연결 시작에 한 번 검증하고 다시 읽지 않습니다.
+  누락·오류·비활성 정책은 새 자동 허가를 차단하며, 에이전트가 MCP 인수로 정책이나 승인을
+  만들 수 없습니다. 사용자는 등록 전에 `{"version":1,"mode":"disabled"}` 또는
+  `{"version":1,"mode":"manual"}`로 바꿀 수 있습니다. manual 모드의 알림·위치 Windows
+  사용자 확인은 Windows 11 build 22000 이상을 대상으로 합니다.
+- Stop·인계·복귀 시작·창 숨김·연결 단절·탐색·호출자 종료·만료는 대기 중 요청을 철회하며,
+  이를 사람의 거부로 기록하지 않습니다. 명시적 거부·취소는 재요청으로 우회하지 않습니다.
+  인계된 기존 페이지는 여전히 네이티브 `Resume automation` 메뉴로만 돌아옵니다.
+- 권한 회수는 이 MCP 연결의 모든 브라우저 창과 실행기를 종료합니다.
+  열린 페이지와 미저장 입력은 닫히며 프로필 파일은 삭제하지 않습니다.
+  프로세스 종료 확인과 실물 장치 입출력 검증은 구분해서 표시합니다.
+- 요청자와 범위를 확실히 확인할 수 없는 권한 API는 이유와 함께 거부합니다.
+  OS 승인, 사용자 활성화와 Chromium의 보안 정책·장치 차단 목록을 해제하지 않습니다.
+- 훅은 이 플러그인 도구의 호출만 변경합니다. 다른 도구나 전역 세션을 차단하지 않습니다.
+  훅 종료 알림은 호스트의 best-effort 계약이므로 놓친 종료·이벤트 순서를
+  완전히 관측한다고 보장하지 않습니다.
+- 로컬 훅 자격정보는 웹페이지와 일반 MCP 인수에서 분리됩니다. 그러나 같은 OS 사용자
+  권한으로 플러그인 파일·프로세스를 바꾸거나 훅을 위조하는 프로그램을 격리하는
+  샌드박스는 아닙니다. 패키지 등록은 암호학적 동의 영수증이 아니며, 같은 사용자 권한의
+  로컬 코드 변조를 막지 못합니다. 자동화는 native 요청 adapter를 사용하며 승인창을 조작하지 않습니다.
+
+일부 회전·왜곡 프레임과 실제 wheel 이벤트가 필요한 위젯은 지원하지 않습니다.
+JS `alert`·`confirm`은 자동 응답합니다. Electron 44.9.1의 `window.prompt()`는
+대화상자 생성 전에 `prompt() is not supported.` 오류를 내므로 지원하지 않습니다.
+그 기능이 필요한 앱은 검증 완료가 아니라 runtime capability blocker로 보고합니다.
+`alert`·`confirm`의 중복 native UI 방지는 전용 companion 안의 공개 `dialog.showMessageBox`
+함수를 감싸 실제 CDP 이벤트와 연결하는 Electron 44.9.1 호환성 처리입니다.
+공식 dialog interception 확장 API는 아니므로 runtime 버전 변경 시 재검증이 필요합니다.
+설치된 Electron·Mixdog 파일이나 페이지 스크립트를 패치하지 않습니다.
+파일 선택 자동 응답은 DOM에 묶인 HTML 파일 입력만 지원합니다.
+File System Access API의 `showOpenFilePicker`·`showSaveFilePicker`·`showDirectoryPicker`와
+일반 OS 파일 작업은 이 도구의 지원 범위가 아닙니다.
+플러그인은 다른 도구를 자동 호출하지 않으며, 추가 도구 선택과 작업을 이어갈 방법은
+에이전트가 판단합니다. Stop·거부·불확실한 입력의 비재실행 원칙은 그대로 유지합니다.
+실제 한국어 IME·비밀 입력·Windows 승인·실물 HID/USB 입출력은 단위 테스트나
+로컬 페이지 테스트만으로 검증됐다고 간주하지 않습니다.
+
+## 소스에서 개발하는 경우
+
+이 절은 개발자용이며 배포 폴더를 등록하는 사용자에게는 필요하지 않습니다.
+
+주요 소스 경계는 다음과 같습니다.
+
+| 경로 | 책임 |
+| --- | --- |
+| `src/browser/` | 브라우저 관측·입력·표시·요청·권한 adapter |
+| `src/core/` | 실제 작업 종료를 기다리는 큐와 공통 권한 broker |
+| `src/`의 실행 진입점 | MCP·훅·gateway·companion·로컬 RPC와 caller 인증 |
+| `native/` | Windows Job 실행기와 OS 동의 보조 프로그램 |
+| `scripts/` | 고정 소스 확보·빌드·라이선스를 포함한 패키징 |
+| `tests/` | 단위·실제 Electron·설치 폴더 회귀 검증; 설치용 패키지에는 미포함 |
+
+개발 환경은 Windows x64, Node.js 22.19 이상, npm, PATH의 MinGW-w64 `g++`가 필요합니다.
+Electron 자체를 빌드하는 Visual Studio·ATL/MFC·depot_tools는 이 프로젝트 빌드에 필요하지 않습니다.
+두 Windows 보조 실행기만 MinGW-w64로 빌드하고, Electron은 고정된 공식 런타임을 사용합니다.
+
+```text
+npm ci
+node node_modules/electron/install.js
+npm run vendor
+npm run build:native -- "<MinGW compiler licenses directory>"
+npm run build
+npm run package
+```
+
+`npm run package`는 기존 폴더를 지우거나 덮어쓰지 않고
+`dist/<고유 폴더>/win-browser`를 만들며 등록할 하위 폴더 경로를 출력합니다.
+GCC로 빌드한 런타임의 원문 라이선스도 함께 포함합니다.
+라이선스 루트에는 `gcc/COPYING3`, `gcc/COPYING.RUNTIME`,
+`mingw-w64/COPYING.MinGW-w64-runtime.txt`, `winpthreads/COPYING`이 필요합니다.
+사용한 컴파일러 버전과 옵션은 패키지의 `licenses/native/provenance.json`에 기록합니다.
+런타임·의존성·재사용 소스는 고정하지만 컴파일러 자체는 고정하지 않으므로
+바이트 단위로 동일한 빌드를 보장하지는 않습니다.
+
+검증 명령은 `npm test`, `npm run test:browser`, `npm run test:native`,
+`npm run test:live`입니다. `test:native`는 보조 실행기를 빌드한 뒤 실행하며,
+Windows 동의 기능의 가용성만 조회하고 사용자 확인창을 띄우지 않습니다.
+배포 폴더 MCP 검증은 `WB_PACKAGE_DIR`에 검사할 폴더를 지정하고
+`npm run test:package`로 실행합니다. 등록·자연스러운 선택·사람 인계·실물 장치 검증은
+별도 사용자 단계입니다. 테스트에 실제 계정의 게시·결제·삭제를 사용하지 않습니다.
+
+원본 고정 버전, 라이선스와 변경 범위는 `THIRD_PARTY_NOTICES.md`와
+`upstream.lock.json`에 있습니다.

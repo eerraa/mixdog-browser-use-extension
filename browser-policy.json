@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "mode": "delegated",
+  "permissions": ["hid", "usb", "notifications", "geolocation"],
+  "origins": "owned-pages",
+  "selection": "offered-option",
+  "lifetime": "caller-generation",
+  "newGrants": true
+}

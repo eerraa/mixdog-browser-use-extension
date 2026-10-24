@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/tribgames/mixdog",
+  "commit": "968ee08965e75c3fa1999ab8d18d20e45229fc89",
+  "version": "1.3.4",
+  "license": "Apache-2.0",
+  "files": {
+    "LICENSE": "89ff06d7096963d1f645b20dfc967cbac76a9b54",
+    "NOTICE.md": "a3c63aa779a02da00620f3fcb2271f6289c40f0d",
+    "apps/desktop/src/main/browser/actionability.ts": "bab0cd57b489a879afe9caf642a26eb3f9cf64bf",
+    "apps/desktop/src/main/browser/cdp-execution.ts": "495deffe329e3f62502696cd67fb3a040178e5d3",
+    "apps/desktop/src/main/browser/ref-recovery.ts": "acde78d3352d0b04e17dacf89a2411c488c669be",
+    "apps/desktop/src/main/browser/semantic-query.ts": "e6ed60bbe6ac3480b695e8f68fe44b4bab54d776",
+    "apps/desktop/src/main/browser/snapshot-scripts.ts": "82d7be1289c8053c79c2df5520256979f3df847c",
+    "apps/desktop/src/main/browser/stable-rect.ts": "30c574653c12a85cbb563fd4dc8527713d4a8db0"
+  }
+}
