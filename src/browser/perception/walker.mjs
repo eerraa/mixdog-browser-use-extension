@@ -245,15 +245,13 @@ function pageInstall(U) {
     }, true);
   }
 
-  const authorName = el => {
+  const labelledName = el => {
     const labelledBy = compact(el.getAttribute('aria-labelledby'), 200);
-    if (labelledBy) {
-      const scope = el.getRootNode();
-      const named = labelledBy.split(/\s+/).map(id => renderedText(scope.getElementById ? scope.getElementById(id) : document.getElementById(id), true)).join(' ');
-      if (compact(named, 120)) return compact(named, 120);
-    }
-    return compact(el.getAttribute('aria-label') || el.getAttribute('title') || '', 120);
+    if (!labelledBy) return '';
+    const scope = el.getRootNode();
+    return compact(labelledBy.split(/\s+/).map(id => renderedText(scope.getElementById ? scope.getElementById(id) : document.getElementById(id), true)).join(' '), 120);
   };
+  const authorName = el => labelledName(el) || compact(el.getAttribute('aria-label') || el.getAttribute('title') || '', 120);
   const roleOf = (el, tag) => {
     let role = inferRole(el, tag);
     if (!ARIA.has(role)) role = IMPLICIT[role] || role;
@@ -269,8 +267,43 @@ function pageInstall(U) {
     if (role === 'slider' || role === 'spinbutton' || role === 'progressbar') return compact(el.getAttribute('aria-valuetext') || el.getAttribute('aria-valuenow'), 40);
     return '';
   };
+  // A control whose vendored name is empty (an image-only link or button) is
+  // named by the text alternatives of its rendered embedded content in tree
+  // order, each taken as accessible-name computation takes it
+  // (aria-labelledby, aria-label, an img's alt, an svg's own title, title); a
+  // descendant that supplies one is not entered. Nested controls, form fields
+  // and editable content keep their own names and values, so a wrapper never
+  // takes a nested control's name; aria-hidden, display:none,
+  // visibility:hidden and opacity:0 descendants supply nothing.
+  const NESTED_CONTROL_TAGS = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary']);
+  const svgTitle = el => compact(renderedText(el.querySelector(':scope > title'), true), 120);
+  const alternativeOf = (node, tag) => labelledName(node) || compact(node.getAttribute('aria-label'), 120)
+    || (tag === 'img' ? compact(node.getAttribute('alt'), 120) : '') || (tag === 'svg' ? svgTitle(node) : '')
+    || compact(node.getAttribute('title'), 120);
+  const renderedChildren = node => {
+    if (node.shadowRoot) return Array.from(node.shadowRoot.children);
+    const assigned = node.localName === 'slot' ? node.assignedNodes({ flatten: true }) : [];
+    return assigned.length ? assigned.filter(child => child.nodeType === 1) : Array.from(node.children);
+  };
+  const embeddedName = (el, tag) => {
+    if (tag === 'svg') return svgTitle(el);
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable) return '';
+    const parts = [];
+    const stack = renderedChildren(el).slice(0, 100).reverse();
+    for (let visited = 0; stack.length && visited < 100 && parts.length < 8; visited++) {
+      const node = stack.pop();
+      const childTag = node.localName;
+      if (node.getAttribute('aria-hidden') === 'true' || NESTED_CONTROL_TAGS.has(childTag) || CONTROLS.has(roleOf(node, childTag))) continue;
+      if (!node.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && getComputedStyle(node).display !== 'contents') continue;
+      const alternative = alternativeOf(node, childTag);
+      if (alternative) parts.push(alternative);
+      else if (childTag !== 'svg') stack.push(...renderedChildren(node).slice(0, 100).reverse());
+    }
+    return compact(parts.join(' '), 120);
+  };
   const NAMED_BY_CONTENT = new Set(['interactive', 'heading', 'img']);
-  const nameOf = (el, tag, purpose) => NAMED_BY_CONTENT.has(purpose) ? accessibleName(el, tag)
+  const nameOf = (el, tag, purpose) => NAMED_BY_CONTENT.has(purpose)
+    ? accessibleName(el, tag) || (purpose === 'interactive' ? embeddedName(el, tag) : '')
     : purpose === 'frame' ? compact(el.getAttribute('title') || el.getAttribute('name') || '', 120) : authorName(el);
   const deepActive = () => {
     let active = document.activeElement;

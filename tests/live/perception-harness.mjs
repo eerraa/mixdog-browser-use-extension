@@ -21,6 +21,12 @@ const WORLD = 'independent-browser-perception-live';
 const PAGE = `<!doctype html><meta charset="utf-8"><title>Perception fixture</title>
 <style>body{margin:0;font:14px sans-serif}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}#below{margin-top:1500px}</style>
 <nav aria-label="Main"><a href="/one"><span>One</span><img alt="logo" width="10" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a> <a href="/two">Two</a></nav>
+<div id="images"><a href="/logo"><img alt="Logo link" width="10" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+<button type="button"><svg width="10" height="10" aria-label="Search icon"></svg></button>
+<a href="/titled"><svg width="10" height="10"><title>Svg title link</title></svg></a>
+<a href="/decor"><img alt="Hidden decor" aria-hidden="true" width="10" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><img alt="Visible alt" width="10" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+<a href="/faded"><img alt="Faded alt" style="opacity:0" width="10" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+<span style="cursor:pointer;display:inline-block"><button type="button" aria-label="Close panel"><svg width="10" height="10"></svg></button></span></div>
 <main>
 <h1>Perception fixture</h1>
 <p>Plain paragraph text <b>bold part</b> end.<span class="sr">screen reader only</span></p>
@@ -113,7 +119,7 @@ async function run() {
   const line = pattern => lines.find(value => pattern.test(value));
 
   for (const leak of ['DO_NOT_EXPORT_PASSWORD', '246810', 'LEAK_SCRIPT_TEXT', 'color:red', 'color:blue', 'Hidden text',
-    'Hidden button', 'screen reader only', 'Light unslotted']) assert.ok(!text.includes(leak), `must not contain ${leak}`);
+    'Hidden button', 'screen reader only', 'Light unslotted', 'Hidden decor', 'Faded alt']) assert.ok(!text.includes(leak), `must not contain ${leak}`);
   assert.ok(line(/^\s*e\d+ textbox "User" ="alice"$/), 'labelled textbox with its value');
   assert.ok(!line(/text "User|text "Remember/), 'label text is the control name, not a text line');
   assert.ok(line(/e\d+ textbox "Password" sensitive$/), 'password marked sensitive without value');
@@ -121,6 +127,15 @@ async function run() {
   assert.ok(line(/e\d+ checkbox "Remember me" unchecked$/));
   assert.equal(lines.filter(value => value.includes('Remember me')).length, 1, 'wrapper and label are not separate lines');
   assert.ok(line(/e\d+ link "One logo"|e\d+ link "One"/), 'link content (span, img) is part of the link');
+  // An image-only control is named by its rendered embedded content; hidden
+  // and aria-hidden content never names it, and a wrapper never takes a
+  // nested control's name.
+  assert.ok(line(/^\s*e\d+ link "Logo link"$/), 'image-only link named by its alt');
+  assert.ok(line(/^\s*e\d+ button "Search icon"$/), 'icon button named by its svg aria-label');
+  assert.ok(line(/^\s*e\d+ link "Svg title link"$/), 'svg title names a link');
+  assert.ok(line(/^\s*e\d+ link "Visible alt"$/), 'aria-hidden image left out of the name');
+  assert.ok(line(/^\s*e\d+ link \/faded$/), 'a link whose only image is transparent stays unnamed');
+  assert.equal(lines.filter(value => value.includes('Close panel')).length, 1, 'a wrapper does not take a nested control name');
   assert.ok(!line(/img "logo"|span/), 'no content wrappers');
   assert.ok(line(/e\d+ button "Buy"$/) && line(/^\s*text "Card title"$/) && !line(/generic "Card title/), 'card wrapper dropped, its text kept');
   assert.ok(line(/e\d+ generic "Clickable tile" clickable$/), 'outermost cursor:pointer element is one clickable');

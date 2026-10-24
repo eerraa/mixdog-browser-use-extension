@@ -15,7 +15,7 @@ sections it names → `testing.md` matrix.
 | Runtime | Own Electron 44.9.1 companion per MCP connection; one window per page (toolbar + live page + input shield) |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
-| Version | `0.3.0`: text perception, agent DevTools and script runner. Release history and tags: `build-release.md` |
+| Version | `0.3.1`: text perception, agent DevTools and script runner; image-only links and buttons named by their embedded content. Release history and tags: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
 ## Doc system
