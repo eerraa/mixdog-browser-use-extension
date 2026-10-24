@@ -233,7 +233,9 @@ export class PagePresentation {
     if (this.closed) throw new Error('Presentation closed during initialization');
     this.ready = true;
     this.refresh();
-    this.frame.show();
+    // Agent windows never take focus (D19): focus emulation lets the page
+    // behave as focused, and the person activates the window by clicking it.
+    this.frame.showInactive();
     if (this.contents.isFocused()) this.toolbar.focus();
   }
   logicalVisible() {
@@ -358,17 +360,24 @@ export class PagePresentation {
     if (!this.shieldKeys.size && !this.shieldButtons.size && !this.unknownGesture) return Promise.resolve();
     return new Promise(resolve => this.releaseWaiters.add(resolve));
   }
-  enterNative(generation) {
+  // activate: false for an agent-requested handoff. The window then only
+  // flashes and never takes focus, so keystrokes the person meant for another
+  // app cannot reach it; the person activates it by clicking (D19).
+  enterNative(generation, { activate = true } = {}) {
     if (this.closed || this.mode !== 'draining' || this.generation !== generation
       || this.shieldKeys.size || this.shieldButtons.size || this.unknownGesture) fail('HANDOFF_CHANGED', 'Handoff changed or initiating controls are still held');
     this.mode = 'native-handoff';
     this.notice = null;
     this.addressError = false;
-    if (this.frame.isMinimized()) this.frame.restore();
-    if (!this.frame.isVisible()) this.frame.show();
+    if (activate && this.frame.isMinimized()) this.frame.restore();
+    if (!this.frame.isVisible()) { if (activate) this.frame.show(); else this.frame.showInactive(); }
     this.shieldView.setVisible(false);
     if (this.shieldView.getVisible()) fail('HANDOFF_FAILED', 'Could not reveal the live page');
-    this.contents.focus();
+    if (activate || this.frame.isFocused()) this.contents.focus();
+    else {
+      this.frame.flashFrame(true);
+      this.frame.once('focus', () => { if (!this.frame.isDestroyed()) this.frame.flashFrame(false); });
+    }
     this.refresh();
     this.callbacks.visibility(this.logicalVisible());
   }
@@ -403,7 +412,7 @@ export class PagePresentation {
     this.callbacks.invalidate('logical-hidden');
   }
   show() {
-    this.frame.show();
+    this.frame.showInactive();
     this.callbacks.visibility(this.logicalVisible());
     this.callbacks.invalidate('logical-shown');
   }

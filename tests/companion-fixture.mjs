@@ -14,6 +14,7 @@ export const app = {
 export class BrowserHost {
   constructor(options) { this.options = options; this.closed = false; state.host = this; }
   async close() { this.closed = true; }
+  endSession(sessionId) { (state.endedSessions ??= []).push(sessionId); }
 }
 export class RpcPeer extends EventEmitter {
   constructor(_socket, handler) {

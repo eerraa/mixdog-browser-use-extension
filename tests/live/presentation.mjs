@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
-import { BrowserWindow, webContents } from 'electron';
+import { BrowserWindow, nativeImage, webContents } from 'electron';
 import { fileURLToPath } from 'node:url';
+import { toolResult } from '../../src/tool-schema.mjs';
+
+// The agent-visible text of a host result, exactly as the MCP layer renders it.
+export const rendered = result => toolResult(result, result.action).content[0].text;
+// The ref printed for `role "name"` in a page result.
+export function refOf(result, role, name) {
+  const text = rendered(result);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`(e\\d+) ${role} "${escaped}"`));
+  assert.ok(match, `Expected ${role} "${name}" in:\n${text}`);
+  return match[1];
+}
+// BGR of the on-request screenshot (CSS scale: image pixels are CSS pixels).
+export function pixelAt(screenshot, x, y) {
+  const bitmap = nativeImage.createFromBuffer(Buffer.from(screenshot.data, 'base64')).toBitmap();
+  const offset = (y * screenshot.width + x) * 4;
+  return [...bitmap.subarray(offset, offset + 3)];
+}
 
 // Test-only structural probes of the single-window presentation. A page is a
 // WebContentsView inside its frame window: children are [page view, shield view]

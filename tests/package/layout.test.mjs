@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, readFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 const artifact = process.env.WB_PACKAGE_DIR;
@@ -31,7 +32,7 @@ test('folder includes its launch/runtime/skill/hook dependencies and original re
     'bin/bridge.exe', 'bin/native-consent.exe', 'runtime/electron.exe',
     'runtime/LICENSE', 'runtime/LICENSES.chromium.html', 'runtime/resources.pak',
     'runtime/resources/default_app.asar',
-    'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/toolbar-preload.cjs',
+    'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
     'skills/independent-browser/SKILL.md', 'hooks/hooks.json',
     'LICENSE', 'THIRD_PARTY_NOTICES.md', 'vendor/mixdog/LICENSE', 'vendor/mixdog/NOTICE.md',
     'sources/native/bridge.cpp', 'sources/native/consent.cpp',
@@ -48,6 +49,23 @@ test('folder includes its launch/runtime/skill/hook dependencies and original re
       assert.ok(full.startsWith(path.resolve(artifact) + path.sep));
       await access(full);
     }
+  }
+});
+
+test('shipped vendor/mixdog is exactly the locked upstream set, byte-identical to its locked blobs', async () => {
+  const lock = await json('upstream.lock.json');
+  const shipped = [];
+  const walk = async relative => {
+    for (const entry of await readdir(path.join(artifact, 'vendor/mixdog', relative), { withFileTypes: true })) {
+      const next = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(next); else shipped.push(next);
+    }
+  };
+  await walk('');
+  assert.deepEqual(shipped.sort(), Object.keys(lock.files).sort());
+  for (const [name, expected] of Object.entries(lock.files)) {
+    const bytes = await readFile(path.join(artifact, 'vendor/mixdog', name));
+    assert.equal(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'), expected, name);
   }
 });
 

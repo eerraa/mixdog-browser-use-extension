@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrowserHost } from '../../src/browser/host.mjs';
 import { FrameDriver } from '../../src/browser/frames.mjs';
-import { assertShielded, pageContents, toolbarPreloadPath } from './presentation.mjs';
+import { assertShielded, pageContents, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';
 
 const directory = process.argv[2];
 const scope = process.argv[3];
@@ -68,27 +68,41 @@ async function run() {
     for (const mode of scope === 'shadow' ? [] : ['local', 'scaled', 'mixed', 'mixed-scaled', 'oopif-parent', 'oopif-parent-scaled']) {
       await check(`exact-one nested click ${mode}`, async () => {
         const url = `http://127.0.0.1:${port}/root?mode=${mode}`;
-        const observed = await call({ action: 'open', url });
+        let observed = await call({ action: 'open', url });
         try {
-          assert.equal(observed.disposition, 'observed', JSON.stringify(observed));
+          assert.equal(observed.disposition, 'executed', rendered(observed));
+          // open settles on the root document; a cross-origin iframe may still be loading.
+          for (let tries = 0; tries < 40 && !/button "Nested"/.test(rendered(observed)); tries++) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+            observed = await call({ action: 'observe', tabId: observed.tabId });
+          }
           const guest = pageContents(url);
           const driver = drivers.get(guest);
-          const inner = observed.frames.find(frame => new URL(frame.url).pathname === '/inner');
-          const outer = observed.frames.find(frame => new URL(frame.url).pathname === '/outer');
-          assert.ok(inner && outer);
-          if (mode.startsWith('mixed')) assert.ok(driver.frames.get(inner.frameId).sessionId, 'This case must exercise an actual OOPIF');
+          const frames = await driver.refresh();
+          const inner = frames.find(frame => frame.url && new URL(frame.url).pathname === '/inner');
+          const outer = frames.find(frame => frame.url && new URL(frame.url).pathname === '/outer');
+          assert.ok(inner && outer, JSON.stringify(frames.map(frame => [frame.url, frame.parentId, frame.sessionId])));
+          if (mode.startsWith('mixed')) assert.ok(inner.sessionId, 'This case must exercise an actual OOPIF');
           if (mode.startsWith('oopif-parent')) {
-            assert.ok(driver.frames.get(outer.frameId).sessionId, 'Outer frame must be an actual OOPIF target');
-            assert.equal(driver.frames.get(inner.frameId).sessionId, driver.frames.get(outer.frameId).sessionId);
+            assert.ok(outer.sessionId, 'Outer frame must be an actual OOPIF target');
+            assert.equal(inner.sessionId, outer.sessionId);
           }
-          const ref = inner.elements.find(element => element.name === 'Nested').ref;
-          const point = await driver.point(driver.frames.get(inner.frameId), ref);
+          // Nested frames are inlined below their iframes; the ref acts in the inner document.
+          const ref = refOf(observed, 'button', 'Nested');
+          let point;
+          const send = driver.send;
+          driver.send = function(method, params, ...rest) {
+            if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') point = { x: params.x, y: params.y };
+            return send.call(this, method, params, ...rest);
+          };
+          // Clicked right after open: the first input to a new document waits
+          // for its first presented frame instead of being silently dropped.
           const result = await call({ action: 'click', tabId: observed.tabId, ref });
-          const frame = guest.mainFrame.framesInSubtree.find(f => new URL(f.url).pathname === '/inner');
+          const frame = guest.mainFrame.framesInSubtree.find(f => f.url && new URL(f.url).pathname === '/inner');
           const effect = await frame.executeJavaScript('document.querySelector("output").textContent');
           const expected = mode.includes('scaled') ? { x: 179.5, y: 169 } : { x: 220, y: 200 };
           assert.equal(effect, '1', JSON.stringify({ point, expected, disposition: result.disposition, effect }));
-          assert.equal(result.disposition, 'observed', JSON.stringify(result));
+          assert.equal(result.disposition, 'executed', rendered(result));
           assert.ok(Math.abs(point.x - expected.x) < .01 && Math.abs(point.y - expected.y) < .01, JSON.stringify({ point, expected }));
           assertShielded(guest);
           if (mode === 'local') {
@@ -98,22 +112,18 @@ async function run() {
               cover.style='position:absolute;inset:0;z-index:99999;background:rgba(255,0,0,.1)';
               document.body.append(cover);
             })()`);
-            let fresh = await call({ action: 'observe', tabId: observed.tabId });
-            let nestedRef = fresh.frames.find(f => f.frameId === inner.frameId).elements.find(e => e.name === 'Nested').ref;
-            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref: nestedRef }), error => error.code === 'FRAME_OCCLUDED');
+            // The same ref stays valid; the covered ancestor frame fails before input.
+            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref }), error => error.code === 'FRAME_OCCLUDED'
+              && error.requestedInputDispatched === false);
             assert.equal(await frame.executeJavaScript('document.querySelector("output").textContent'), '1');
             await outerFrame.executeJavaScript('document.querySelector("#cover").remove();document.querySelector("iframe").style.transform="rotate(1deg)"');
-            fresh = await call({ action: 'observe', tabId: observed.tabId });
-            nestedRef = fresh.frames.find(f => f.frameId === inner.frameId).elements.find(e => e.name === 'Nested').ref;
-            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref: nestedRef }), error => error.code === 'UNSUPPORTED_FRAME_GEOMETRY');
+            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref }), error => error.code === 'UNSUPPORTED_FRAME_GEOMETRY');
             assert.equal(await frame.executeJavaScript('document.querySelector("output").textContent'), '1');
             await outerFrame.executeJavaScript('document.querySelector("iframe").style.transform=""');
-            fresh = await call({ action: 'observe', tabId: observed.tabId });
-            nestedRef = fresh.frames.find(f => f.frameId === inner.frameId).elements.find(e => e.name === 'Nested').ref;
             await outerFrame.executeJavaScript(`new Promise(resolve=>{
               const old=document.querySelector('iframe'),next=old.cloneNode();next.onload=()=>resolve(true);old.replaceWith(next);
             })`);
-            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref: nestedRef }), error => /^STALE_/.test(error.code));
+            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref }), error => error.code === 'STALE_REF');
             const replacement = guest.mainFrame.framesInSubtree.find(f => new URL(f.url).pathname === '/inner');
             assert.equal(await replacement.executeJavaScript('document.querySelector("output").textContent'), '0');
           }
@@ -121,14 +131,17 @@ async function run() {
       });
     }
     for (const kind of scope === 'geometry' ? [] : ['text', 'attribute', 'structure', 'attached-root', 'nested-root']) {
-      await check(`shadow ${kind} rejects old ref before any effect`, async () => {
+      // A renamed control is a new element for its old ref; unrelated changes
+      // (structure, new shadow roots) leave the ref acting on its own node.
+      await check(`shadow ${kind}: old ref acts only on its own unchanged node`, async () => {
         const url = `http://127.0.0.1:${port}/shadow?case=${kind}`;
         const observed = await call({ action: 'open', url });
         try {
-          assert.equal(observed.disposition, 'observed', JSON.stringify(observed));
+          assert.equal(observed.disposition, 'executed', rendered(observed));
           assert.equal(JSON.stringify(observed).includes('PRIVATE_SHADOW_PASSWORD'), false);
           const guest = pageContents(url);
-          const ref = observed.frames[0].elements.find(element => element.name === 'Safe').ref;
+          const ref = refOf(observed, 'button', 'Safe');
+          const renamed = kind === 'text' || kind === 'attribute';
           const operations = {
             text: 'document.querySelector("#shadow").shadowRoot.querySelector("button").textContent="Dangerous"',
             attribute: 'document.querySelector("#shadow").shadowRoot.querySelector("button").setAttribute("aria-label","Dangerous")',
@@ -140,25 +153,31 @@ async function run() {
           const attempt = await call({ action: 'click', tabId: observed.tabId, ref }).then(value => ({ value }), error => ({ code: error.code }));
           const count = await guest.executeJavaScript('document.querySelector("#shadow").shadowRoot.querySelector("button").dataset.count||"0"');
           const disposition = { code: attempt.code, disposition: attempt.value?.disposition, count };
-          assert.equal(count, '0', JSON.stringify(disposition));
-          assert.match(attempt.code || '', /^STALE_/, JSON.stringify(disposition));
           let fresh = await call({ action: 'observe', tabId: observed.tabId });
-          let safe = fresh.frames[0].elements.find(element => element.name === (kind === 'text' || kind === 'attribute' ? 'Dangerous' : 'Safe'));
-          assert.ok(safe);
+          if (renamed) {
+            assert.equal(count, '0', JSON.stringify(disposition));
+            assert.equal(attempt.code, 'STALE_REF', JSON.stringify(disposition));
+            const dangerous = refOf(fresh, 'button', 'Dangerous');
+            assert.notEqual(dangerous, ref, 'a renamed control gets a new ref');
+            await call({ action: 'click', tabId: observed.tabId, ref: dangerous });
+          } else {
+            assert.equal(count, '1', JSON.stringify(disposition));
+            assert.equal(attempt.value?.disposition, 'executed', JSON.stringify(disposition));
+          }
           if (kind.endsWith('root')) {
             const root = kind === 'attached-root' ? 'document.querySelector("#late").shadowRoot'
               : 'document.querySelector("#shadow").shadowRoot.querySelector("#nested").shadowRoot';
             await guest.executeJavaScript(`${root}.innerHTML="<button>New action</button>"`);
             fresh = await call({ action: 'observe', tabId: observed.tabId });
-            safe = fresh.frames[0].elements.find(element => element.name === 'Safe');
+            const added = refOf(fresh, 'button', 'New action');
             await guest.executeJavaScript(`${root}.querySelector("button").textContent="Changed action"`);
-            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref: safe.ref }), error => /^STALE_/.test(error.code));
+            await assert.rejects(call({ action: 'click', tabId: observed.tabId, ref: added }), error => error.code === 'STALE_REF');
             fresh = await call({ action: 'observe', tabId: observed.tabId });
-            assert.ok(fresh.frames[0].elements.some(element => element.name === 'Changed action'));
-            safe = fresh.frames[0].elements.find(element => element.name === 'Safe');
+            assert.match(rendered(fresh), /button "Changed action"/);
+            await call({ action: 'click', tabId: observed.tabId, ref });
           }
-          await call({ action: 'click', tabId: observed.tabId, ref: safe.ref });
-          assert.equal(await guest.executeJavaScript('document.querySelector("#shadow").shadowRoot.querySelector("button").dataset.count'), '1');
+          const expected = renamed ? '1' : kind.endsWith('root') ? '2' : '1';
+          assert.equal(await guest.executeJavaScript('document.querySelector("#shadow").shadowRoot.querySelector("button").dataset.count'), expected);
           assert.equal(JSON.stringify(fresh).includes('PRIVATE_SHADOW_PASSWORD'), false);
         } finally { await call({ action: 'close_tab', tabId: observed.tabId }); }
       });

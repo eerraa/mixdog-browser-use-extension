@@ -6,7 +6,7 @@ import path from 'node:path';
 import { BrowserHost } from '../../src/browser/host.mjs';
 import { BrowserPolicy } from '../../src/browser/policy.mjs';
 import { pause } from '../../src/async.mjs';
-import { assertNative, assertShielded, pageContents, presentationOf, toolbarPreloadPath } from './presentation.mjs';
+import { assertNative, assertShielded, pageContents, presentationOf, rendered, toolbarPreloadPath } from './presentation.mjs';
 
 const data = process.argv[2];
 app.setPath('userData', data);
@@ -55,7 +55,8 @@ const caller = {
   assertLive() { controller.signal.throwIfAborted(); },
 };
 const call = args => host.execute(args, caller);
-const has = (state, text) => state.frames.some(frame => frame.text.includes(text));
+// Page text is printed as JSON string literals.
+const has = (state, text) => rendered(state).includes(JSON.stringify(text).slice(1, -1));
 async function pending(tabId, kind) {
   const state = await call({ action: 'requests', tabId });
   const requests = state.pending.filter(request => request.kind === kind);
@@ -79,7 +80,7 @@ try {
   });
   const opened = await call({ action: 'open', url: `http://127.0.0.1:${server.address().port}` });
   const tabId = opened.tabId;
-  assert.equal(opened.disposition, 'observed');
+  assert.equal(opened.disposition, 'executed');
   await call({ action: 'fill', tabId, target: { name: 'Task name', exact: true }, text: 'Autonomous verification' });
   await call({ action: 'select', tabId, target: { name: 'Status', exact: true }, values: ['ready'] });
   let observed = await call({ action: 'click', tabId, target: { name: 'Save local task', exact: true } });
@@ -167,7 +168,7 @@ try {
   request = await pending(tabId, 'javascript-dialog');
   menu('Stop automation');
   observed = await call({ action: 'observe', tabId });
-  assert.equal(observed.paused, 'explicit-stop');
+  assert.equal((await call({ action: 'list_tabs' })).tabs.find(tab => tab.tabId === tabId).paused, 'explicit-stop');
   assert.ok(has(observed, 'rejected'));
   await assert.rejects(call({ action: 'respond', tabId, requestRef: request.requestRef,
     response: { optionRef: request.options[0].optionRef } }), /Automation paused/);
@@ -179,7 +180,7 @@ try {
   await call({ action: 'click', tabId, target: { name: 'Confirm test action', exact: true } });
   request = await pending(tabId, 'javascript-dialog');
   const handoff = await call({ action: 'handoff', tabId });
-  assert.equal(handoff.mode, 'native-handoff');
+  assert.match(rendered(handoff), /^executed handoff tab=t\d+\b.*\nmode native-handoff;/, rendered(handoff));
   assertNative(guest);
   await assert.rejects(call({ action: 'observe', tabId }), error => error.code === 'PRIVATE_HANDOFF');
   await assert.rejects(call({ action: 'respond', tabId, requestRef: request.requestRef,

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { BrowserWindow, nativeImage, screen } from 'electron';
+import { BrowserWindow, screen } from 'electron';
 import { bounded, pause } from '../../src/async.mjs';
 import { TOOLBAR_HEIGHT } from '../../src/browser/presentation.mjs';
 import {
-  assertNative, assertShielded, clickToolbar, menu, pageContents, presentationOf, pressToolbar, toolbarState,
+  assertNative, assertShielded, clickToolbar, menu, pageContents, pixelAt, presentationOf, pressToolbar, refOf, rendered, toolbarState,
 } from './presentation.mjs';
 
 async function until(predicate, label) {
@@ -26,37 +26,37 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
     assertShielded(guest);
   };
   await resume();
-  await check('actual shielded scroll updates DOM and screenshot; old viewport refs are rejected', async () => {
-    const before = await call({ action: 'observe', tabId });
-    const old = before.frames[0].elements.find(e => e.name === 'Add').ref;
+  await check('a point from the latest screenshot scrolls once; refs survive scrolling; old screenshots cannot ground points', async () => {
+    const before = await call({ action: 'observe', tabId, screenshot: true });
+    const add = refOf(before, 'button', 'Add');
     const after = await call({ action: 'scroll', tabId,
-      point: { x: 700, y: 600, snapshotId: before.snapshotId }, deltaX: 0, deltaY: 320 });
-    assert.equal(after.disposition, 'observed', JSON.stringify(after));
-    assert.ok(after.frames[0].scrollY > before.frames[0].scrollY);
+      point: { x: 700, y: 600, snapshotId: before.snapshotId }, deltaX: 0, deltaY: 320, screenshot: true });
+    assert.equal(after.disposition, 'executed', rendered(after));
+    assert.ok(await guest.executeJavaScript('scrollY') > 0);
     assert.notEqual(after.screenshot.data, before.screenshot.data);
-    await assert.rejects(call({ action: 'click', tabId, ref: old }), /stale/i);
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 700, y: 600, snapshotId: before.snapshotId } }),
+      error => error.code === 'STALE_COORDINATES');
     await call({ action: 'evaluate', tabId, expression: 'scrollTo(0,0)' });
+    assert.equal((await call({ action: 'read', tabId, ref: add })).disposition, 'observed', 'a ref survives scrolling');
   });
-  await check('frame replacement invalidates authoritative refs', async () => {
+  await check('frame replacement invalidates refs into the replaced document', async () => {
     const before = await call({ action: 'observe', tabId });
-    const frame = before.frames.find(f => f.elements.some(e => e.name === 'Frame clicked'));
-    assert.ok(frame);
-    const ref = frame.elements.find(e => e.name === 'Frame clicked').ref;
+    const ref = refOf(before, 'button', 'Frame clicked');
     const replacement = await call({ action: 'evaluate', tabId, expression: `new Promise(resolve=>{
       const next=document.createElement('iframe');
       next.onload=()=>resolve('replacement loaded');
       next.src='/frame?replacement';
       document.querySelector('iframe').replaceWith(next);
     })` });
-    assert.equal(replacement.disposition, 'executed', JSON.stringify(replacement));
-    await assert.rejects(call({ action: 'click', tabId, ref }), /stale/i);
+    assert.equal(replacement.disposition, 'executed', rendered(replacement));
+    await assert.rejects(call({ action: 'click', tabId, ref }), error => error.code === 'STALE_REF' && error.requestedInputDispatched === false);
   });
-  await check('native viewport resize invalidates old combined-snapshot coordinates', async () => {
+  await check('native viewport resize invalidates points of the earlier screenshot', async () => {
     // Isolate native resize from the preceding asynchronous iframe replacement.
     const opened = await call({ action: 'open', url: `http://127.0.0.1:${port}/permissions` });
     const resizedPage = pageContents(`http://127.0.0.1:${port}/permissions`);
     const { frame: resizedFrame, view } = presentationOf(resizedPage);
-    const before = await call({ action: 'observe', tabId: opened.tabId });
+    const before = await call({ action: 'observe', tabId: opened.tabId, screenshot: true });
     const size = resizedFrame.getContentSize();
     const resize = async (width, height) => {
       await resizedPage.executeJavaScript('globalThis.__fixtureResize=new Promise(resolve=>addEventListener("resize",()=>resolve(true),{once:true}));true');
@@ -69,7 +69,8 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       assert.deepEqual(view.getBounds(), { x: 0, y: TOOLBAR_HEIGHT, width: content.width, height: content.height - TOOLBAR_HEIGHT },
         'The page view must follow the resized frame below the toolbar');
       assertShielded(resizedPage, 'resized page');
-      await assert.rejects(call({ action: 'click', tabId: opened.tabId, point: { x: 100, y: 100, snapshotId: before.snapshotId } }), /stale/i);
+      await assert.rejects(call({ action: 'click', tabId: opened.tabId, point: { x: 100, y: 100, snapshotId: before.snapshotId } }),
+        error => error.code === 'STALE_COORDINATES');
       await resize(...size);
       const fresh = await call({ action: 'observe', tabId: opened.tabId });
       assert.equal(fresh.disposition, 'observed');
@@ -77,36 +78,34 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
     } finally { await call({ action: 'close_tab', tabId: opened.tabId }); }
   });
   await check('actual parent-frame occlusion rejects child input before dispatch', async () => {
-    const current = await call({ action: 'observe', tabId });
-    const frame = current.frames.find(f => f.url.startsWith('http://localhost:'));
-    const button = frame.elements.find(e => e.name === 'Frame clicked');
-    assert.ok(button);
+    const current = rendered(await call({ action: 'observe', tabId }));
+    const frame = current.match(/(e\d+) iframe localhost:\d+/)?.[1];
+    assert.ok(frame && /button "Frame clicked"/.test(current), current);
     await call({ action: 'evaluate', tabId, expression: `(()=>{
       const cover=document.createElement('div');cover.id='parent-cover';
       cover.style='position:fixed;inset:0;z-index:999999;background:rgba(255,0,0,.1)';
       document.body.append(cover);
     })()` });
     await assert.rejects(call({ action: 'click', tabId, target: {
-      name: 'Frame clicked', exact: true, frameId: frame.frameId,
-    } }), error => error.code === 'FRAME_OCCLUDED');
+      name: 'Frame clicked', exact: true, frame,
+    } }), error => error.code === 'FRAME_OCCLUDED' && error.requestedInputDispatched === false);
     await call({ action: 'evaluate', tabId, expression: 'document.querySelector("#parent-cover").remove()' });
   });
-  await check('offscreen actions prepare fresh state, retain target identity and dispatch exactly once', async () => {
+  await check('offscreen actions scroll their own target into view and dispatch exactly once; a replacement never receives input', async () => {
     for (const replace of [false, true]) {
       const opened = await call({ action: 'open', url: `http://127.0.0.1:${port}/preparation${replace ? '?replace=1' : ''}` });
-      const oldRef = opened.frames[0].elements.find(e => e.name === 'Prepare target').ref;
+      assert.match(rendered(opened), /\n\+1 offscreen \(1 below\): button "Prepare target"/, rendered(opened));
+      const found = await call({ action: 'observe', tabId: opened.tabId, find: 'Prepare target' });
+      const ref = refOf(found, 'button', 'Prepare target');
       try {
         if (replace) {
-          await assert.rejects(call({ action: 'click', tabId: opened.tabId,
-            target: { role: 'button', name: 'Prepare target', exact: true } }), error =>
-            error.requestedInputDispatched === false && ['attempted', 'completed'].includes(error.preparation));
+          await assert.rejects(call({ action: 'click', tabId: opened.tabId, ref }), error =>
+            error.requestedInputDispatched === false && error.preparation === 'scrolled');
         } else {
-          const result = await call({ action: 'click', tabId: opened.tabId,
-            target: { role: 'button', name: 'Prepare target', exact: true } });
-          assert.equal(result.disposition, 'observed');
-          await assert.rejects(call({ action: 'click', tabId: opened.tabId, ref: oldRef }), /stale/i);
+          const result = await call({ action: 'click', tabId: opened.tabId, ref });
+          assert.equal(result.disposition, 'executed', rendered(result));
           await assert.rejects(call({ action: 'click', tabId: opened.tabId,
-            point: { x: 100, y: 100, snapshotId: opened.snapshotId } }), /stale/i);
+            point: { x: 100, y: 100, snapshotId: opened.snapshotId } }), error => error.code === 'POINTS_UNAVAILABLE');
         }
         const state = await call({ action: 'evaluate', tabId: opened.tabId,
           expression: '({count:Number(document.querySelector("#prepared").dataset.clicks),scroll:scrollY})' });
@@ -195,17 +194,14 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       const beforeCounts = new Map([...requestHeaders].map(([url, value]) => [url, value.count]));
       await call({ action: 'click', tabId, target: { name: button, exact: true } });
       const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => !previous.has(t.tabId)), 'owned native popup');
-      const snapshot = await call({ action: 'observe', tabId: popup.tabId });
-      assert.match(snapshot.frames[0].text, expected);
+      const snapshot = await call({ action: 'observe', tabId: popup.tabId, screenshot: true });
+      assert.match(rendered(snapshot), expected);
       const png = snapshot.screenshot;
-      const bitmap = nativeImage.createFromBuffer(Buffer.from(png.data, 'base64')).toBitmap();
-      assert.ok(png.viewportWidth > 220 && png.viewportHeight > 140, 'Fixture pixel must lie inside the popup viewport');
-      const pixel = (Math.round(140 * png.pixelsPerCssY) * png.pixelWidth + Math.round(220 * png.pixelsPerCssX)) * 4;
-      assert.deepEqual([...bitmap.subarray(pixel, pixel + 3)], [0, 190, 0],
-        `Popup fixture pixel: ${JSON.stringify({ button, viewport: [png.viewportWidth, png.viewportHeight], image: [png.pixelWidth, png.pixelHeight] })}`);
+      assert.ok(png.width > 220 && png.height > 140, 'Fixture pixel must lie inside the popup viewport');
+      assert.deepEqual(pixelAt(png, 220, 140), [0, 190, 0], `Popup fixture pixel: ${JSON.stringify({ button, size: [png.width, png.height] })}`);
       assert.equal(popup.mode, 'automation');
-      const returned = await call({ action: 'observe', tabId });
-      assert.match(returned.frames[0].text, opener);
+      const returned = await call({ action: 'observe', tabId, mode: 'text' });
+      assert.match(rendered(returned), opener);
       // document.write can inherit the opener's document URL while its native
       // WebContents remains about:blank. Identify the new frame window itself;
       // its page is the adopted view below the shield.
@@ -230,11 +226,11 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
         await call({ action: 'click', tabId: popup.tabId, target: { name: 'Nested child popup', exact: true } });
         const nested = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => !beforeNested.has(t.tabId)), 'nested popup');
         const nestedObservation = await call({ action: 'observe', tabId: nested.tabId });
-        assert.match(nestedObservation.frames[0].text, /Nested popup/);
+        assert.match(rendered(nestedObservation), /Nested popup/);
         assert.equal(requestHeaders.get('/popup-nested').userAgent, guest.getUserAgent());
         assert.equal(requestHeaders.get('/popup-nested').count, (beforeCounts.get('/popup-nested') ?? 0) + 1);
-        const forwarded = await call({ action: 'observe', tabId });
-        assert.match(forwarded.frames[0].text, /nested-ready/);
+        const forwarded = await call({ action: 'observe', tabId, mode: 'text' });
+        assert.match(rendered(forwarded), /nested-ready/);
         await call({ action: 'close_tab', tabId: nested.tabId });
       }
       if (button === 'Blank popup') {
@@ -250,8 +246,8 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
   });
   await check('shield takeover drains actual dispatch, discards held gesture, and preserves native form and popup mode', async () => {
     const observed = await call({ action: 'observe', tabId });
-    const oldRef = observed.frames[0].elements.find(e => e.name === 'Name').ref;
-    const value = observed.frames[0].elements.find(e => e.name === 'Name').value;
+    const oldRef = refOf(observed, 'textbox', 'Name');
+    const value = await guest.executeJavaScript('document.querySelector("#name").value');
     let began;
     const started = new Promise(resolve => { began = resolve; });
     const listener = (_event, method, params) => {
@@ -291,9 +287,10 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
     await call({ action: 'close_tab', tabId: manualPopup.tabId });
     assert.equal((await state()).mode, 'native-handoff');
     await resume();
-    await assert.rejects(call({ action: 'click', tabId, ref: oldRef }), /stale/i);
+    await assert.rejects(call({ action: 'click', tabId, ref: oldRef }), error => error.code === 'STALE_REF'
+      && /earlier presentation/.test(error.message), 'refs from before a handoff never act after it');
     const returned = await call({ action: 'observe', tabId });
-    assert.equal(returned.frames[0].elements.find(e => e.name === 'Name').value, 'Native route fixture');
+    assert.match(rendered(returned), /textbox "Name"[^\n]*="Native route fixture"/);
   });
   await check('shield removal before admission, frame minimize and unintended hide fail closed; show never clears Stop', async () => {
     // Replaces the old guest.show() exposure: the page becomes reachable by OS
@@ -347,12 +344,7 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } }));
     const url = `http://127.0.0.1:${port}/?covered=1`;
     let coveredTab;
-    const pixel = (observation, expected, label) => {
-      const png = observation.screenshot;
-      const image = nativeImage.createFromBuffer(Buffer.from(png.data, 'base64')).toBitmap();
-      const offset = (Math.round(40 * png.pixelsPerCssY) * png.pixelWidth + Math.round(820 * png.pixelsPerCssX)) * 4;
-      assert.deepEqual([...image.subarray(offset, offset + 3)], expected, label);
-    };
+    const pixel = (observation, expected, label) => assert.deepEqual(pixelAt(observation.screenshot, 820, 40), expected, label);
     try {
       for (const cover of covers) {
         cover.setAlwaysOnTop(true, 'screen-saver');
@@ -361,9 +353,9 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       }
       await pause(500);
       assert.ok(covers.every(cover => cover.isVisible()));
-      const opened = await call({ action: 'open', url });
+      const opened = await call({ action: 'open', url, screenshot: true });
       coveredTab = opened.tabId;
-      assert.equal(opened.disposition, 'observed', JSON.stringify({ ...opened, screenshot: undefined, frames: undefined }));
+      assert.deepEqual([opened.disposition, opened.observed], ['executed', undefined], rendered(opened));
       const page = pageContents(url);
       const { frame: coveredFrame } = presentationOf(page);
       const content = coveredFrame.getContentBounds();
@@ -375,9 +367,9 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       pixel(opened, [0, 0, 220], 'Covered first capture must contain current red fixture pixels');
       const observed = await call({ action: 'observe', tabId: coveredTab });
       assert.equal(observed.disposition, 'observed');
-      const clicked = await call({ action: 'click', tabId: coveredTab, target: { name: 'Add', exact: true } });
-      assert.equal(clicked.disposition, 'observed', JSON.stringify({ ...clicked, screenshot: undefined, frames: undefined }));
-      assert.match(clicked.frames[0].text, /1/);
+      const clicked = await call({ action: 'click', tabId: coveredTab, target: { name: 'Add', exact: true }, screenshot: true });
+      assert.deepEqual([clicked.disposition, clicked.observed], ['executed', undefined], rendered(clicked));
+      assert.match(rendered(clicked), /status ="1"/);
       pixel(clicked, [0, 190, 0], 'Covered click capture must show new green fixture pixels');
       assert.equal(await page.executeJavaScript('document.querySelector("#result").textContent'), '1');
     } finally {
@@ -446,7 +438,7 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       await until(async () => { const t = await tab(); return t.mode === 'automation' && !t.paused; }, 'toolbar resume');
       assertShielded(page, 'after toolbar resume');
       const fresh = await call({ action: 'observe', tabId: id });
-      assert.match(fresh.frames[0].text, /Toolbar page A/);
+      assert.match(rendered(fresh), /h1 "Toolbar page A"/);
       current = await ui(s => s.tone === 'agent');
       assert.equal(current.readOnly, true);
       assert.equal(current.back, true);

@@ -127,7 +127,7 @@ async function run() {
       assert.deepEqual(main, Array.from({ length: 5 }, () => expected));
       await driver.refresh();
       const root = [...driver.frames.values()].find(frame => !frame.parentId);
-      const isolated = await driver.evaluateUser(root, WORKER_PROBE_EXPRESSION);
+      const isolated = await driver.evaluateUser(root, WORKER_PROBE_EXPRESSION, 'isolated', await driver.evaluationContext(root));
       assert.deepEqual(isolated, expected);
       await driver.waitForIdle();
       assert.equal(page.frameFailure ?? null, null);

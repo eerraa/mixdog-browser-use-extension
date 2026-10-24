@@ -6,8 +6,8 @@ dependency order, the contracts to keep, tests, and docs to update. Structure:
 
 ## R1 `browse` action or argument
 
-- Edit: `src/browser/contract.mjs` (`fields`, `inputActions`, `keys`, `validateArgs`) → `src/tool-schema.mjs` (`inputSchema` property and description) → `src/browser/host.mjs` (`execute` for immediate actions; `#run` and `#perform` for lane work; call `markSent` right before dispatch).
-- Keep: `contracts.md` Observation and input. Every mutating action belongs in `inputActions`.
+- Edit: `src/browser/contract.mjs` (`fields`, `inputActions`, `keys`, `validateArgs`) → `src/tool-schema.mjs` (`inputSchema` property and description; `JSON_ACTIONS` when the result is structured data rather than a page) → `src/browser/host.mjs` (`execute` for immediate actions; `#run`, `#validate` and `#perform` for lane work; call `markSent` right before dispatch; page results through `#present`).
+- Keep: `contracts.md` Observation and input and Result vocabulary (`isError`). Every mutating action belongs in `inputActions`.
 - Test: `tests/browser/contract.test.mjs` (enumerates every action), `tests/browser/host.test.mjs`; real browser effect → `tests/live/scenarios.mjs`; MCP-visible → `tests/package/mcp.test.mjs`.
 - Docs: `SKILL.md`, `README.md` action table.
 
@@ -30,18 +30,21 @@ dependency order, the contracts to keep, tests, and docs to update. Structure:
 
 ## R4 Observation, targeting, frames, input dispatch
 
-- Edit: `frames.mjs` (`capture`, `checkpoint`, `assertCheckpoints`, `prepare`, `point`, `toRoot`, `presented`, target and worker attach); `host.mjs` (`#observe`, `#captureImage`, `#fresh`, `#resolve`, `#perform`); `contract.mjs` (`matchesTarget`, `sameCheckpoint`, `keys`).
-- Upstream behavior: adapt in `scripts/build.mjs` with an exact-once guard; never edit `vendor/`.
-- Keep: `contracts.md` Observation and input.
-- Test: `frames.test.mjs`, `contract.test.mjs`, `host.test.mjs`; live `review-regressions` (geometry, shadow), `observation`, `workers`; package nested-frame test.
-- Docs: `SKILL.md` targeting guidance when agent-visible.
+- What the walker sees (roles, names, text, sensitivity and handoff privatization, label proxies, occlusion, quiet, ids, the dispatch guard, the trusted-input listeners): `src/browser/perception/walker.mjs`. Frame composition: `model.mjs`. Ref lifetime: `refs.mjs` and `host.mjs #perceive`, `#liveRef`. Text, budgets, diff and find: `render.mjs`. Settle bounds: `settle.mjs SETTLE_BOUNDS`. Signals: `signals.mjs` and `host.mjs #signal`, `#drainSignals`.
+- CDP side: `frames.mjs` (walker installation and `FRAME_CAP`, `#rebuild` per-frame degradation, `snapshot`, `quiet`, `describe`, `resolveObject`, `inView`, `prepare`, `pointFor` with `#ownersStable`, `toRoot`, `hitChain`, `armGuard`, `sensitivePresent`, `privatize`, `inputReady`, `presented`, target and worker attach, `INPUT_BINDING`); `host.mjs` (`#read`, `#perceive`, `#present`, `#screenshot`, `#validate`, `#validatePoint`, `#perform`, `#dispatchInput`, `#assertNoSensitive`, `#signal`, `#beginPrivate`); `contract.mjs` (`keys`, target fields, `find` words-only rule).
+- Live proof for security-relevant behavior (handoff privacy, frame races, sensitive fields, points, escape paths, bounds): `tests/live/security-harness.mjs`.
+- Upstream behavior: adapt in `scripts/build.mjs` with an exact-once guard; never edit `vendor/`. Extracted walker functions: `walker.mjs extractUpstreamSources` (each guard must match once).
+- Keep: `contracts.md` Observation and input (privacy exclusions, ref lifetime, pipeline order, disposition, live regions in diffs) and D13–D19.
+- Test: `tests/browser/perception.test.mjs` (pure modules), `frames.test.mjs`, `contract.test.mjs`, `host.test.mjs`; live `perception` (real Chromium walker), `review-regressions` (geometry, shadow), `observation`, `workers`, `scenarios.mjs`; package nested-frame test.
+- Measure: when the projection changes, re-measure tokens on a large page with `estimateTokens` and report the numbers.
+- Docs: `contracts.md` text grammar, `SKILL.md` Reading results and targeting guidance.
 
 ## R5 JS dialogs, file uploads, downloads
 
 - Dialogs: `dialogs.mjs` (Electron-pinned adapter), `host.mjs` `#nativeDialog`, `#humanDialog` and the `handle_dialog` branch of `execute`, `frames.mjs` `Page.javascriptDialog*`.
 - Uploads: `host.mjs` `#nativeFilePicker`, `#validateFiles`, upload in `#perform`; `frames.mjs` `Page.fileChooserOpened`.
 - Downloads: `host.mjs #profile` `will-download`. Registry: `requests.mjs`.
-- Keep: refs are not approvals; a dispatched dialog response is never repeated (`DIALOG_UNCERTAIN`); uploads take explicit absolute regular files only.
+- Keep: refs are not approvals; a dispatched dialog response is never repeated (`DIALOG_UNCERTAIN`); uploads take local drive-letter regular files only, resolved to their real path, with network and device paths refused before any filesystem call (`BrowserHost#validateFiles`).
 - Test: `dialogs.test.mjs`, `requests.test.mjs`, `host.test.mjs`; live `autonomous`; package request test.
 - Docs: `README.md` limits, `SKILL.md` step 4, `status().capabilities`.
 
@@ -90,8 +93,8 @@ Avoid: it breaks existing registrations. Change together: `plugin.json` (`name`,
 
 ## R13 Upstream Mixdog upgrade
 
-- Edit in order: `upstream.lock.json` (commit, version, git-blob sha1 per file) → `npm run vendor` → `src/upstream-entry.mjs` exports → `scripts/build.mjs` adapters and banner commit → attribution comment in `src/core/queue.mjs` → `THIRD_PARTY_NOTICES.md` (version, commit, files). Finder: `grep -rn 968ee089`.
-- Test: `test:browser` (frames), live suites, package suite.
+- Edit in order: `upstream.lock.json` (commit, version, git-blob sha1 per file; the package ships exactly these files) → `npm run vendor` → `src/upstream-entry.mjs` exports → `scripts/build.mjs` adapters and banner commit → `walker.mjs extractUpstreamSources` guards when `snapshot-scripts.ts` changed → attribution comment in `src/core/queue.mjs` → `THIRD_PARTY_NOTICES.md` (version, commit, files). Finder: `grep -rn 968ee089`.
+- Test: `test:browser` (frames, perception extraction), live suites, package suite.
 
 ## R14 MCP SDK upgrade
 
@@ -104,3 +107,28 @@ Avoid: it breaks existing registrations. Change together: `plugin.json` (`name`,
 ## R16 Browser identity (user agent)
 
 `src/browser/user-agent.mjs`. Test: `tests/browser/user-agent.test.mjs`, `tests/companion-fixture.mjs`, identity baseline run in `tests/live/browser-host.test.mjs`. Docs: `README.md` 권한과 안전 경계.
+
+## R17 Agent DevTools: console, network, inspect, performance, page world, human DevTools
+
+- Records, formats, limits, redaction, privacy windows: `src/browser/devtools.mjs` (`DevToolsRecorder.attach`, `detach`, `record`, `boundary`, `consoleRows`, `networkRows`, `detail`, `bodyTarget`; `PrivacyWindows`; `redactURL`, `redactText`, `redactHeaders`, `redactBody`; `DEVTOOLS_LIMITS`). A new CDP event or domain starts in `attach` and `record`.
+- Any new regex on page text: cut the input first (`redactClip`), keep it linear, and add the input to the 64 KiB adversarial test in `devtools.test.mjs`.
+- Privacy: page windows follow the page mode; `profile.devtoolsPrivacy` (`host.mjs #registerPage`) covers service and shared workers. Mode transitions reach `host.mjs #devtoolsMode`.
+- Reads: `devtools.mjs` (`pageRead`, `responseBody`, `performanceSnapshot`, `selectElement`, `inspectNode`, `INSPECT_ELEMENT`) → `host.mjs` (`#devtoolsRead`, `#inspect`, routing in `execute` and `#run`). Keep the host interface narrow; formatting stays in `devtools.mjs`.
+- CDP plumbing: `frames.mjs` (`#record` at the start of `enable` and after worker release, `devtoolsFlush`, `onMessage` forwarding and console-store discard, worker `Runtime` events as records only, `#trackPageWorld`, `pageContext`, `devtoolsCommand`, `evaluateUser(world)`).
+- Arguments: R1 (`contract.mjs` `fields`, `devtoolsActions`, `validateArgs`; `tool-schema.mjs`). Keep schema growth to one-line descriptions.
+- Human DevTools: `consent.mjs installPageMenu` (`open-devtools` item), `host.mjs` (`#openDevTools` with `devtoolsOpening`, `#closeDevTools` from `#devtoolsMode` and `#resume`, `devtools-opened` guard, frame `closed`).
+- Result signals: `DevToolsRecorder.since(cursor)` → `host.mjs #drainSignals` (counts only). Dialog-first refusals: `host.mjs #dialogFirst`.
+- Keep: `contracts.md` DevTools reads and Human DevTools; D11, D12 exclusions; no observation, PNG or ref change in DevTools outputs; nothing recorded outside `automation`.
+- Test: `tests/browser/devtools.test.mjs` (recorder, redaction, adversarial input timing, redirects, privacy windows, page read), `frames.test.mjs` (recording order, worker fence, replays, discard, flush, page worlds), `host.test.mjs` (gates, lane independence, Stop, profile-shared workers, human DevTools exits), `contract.test.mjs`; live `tests/live/devtools-harness.mjs`; package DevTools test in `tests/package/mcp.test.mjs`.
+- Docs: `SKILL.md` DevTools section, `README.md` action table and 개발자 도구 paragraph, `architecture.md` CDP rows.
+
+## R18 Script runner (`run`)
+
+- Script API (what scripts can call): `src/browser/runner/api.mjs runnerApi` (self-contained; serialized with `toString`). A new method maps to an existing op or needs a new op below.
+- Ops and their rules: `src/browser/runner/bridge.mjs` (`RUNNER_OPS` allowlist, `validateOp` shapes, `RETRY` auto-wait codes, `TERMINAL` and `pauseStatus`, seal on uncertain, step labels that never echo typed text). An op is one `execute` call; never add `run`, `handoff`, `respond`, `revoke`, points or page-world evaluate.
+- Run lifecycle and report: `run.mjs` (`runScript`, `RUN_LIMITS`, watch for Stop and handoff, deadline, final views); bounds shared with `contract.mjs RUN_BOUNDS`.
+- Sandbox: `sandbox.mjs` (window preferences, partition, request cancel, CSP, `routeOp` nonce and sender checks) and `preload.cjs`; shipped as `app/runner-preload.cjs` by `scripts/build.mjs`, passed by `companion-main.mjs` as `runnerPreloadPath`.
+- Host: `host.mjs #runScript` (routing, `keepSignals`, final `#run` observe-after); arguments through R1 (`contract.mjs` `fields.run`, `tool-schema.mjs` `script`, `timeoutMs`).
+- Keep: `contracts.md` Script runner; D20; every op through the same gates; nothing resent; the seal holds after a caught uncertain step.
+- Test: `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), `host.test.mjs` run test, `contract.test.mjs`; live `tests/live/runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); package run test in `tests/package/mcp.test.mjs`.
+- Docs: `SKILL.md` Scripts section, `README.md` action table, `contracts.md` Script runner.

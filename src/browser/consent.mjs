@@ -102,13 +102,15 @@ export class ConsentSurface {
   }
 }
 
-export function installPageMenu(window, { stop, resume, handoff, revoke, acceptDialog, dismissDialog }) {
+export function installPageMenu(window, { stop, resume, handoff, revoke, acceptDialog, dismissDialog, openDevTools }) {
   const menu = Menu.buildFromTemplate([
     { label: 'Stop automation', click: stop },
     { label: 'Resume automation', click: resume },
     { label: 'Human handoff', click: handoff },
     { label: 'Accept pending page dialog', click: acceptDialog },
     { label: 'Dismiss pending page dialog', click: dismissDialog },
+    // Enabled only in native handoff; the host refuses it in every other mode.
+    { id: 'open-devtools', label: 'Open DevTools (while you have control)', enabled: false, click: openDevTools },
     { label: 'Revoke permissions and close connection', click: async () => {
       const result = await showManualMessageBox(window, {
         type: 'warning', message: 'Close all plugin browser windows in this connection?',

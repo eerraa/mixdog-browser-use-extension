@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,13 +15,15 @@ registerHooks({
 const { deliverFocus, FixtureContents, ownedViews, ownedWindows, profiles, dialog } = await import('./electron-fixture.mjs');
 const { BrowserHost } = await import('../../src/browser/host.mjs');
 const { BrowserHostError } = await import('../../src/browser/contract.mjs');
-const { FrameDriver } = await import('../../src/browser/frames.mjs');
+const { FrameDriver, INPUT_BINDING } = await import('../../src/browser/frames.mjs');
 const { BrowserPolicy } = await import('../../src/browser/policy.mjs');
 
 // Stub ONLY the CDP boundary. Exercise the real host, queue, caller authority
 // checks, permission callback policy, registry and trusted native menu routing.
 const original = {};
-for (const key of ['start', 'capture', 'assertCheckpoints', 'refresh', 'presented', 'evaluateUser', 'reconnect', 'send']) original[key] = FrameDriver.prototype[key];
+const stubbed = ['start', 'snapshot', 'quiet', 'refresh', 'presented', 'inputReady', 'evaluationContext', 'evaluateUser', 'reconnect', 'send',
+  'describe', 'resolveObject', 'pointFor', 'viewport', 'textIncludes', 'callOn', 'prepare', 'release'];
+for (const key of stubbed) original[key] = FrameDriver.prototype[key];
 const drivers = new WeakMap();
 FrameDriver.prototype.start = async function() {
   drivers.set(this.page.contents, this);
@@ -31,19 +33,68 @@ FrameDriver.prototype.reconnect = async function() {
   this.frames.clear();
   this.frames.set('root', { id: 'root', documentId: 'new-unit-document', contextId: 2 });
 };
-FrameDriver.prototype.capture = async function(snapshotId) {
-  return {
-    output: [{ frameId: 'root', documentId: 'unit-document', revision: 0, text: 'Unit fixture', elements: [], snapshotId, viewportWidth: 100, viewportHeight: 80 }],
-    checkpoints: new Map([['root', { documentId: 'unit-document', revision: 0 }]]),
-  };
+// The page as the walker would report it: `page.nodes` (walker nodes) in one
+// root document `page.document`. Element ids are walker-local.
+const page = { nodes: [], document: 'D1', removed: new Set() };
+const button = (id, name, extra = {}) => ({ id, p: 0, k: 'i', r: 'button', n: name, s: [], b: [10, 10 + id * 12, 60, 10], vp: true, o: id, ...extra });
+FrameDriver.prototype.snapshot = async function() {
+  return [{ frameId: 'root', parentId: null, url: this.page.contents.getURL(), ownerId: null, snapshot: {
+    checkpoint: { documentId: page.document, revision: 0, w: 100, h: 80, x: 0, y: 0, dpr: 1 },
+    url: this.page.contents.getURL(), title: 'Unit fixture', scrollHeight: 80,
+    nodes: page.nodes.filter(node => !page.removed.has(node.id)),
+    texts: [{ p: 0, t: 'Unit fixture', b: [0, 0, 50, 8], vp: true, o: 0 }],
+    gone: [], renamed: [], scanned: 1, capped: false,
+  } }];
 };
-FrameDriver.prototype.assertCheckpoints = async () => {};
+FrameDriver.prototype.quiet = async () => ({ quiet: true });
 FrameDriver.prototype.presented = async () => {};
+FrameDriver.prototype.inputReady = async () => {};
 FrameDriver.prototype.refresh = async function() { return [...this.frames.values()]; };
+FrameDriver.prototype.describe = async (_frame, id, documentId) => {
+  if (documentId !== page.document) return { stale: 'document' };
+  const node = page.nodes.find(value => value.id === id && !page.removed.has(id));
+  return { described: node ? { role: node.r, name: node.n } : null };
+};
+FrameDriver.prototype.resolveObject = async (_frame, id) => `node-${id}`;
+FrameDriver.prototype.pointFor = async (_frame, id) => ({ x: 20, y: 12 + id * 12 });
+// Walker-world checks: live in-view state, the one-shot dispatch guard, the
+// sensitive-field refusal, handoff privatization and the point hit chain.
+FrameDriver.prototype.inView = async () => ({ inView: true, proxied: false });
+let guardOutcome = { fired: true, inside: true };
+FrameDriver.prototype.armGuard = async () => ({ armed: true });
+FrameDriver.prototype.disarmGuard = async () => guardOutcome;
+let sensitivePresent = false;
+FrameDriver.prototype.sensitivePresent = async () => sensitivePresent;
+const privatized = [];
+FrameDriver.prototype.privatize = async since => { privatized.push(since); };
+let hitChain = { hops: [{ role: 'button', name: 'Unit', opacity: 1, visible: true, document: { url: 'http://127.0.0.1:8000/' } }], opacity: 1 };
+FrameDriver.prototype.hitChain = async () => hitChain;
+FrameDriver.prototype.viewport = async () => ({ documentId: page.document, w: 100, h: 80, x: 0, y: 0 });
+FrameDriver.prototype.textIncludes = async text => text === 'Unit fixture';
+FrameDriver.prototype.prepare = async () => {};
+FrameDriver.prototype.release = async () => {};
+let callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+// A function in the mutation slot runs inside the dispatch guard, right before
+// the command is sent (it marks the input as sent), like FrameDriver#guard.
+FrameDriver.prototype.callOn = async function(...args) {
+  if (typeof args[5] === 'function') { this.beforeInputDispatch?.(); args[5](); }
+  return callOn(...args);
+};
 let evaluate = async () => 'unit-result';
 let send = async () => ({});
-FrameDriver.prototype.evaluateUser = async function(_frame, expression) { return evaluate(expression); };
-FrameDriver.prototype.send = async function(method, params) { return send(method, params); };
+FrameDriver.prototype.evaluationContext = async (_frame, world) => world ?? 'isolated';
+FrameDriver.prototype.evaluateUser = async function(_frame, expression, world, _contextId, beforeDispatch) {
+  this.beforeInputDispatch?.();
+  if (typeof beforeDispatch === 'function') beforeDispatch();
+  return evaluate(expression, world);
+};
+FrameDriver.prototype.send = async function(method, params, _sessionId, _signal, beforeDispatch) {
+  beforeDispatch?.();
+  return send(method, params);
+};
+// The status line and text of a page result, as the MCP layer renders it.
+const { toolResult } = await import('../../src/tool-schema.mjs');
+const rendered = (result, action = result.action) => toolResult(result, action).content[0].text;
 const caller = owner => {
   const controller = new AbortController();
   return { sessionId: owner, callId: 'unit-call', signal: controller.signal, controller,
@@ -174,11 +225,11 @@ test('request cancellation settles promptly but the next actual dispatch remains
     const first = host.execute({ action: 'evaluate', tabId, expression: 'first' }, authority, abort.signal);
     await started.promise;
     abort.abort(new Error('unit cancel'));
-    assert.deepEqual(await first, {
-      tabId, disposition: 'uncertain', replaySafe: false,
-      code: 'ABORTED',
-      reason: 'Caller cancelled, timed out or automation stopped after dispatch',
-    });
+    const cancelled = await first;
+    assert.deepEqual([cancelled.tabId, cancelled.disposition, cancelled.replaySafe, cancelled.code], [tabId, 'uncertain', false, 'ABORTED']);
+    assert.equal(rendered(cancelled), 'uncertain evaluate tab=t1 code=ABORTED replaySafe=false\n'
+      + 'note the input may have been delivered in part or in full; never repeat it; observe first');
+    assert.equal(toolResult(cancelled, 'evaluate').isError, true);
     const second = call({ action: 'evaluate', tabId, expression: 'second' });
     await tick();
     assert.deepEqual(dispatched, ['first']);
@@ -552,6 +603,21 @@ test('a native request can be answered while its originating evaluation still ow
   } finally { released.resolve(); evaluate = async () => 'unit-result'; send = async () => ({}); await host.close(); }
 });
 
+test('a file chooser that opens just before its input is acknowledged leaves the action executed, not uncertain', async () => {
+  const { host, tab, tabId, call } = await setup({ policy: delegatedPolicy() });
+  const driver = drivers.get(tab.contents);
+  evaluate = async () => {
+    driver.onMessage('Page.fileChooserOpened', { frameId: 'root', backendNodeId: 3, mode: 'selectSingle' });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    return 'opened';
+  };
+  try {
+    const result = await call({ action: 'evaluate', tabId, expression: 'input.click()' });
+    assert.equal(result.disposition, 'executed', result.text);
+    assert.equal((await call({ action: 'requests', tabId })).pending[0].kind, 'file-picker');
+  } finally { evaluate = async () => 'unit-result'; await host.close(); }
+});
+
 test('file-picker responses preserve the exact input, multiplicity and existing files on cancel', async () => {
   const { host, tab,tabId, call, dataDir } = await setup({ policy: delegatedPolicy() });
   const driver = drivers.get(tab.contents);
@@ -700,46 +766,59 @@ test('missing native dialog-close confirmation returns uncertainty and cannot be
   } finally { native.close(); t.mock.timers.reset(); await host.close(); }
 });
 
-test('recoverable post-navigation checkpoint failure exposes only a safe code and recovers by observe without navigation replay', async () => {
+test('an acknowledged dispatch whose observation fails is executed observed:false after one re-take, never resent', async () => {
   const { host, call, tabId, tab } = await setup();
-  const driver = drivers.get(tab.contents), capture = driver.capture;
+  const driver = drivers.get(tab.contents), snapshot = driver.snapshot;
   const loadURL = tab.contents.loadURL.bind(tab.contents);
-  let navigations = 0;
+  let navigations = 0, snapshots = 0;
   tab.contents.loadURL = async url => { navigations++; return loadURL(url); };
-  driver.capture = async () => { throw new BrowserHostError('OBSERVATION_CHANGED', 'DO_NOT_EXPORT_PRIVATE_ERROR_DETAILS'); };
+  driver.snapshot = async () => { snapshots++; throw new BrowserHostError('ROOT_UNAVAILABLE', 'DO_NOT_EXPORT_PRIVATE_ERROR_DETAILS'); };
   try {
     const result = await call({ action: 'navigate', tabId, url: 'http://127.0.0.1:8000/next' });
-    assert.equal(result.disposition, 'uncertain');
-    assert.equal(result.code, 'OBSERVATION_CHANGED');
-    assert.equal(result.replaySafe, false);
+    assert.deepEqual([result.disposition, result.observed, result.cause, result.replaySafe], ['executed', false, 'ROOT_UNAVAILABLE', false]);
+    assert.equal(snapshots, 2, 'one read-only re-take');
+    const text = rendered(result);
+    assert.match(text, /^executed navigate tab=t\d+ observed=false cause=ROOT_UNAVAILABLE replaySafe=false\n/);
+    assert.match(text, /never repeat it/);
+    assert.equal(toolResult(result, 'navigate').isError, false);
     assert.equal(JSON.stringify(result).includes('DO_NOT_EXPORT_PRIVATE_ERROR_DETAILS'), false);
     assert.equal(navigations, 1);
-    driver.capture = capture;
-    assert.equal((await call({ action: 'observe', tabId })).disposition, 'observed');
+    // A first failure followed by a successful re-take is a normal result.
+    let failures = 0;
+    driver.snapshot = async (...args) => { if (failures-- > 0) throw new Error('transient'); return snapshot.apply(driver, args); };
+    let clicks = 0;
+    send = async (method, params) => { if (params?.type === 'mousePressed') clicks++; return {}; };
+    page.nodes = [button(1, 'Go')];
+    const observed = await call({ action: 'observe', tabId });
+    const go = rendered(observed).match(/(e\d+) button "Go"/)[1];
+    failures = 1;
+    const clicked = await call({ action: 'click', tabId, ref: go });
+    assert.deepEqual([clicked.disposition, clicked.observed], ['executed', undefined]);
+    assert.equal(clicks, 1);
     assert.equal(navigations, 1);
-  } finally { driver.capture = capture; await host.close(); }
+  } finally { driver.snapshot = snapshot; send = async () => ({}); page.nodes = []; await host.close(); }
 });
 
-test('native image failures expose only a safe code and preserve the strict checkpoint', async () => {
+test('internal observations never capture images; screenshots are on request at CSS scale', async () => {
   const { host, call, tabId, tab } = await setup();
-  const driver = drivers.get(tab.contents), capture = driver.capture, check = driver.assertCheckpoints;
   const capturePage = tab.contents.capturePage;
-  const order = [];
-  tab.contents.capturePage = async (...args) => { order.push('image'); return capturePage(...args); };
-  driver.capture = async (...args) => { order.push('dom'); return capture.apply(driver, args); };
-  driver.assertCheckpoints = async (...args) => { order.push('check'); return check.apply(driver, args); };
   try {
-    assert.equal((await call({ action: 'observe', tabId })).disposition, 'observed');
-    assert.deepEqual(order, ['dom', 'image', 'check']);
+    tab.contents.captures = 0;
+    const observed = await call({ action: 'observe', tabId });
+    await call({ action: 'evaluate', tabId, expression: 'x' });
+    assert.equal(tab.contents.captures, 0);
+    assert.equal(toolResult(observed, 'observe').content.length, 1, 'no image block by default');
+    const shot = await call({ action: 'observe', tabId, screenshot: true });
+    assert.deepEqual([shot.screenshot.width, shot.screenshot.height], [100, 80]);
+    assert.match(rendered(shot), /\nview 100x80 scroll 0\/80 points\n/);
+    assert.equal(toolResult(shot, 'observe').content[1].type, 'image');
     tab.contents.capturePage = async () => { throw new Error('DO_NOT_EXPORT_NATIVE_CAPTURE_DETAILS'); };
-    const result = await call({ action: 'evaluate', tabId, expression: 'one-dispatch' });
-    assert.equal(result.disposition, 'uncertain');
-    assert.equal(result.code, 'CAPTURE_FAILED');
-    assert.equal(JSON.stringify(result).includes('DO_NOT_EXPORT_NATIVE_CAPTURE_DETAILS'), false);
-  } finally {
-    tab.contents.capturePage = capturePage; driver.capture = capture; driver.assertCheckpoints = check;
-    await host.close();
-  }
+    await assert.rejects(call({ action: 'observe', tabId, screenshot: true }), error => error.code === 'CAPTURE_FAILED'
+      && !error.message.includes('DO_NOT_EXPORT'));
+    // An image failure after an acknowledged dispatch never makes it uncertain.
+    const result = await call({ action: 'evaluate', tabId, expression: 'one-dispatch', screenshot: true });
+    assert.deepEqual([result.disposition, result.observed, result.cause], ['executed', false, 'CAPTURE_FAILED']);
+  } finally { tab.contents.capturePage = capturePage; await host.close(); }
 });
 
 test('cancellation of dialog cleanup settles caller without authorizing a second response', async () => {
@@ -1309,7 +1388,7 @@ test('native selection and authorization are irreversibly withdrawn at browser t
               assert.equal(adapter.makeRequest(page, frame, 'hid', { deviceId: 'new-request' }), null);
             } finally { idle.resolve(); await returning; }
           } else if (transition === 'failed-resume') {
-            driver.capture = async () => { throw new Error('Fixture return failure'); };
+            driver.snapshot = async () => { throw new Error('Fixture return failure'); };
             await tab.frame.menu.items.find(i => i.label === 'Resume automation').click();
             assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'draining');
             await call({ action: 'handoff', tabId });
@@ -1413,6 +1492,683 @@ test('USB and HID native removal payloads withdraw exact offered devices before 
       assert.equal(chosen, undefined);
     }
   } finally { dialog.showMessageBox = originalDialog; await host.close(); }
+});
+
+const consoleEvent = (driver, value, type = 'log') => driver.onMessage('Runtime.consoleAPICalled', {
+  type, args: [{ type: 'string', value }], timestamp: Date.now(),
+}, '');
+const requestEvent = (driver, requestId, url) => driver.onMessage('Network.requestWillBeSent', {
+  requestId, request: { url, method: 'GET', headers: { Cookie: 'sid=SECRET' } }, type: 'Fetch',
+  timestamp: 1, wallTime: Date.now() / 1000, initiator: { type: 'script' },
+}, '');
+
+test('DevTools reads are compact, gated like observe and answer while an action holds the tab lane', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  const gate = deferred();
+  try {
+    consoleEvent(driver, 'load failure', 'error');
+    requestEvent(driver, 'r', 'http://127.0.0.1:8000/api');
+    evaluate = () => gate.promise;
+    const busy = call({ action: 'evaluate', tabId, expression: 'slow' });
+    await tick();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].busy, true);
+    const consoleRows = await call({ action: 'console', tabId });
+    assert.deepEqual(consoleRows, { tabId, rows: [{ i: 1, lv: 'error', msg: 'load failure' }], next: 1 });
+    const network = await call({ action: 'network', tabId });
+    assert.deepEqual(network, { tabId, rows: [{ id: 'n1', u: 'http://127.0.0.1:8000/api', ty: 'fetch', st: 'run' }], next: 1 });
+    const detail = await call({ action: 'network', tabId, id: 'n1' });
+    assert.equal(detail.reqHeaders.Cookie, '[redacted]');
+    for (const result of [consoleRows, network, detail]) {
+      assert.equal(['observation', 'screenshot', 'snapshotId', 'frames'].some(key => key in result), false);
+    }
+    gate.resolve('done');
+    assert.equal((await busy).value, 'done');
+    await assert.rejects(host.execute({ action: 'console', tabId }, caller('two')), error => error.code === 'FOREIGN_TAB');
+    await call({ action: 'handoff', tabId });
+    for (const args of [{ action: 'console', tabId }, { action: 'network', tabId }, { action: 'network', tabId, id: 'n1' },
+      { action: 'performance', tabId }, { action: 'console', tabId, expression: '1' }, { action: 'inspect', tabId, ref: 'e1' }]) {
+      await assert.rejects(call(args), error => error.code === 'PRIVATE_HANDOFF', JSON.stringify(args));
+    }
+  } finally {
+    gate.resolve('done');
+    evaluate = async () => 'unit-result';
+    await host.close();
+  }
+});
+
+test('evaluate runs in the isolated world unless world:"page" explicitly opts into the page main world', async () => {
+  const { host, call, tabId } = await setup();
+  try {
+    evaluate = async (_expression, world) => world ?? 'isolated';
+    const isolated = await call({ action: 'evaluate', tabId, expression: 'x' });
+    const main = await call({ action: 'evaluate', tabId, expression: 'x', world: 'page' });
+    assert.deepEqual([isolated.value, isolated.disposition], ['isolated', 'executed']);
+    assert.deepEqual([main.value, main.disposition], ['page', 'executed']);
+  } finally {
+    evaluate = async () => 'unit-result';
+    await host.close();
+  }
+});
+
+test('human DevTools open only in native handoff, close before the trusted return, and handoff entries stay private', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  const item = () => tab.frame.menu.items.find(entry => entry.id === 'open-devtools');
+  const state = async () => (await call({ action: 'list_tabs' })).tabs[0];
+  const capture = FrameDriver.prototype.snapshot;
+  const openAtCapture = [];
+  FrameDriver.prototype.snapshot = async function() {
+    openAtCapture.push(this.page.contents.isDevToolsOpened());
+    return capture.call(this);
+  };
+  try {
+    assert.equal(item().enabled, false);
+    item().click();
+    assert.equal(tab.contents.isDevToolsOpened(), false, 'Refused while the agent controls the page');
+    assert.equal(tab.toolbar.isDevToolsOpened(), false);
+    assert.equal(tab.shield.webContents.isDevToolsOpened(), false);
+    requestEvent(driver, 'flight', 'http://127.0.0.1:8000/slow');
+    await call({ action: 'handoff', tabId });
+    assert.equal((await state()).mode, 'native-handoff');
+    assert.equal(item().enabled, true);
+    item().click();
+    assert.equal(tab.contents.isDevToolsOpened(), true);
+    assert.deepEqual(tab.contents.devToolsOptions, { mode: 'detach', activate: true });
+    consoleEvent(driver, 'typed during handoff');
+    driver.onMessage('Network.loadingFinished', { requestId: 'flight', timestamp: 2, encodedDataLength: 5 }, '');
+    openAtCapture.length = 0;
+    await tab.frame.menu.items.find(entry => entry.label === 'Resume automation').click();
+    assert.deepEqual([(await state()).mode, (await state()).paused], ['automation', null]);
+    assert.equal(tab.contents.isDevToolsOpened(), false);
+    assert.deepEqual(openAtCapture, [false], 'DevTools closed before the trusted return observation');
+    assert.equal(item().enabled, false);
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0, withheld: 1 });
+    assert.deepEqual((await call({ action: 'network', tabId })).rows, [{ id: 'n1', u: 'http://127.0.0.1:8000/slow', ty: 'fetch', st: 'incomplete' }]);
+    await assert.rejects(call({ action: 'network', tabId, id: 'n1', body: true }), error => error.code === 'BODY_UNAVAILABLE');
+    // DevTools appearing outside native handoff is human input past the shield.
+    tab.contents.openDevTools({ mode: 'detach' });
+    assert.equal(tab.contents.isDevToolsOpened(), false);
+    assert.equal((await state()).paused, 'devtools-outside-handoff');
+    await tab.frame.menu.items.find(entry => entry.label === 'Human handoff').click();
+    item().click();
+    assert.equal(tab.contents.isDevToolsOpened(), true);
+    tab.frame.destroy();
+    assert.equal(tab.contents.isDevToolsOpened(), false, 'Closing the page closes its DevTools');
+  } finally {
+    FrameDriver.prototype.snapshot = capture;
+    await host.close();
+  }
+});
+
+test('human DevTools close on every exit from native handoff, including while their front end still loads', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const item = () => tab.frame.menu.items.find(entry => entry.id === 'open-devtools');
+  const state = async () => (await call({ action: 'list_tabs' })).tabs[0];
+  const menuItem = label => tab.frame.menu.items.find(entry => entry.label === label);
+  try {
+    await call({ action: 'handoff', tabId });
+    item().click();
+    assert.equal(tab.contents.isDevToolsOpened(), true);
+    // A fail-closed exit (here a lost toolbar renderer) moves to draining.
+    tab.toolbar.emit('render-process-gone');
+    assert.equal((await state()).mode, 'draining');
+    assert.equal(tab.contents.isDevToolsOpened(), false);
+    assert.equal(item().enabled, false);
+    await menuItem('Human handoff').click();
+    assert.equal((await state()).mode, 'native-handoff');
+    // Resume while DevTools is still loading, longer than any bound (here
+    // until the test finishes the load): the return does not wait, and the
+    // front end is closed the moment it opens, without failing closed.
+    tab.contents.devToolsDelay = 'manual';
+    item().click();
+    assert.equal(tab.contents.isDevToolsOpened(), false);
+    await menuItem('Resume automation').click();
+    assert.deepEqual([(await state()).mode, (await state()).paused], ['automation', null]);
+    let closed = 0;
+    tab.contents.on('devtools-closed', () => { closed++; });
+    tab.contents.finishDevToolsLoad();
+    assert.equal(tab.contents.isDevToolsOpened(), false, 'DevTools never stays open after the return');
+    assert.equal(closed, 1);
+    assert.deepEqual([(await state()).mode, (await state()).paused], ['automation', null]);
+    // DevTools appearing in automation without a request still fails closed.
+    tab.contents.devToolsDelay = 0;
+    tab.contents.openDevTools({ mode: 'detach' });
+    assert.equal((await state()).paused, 'devtools-outside-handoff');
+  } finally {
+    await host.close();
+  }
+});
+
+test('page-world reads are refused during an explicit Stop; buffer reads still answer', async () => {
+  const { host, call, tabId, tab } = await setup();
+  try {
+    tab.frame.menu.items.find(entry => entry.label === 'Stop automation').click();
+    await assert.rejects(call({ action: 'console', tabId, expression: '1' }), error => error.code === 'AUTOMATION_PAUSED');
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0 });
+  } finally {
+    await host.close();
+  }
+});
+
+test('service and shared worker events stay private while any page of the profile is in handoff', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const other = await call({ action: 'open', url: 'http://127.0.0.1:8000/b' });
+  const tabB = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/b').webContents);
+  const driver = drivers.get(tab.contents);
+  driver.targets.set('sw', { sessionId: 'sw', type: 'service_worker' });
+  driver.targets.set('dw', { sessionId: 'dw', type: 'worker' });
+  const swLog = value => driver.onMessage('Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value }], timestamp: Date.now() }, 'sw');
+  const swRequest = (requestId, url) => driver.onMessage('Network.requestWillBeSent', {
+    requestId, request: { url, method: 'GET', headers: {} }, type: 'Fetch', timestamp: 1, wallTime: Date.now() / 1000, initiator: { type: 'script' },
+  }, 'sw');
+  try {
+    swLog('shared before');
+    swRequest('sw-flight', 'http://127.0.0.1:8000/sw-flight');
+    await call({ action: 'handoff', tabId: other.tabId });
+    assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === other.tabId).mode, 'native-handoff');
+    // Tab A stays in automation; the profile's service worker serves tab B too.
+    swLog('PRIVATE shared during B handoff');
+    swRequest('sw-private', 'http://127.0.0.1:8000/auth/callback?code=PRIVATE');
+    driver.onMessage('Network.loadingFinished', { requestId: 'sw-flight', timestamp: 2, encodedDataLength: 5 }, 'sw');
+    driver.onMessage('Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: 'dedicated worker' }], timestamp: Date.now() }, 'dw');
+    consoleEvent(driver, 'page A');
+    await tabB.frame.menu.items.find(entry => entry.label === 'Resume automation').click();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    swLog('shared after');
+    const consoleRows = await call({ action: 'console', tabId });
+    assert.deepEqual(consoleRows.rows.map(row => row.msg), ['shared before', 'dedicated worker', 'page A', 'shared after']);
+    assert.equal(consoleRows.withheld, 1);
+    const network = await call({ action: 'network', tabId });
+    assert.deepEqual(network.rows.map(row => [row.u, row.st]), [['http://127.0.0.1:8000/sw-flight', 'incomplete']]);
+    assert.doesNotMatch(JSON.stringify([consoleRows, network]), /PRIVATE/);
+  } finally {
+    await host.close();
+  }
+});
+
+const refIn = (text, pattern) => text.match(new RegExp(`(e\\d+) ${pattern}`))?.[1];
+
+test('results are text: open shows the page, actions show their diff, refs survive unrelated changes', async () => {
+  page.nodes = [button(1, 'Delete A'), button(2, 'Delete B')];
+  const { host, call, tabId } = await setup();
+  const presses = [];
+  send = async (method, params) => { if (method === 'Input.dispatchMouseEvent') presses.push(params.type); return {}; };
+  try {
+    const observed = rendered(await call({ action: 'observe', tabId }));
+    assert.match(observed, /^observed observe tab=t\d+ snap=s\d+\npage "Unit fixture" http:\/\/127\.0\.0\.1:8000\/\nview 100x80 scroll 0\/80\n/);
+    const a = refIn(observed, 'button "Delete A"'), b = refIn(observed, 'button "Delete B"');
+    assert.match(observed, /\ntext "Unit fixture"/);
+    page.nodes.push(button(3, 'Unrelated'));
+    const clicked = await call({ action: 'click', tabId, ref: b });
+    const text = rendered(clicked);
+    assert.match(text, new RegExp(`^executed click ${b} tab=t\\d+ snap=s\\d+\\ndiff s\\d+→s\\d+ \\+1 ~0 -0\\n\\+ e\\d+ button "Unrelated"$`));
+    assert.deepEqual(presses, ['mousePressed', 'mouseReleased']);
+    assert.equal(rendered(await call({ action: 'click', tabId, ref: b })).split('\n')[1], `no change since ${clicked.snapshotId}`);
+    // A removed node's ref fails before any input; no fallback to the other "Delete".
+    page.removed.add(1);
+    const removed = await call({ action: 'click', tabId, ref: a }).catch(error => error);
+    assert.deepEqual([removed.code, removed.requestedInputDispatched, removed.preparation], ['STALE_REF', false, 'none']);
+    const { errorResult } = await import('../../src/tool-schema.mjs');
+    assert.match(errorResult(removed, { action: 'click', tabId, ref: a }).content[0].text,
+      new RegExp(`^not-executed click ${a} tab=t\\d+ code=STALE_REF dispatched=false\\nreason ${a} button "Delete A" was removed`));
+    assert.equal(presses.length, 4);
+    // A changed name is a different element for its old ref.
+    page.nodes[1] = button(2, 'Delete B (2)');
+    await assert.rejects(call({ action: 'click', tabId, ref: b }), error => error.code === 'STALE_REF' && /changed its role or name/.test(error.message));
+    const other = await call({ action: 'open', url: 'http://127.0.0.1:8000/other' });
+    const fresh = refIn(rendered(await call({ action: 'observe', tabId })), 'button "Unrelated"');
+    await assert.rejects(call({ action: 'click', tabId: other.tabId, ref: fresh }), error => error.code === 'WRONG_TAB');
+    await assert.rejects(host.execute({ action: 'click', tabId, ref: 'e99999' }, caller('one')), error => error.code === 'STALE_REF');
+  } finally { send = async () => ({}); page.nodes = []; page.removed.clear(); await host.close(); }
+});
+
+test('a target resolves to exactly one element of a fresh model; ambiguity lists candidate refs', async () => {
+  page.nodes = [button(1, 'Save'), button(2, 'Save'), button(3, 'Cancel')];
+  const { host, call, tabId } = await setup();
+  try {
+    const ambiguous = await call({ action: 'click', tabId, target: { role: 'button', name: 'Save' } }).catch(error => error);
+    assert.equal(ambiguous.code, 'AMBIGUOUS_TARGET');
+    assert.equal(ambiguous.requestedInputDispatched, false);
+    assert.equal(ambiguous.candidates.length, 2);
+    assert.match(ambiguous.candidates[0], /^e\d+ button "Save"$/);
+    const clicked = await call({ action: 'click', tabId, target: { name: 'Cancel', exact: true } });
+    assert.match(rendered(clicked), /^executed click e\d+ tab=/, 'the status line names the resolved ref');
+  } finally { page.nodes = []; await host.close(); }
+});
+
+test('failures during dispatch are uncertain; acknowledged page-script errors are executed with a code', async () => {
+  page.nodes = [{ ...button(1, 'Name'), r: 'textbox' }];
+  const { host, call, tabId, tab } = await setup();
+  const keysSent = [];
+  callOn = async (_frame, _objectId, declaration) => declaration.includes('activeElement') ? true
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
+  send = async (method, params) => {
+    keysSent.push(params?.type ?? method);
+    if (method === 'Input.insertText') throw new Error('renderer lost');
+    return {};
+  };
+  try {
+    const name = refIn(rendered(await call({ action: 'observe', tabId })), 'textbox "Name"');
+    const partial = await call({ action: 'fill', tabId, ref: name, text: 'alice' });
+    assert.deepEqual([partial.disposition, partial.replaySafe], ['uncertain', false]);
+    assert.ok(keysSent.includes('rawKeyDown') && keysSent.includes('Input.insertText'));
+    send = async () => ({});
+    evaluate = async () => { throw new BrowserHostError('PAGE_SCRIPT_ERROR', 'details withheld'); };
+    const thrown = await call({ action: 'evaluate', tabId, expression: 'throw 1' });
+    assert.deepEqual([thrown.disposition, thrown.code], ['executed', 'PAGE_SCRIPT_ERROR']);
+    assert.equal(toolResult(thrown, 'evaluate').isError, true);
+    evaluate = async () => ({ answer: 42 });
+    assert.match(rendered(await call({ action: 'evaluate', tabId, expression: 'x' })), /\nvalue \{"answer":42\}\n/);
+    // A missing page world fails before the evaluation is dispatched.
+    const driver = drivers.get(tab.contents);
+    driver.evaluationContext = original.evaluationContext;
+    let ran = 0;
+    evaluate = async () => { ran++; };
+    await assert.rejects(call({ action: 'evaluate', tabId, expression: '1', world: 'page' }),
+      error => error.code === 'STALE_FRAME' && error.requestedInputDispatched === false);
+    assert.equal(ran, 0);
+  } finally {
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    send = async () => ({}); evaluate = async () => 'unit-result'; page.nodes = [];
+    await host.close();
+  }
+});
+
+test('points need the latest screenshot and an unchanged tile around them', async () => {
+  const { fixtureImage } = await import('./electron-fixture.mjs');
+  const { host, call, tabId } = await setup();
+  const presses = [];
+  send = async (method, params) => { if (method === 'Input.dispatchMouseEvent') presses.push([params.type, params.x, params.y]); return {}; };
+  try {
+    const plain = await call({ action: 'observe', tabId });
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 10, y: 10, snapshotId: plain.snapshotId } }),
+      error => error.code === 'POINTS_UNAVAILABLE' && error.requestedInputDispatched === false);
+    const shot = await call({ action: 'observe', tabId, screenshot: true });
+    // Pixels far from the point may change (a ticker); the point still works.
+    fixtureImage.pixels[(70 * 100 + 90) * 4] = 255;
+    assert.equal((await call({ action: 'click', tabId, point: { x: 10, y: 10, snapshotId: shot.snapshotId } })).disposition, 'executed');
+    assert.deepEqual(presses[0], ['mousePressed', 10, 10]);
+    const again = await call({ action: 'observe', tabId, screenshot: true });
+    fixtureImage.pixels[(10 * 100 + 12) * 4] = 255;
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 10, y: 10, snapshotId: again.snapshotId } }),
+      error => error.code === 'STALE_COORDINATES');
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 10, y: 10, snapshotId: shot.snapshotId } }),
+      error => error.code === 'STALE_COORDINATES', 'only the latest screenshot grounds points');
+    assert.equal(presses.length, 2);
+  } finally { fixtureImage.pixels.fill(0); send = async () => ({}); await host.close(); }
+});
+
+test('signals report browser events since the last result once, other tabs by id', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  try {
+    const other = await call({ action: 'open', url: 'http://127.0.0.1:8000/b' });
+    const otherTab = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/b').webContents);
+    otherTab.frame.destroy();
+    const item = Object.assign(new (await import('node:events')).EventEmitter(), {
+      getFilename: () => 'report.pdf', getTotalBytes: () => 2048, getReceivedBytes: () => 2048, setSavePath() {},
+    });
+    tab.profile.emit('will-download', { preventDefault() {} }, item, tab.contents);
+    item.emit('done', {}, 'completed');
+    driver.onMessage('Runtime.consoleAPICalled', { type: 'error', args: [{ type: 'string', value: 'boom' }], timestamp: Date.now() }, '');
+    const text = rendered(await call({ action: 'evaluate', tabId, expression: 'x' }));
+    assert.match(text, new RegExp(`\\nsignal tab ${other.tabId} closed\\n`));
+    assert.match(text, /\nsignal download "report\.pdf" completed 2 KB\n/);
+    assert.match(text, /\nsignal console 1 error \(use console\)\n/);
+    assert.doesNotMatch(rendered(await call({ action: 'evaluate', tabId, expression: 'x' })), /signal/);
+  } finally { await host.close(); }
+});
+
+test('agent windows open inactive; an agent handoff only flashes; focus emulation follows the mode', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const emulation = [];
+  send = async (method, params) => { if (method === 'Emulation.setFocusEmulationEnabled') emulation.push(params.enabled); return {}; };
+  try {
+    assert.equal(tab.frame.isFocused(), false, 'opening never activates the window');
+    await call({ action: 'hide', tabId });
+    await call({ action: 'show', tabId });
+    assert.equal(tab.frame.isFocused(), false, 'show never activates the window');
+    await call({ action: 'handoff', tabId });
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'native-handoff');
+    assert.deepEqual([tab.frame.flashing, tab.frame.isFocused(), tab.contents.isFocused()], [true, false, false]);
+    assert.equal(tab.exposed(), true);
+    await tab.frame.menu.items.find(entry => entry.label === 'Resume automation').click();
+    assert.deepEqual(emulation, [false, true]);
+    // The person's own handoff from the window focuses the page.
+    await tab.frame.menu.items.find(entry => entry.label === 'Human handoff').click();
+    assert.equal(tab.contents.isFocused(), true);
+  } finally { send = async () => ({}); await host.close(); }
+});
+
+test('body and performance reads behind a modal dialog are refused first, like the console expression', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const native = nativeDialog(tab, 'alert', 'blocking');
+  try {
+    for (const args of [{ action: 'performance', tabId }, { action: 'network', tabId, id: 'n1', body: true }, { action: 'console', tabId, expression: '1' }]) {
+      const result = await call(args);
+      assert.deepEqual([result.disposition, result.code, result.requestedInputDispatched], ['not-executed', 'DIALOG_OPEN', false], args.action);
+      assert.equal(toolResult(result, args.action).isError, true);
+      assert.equal(JSON.parse(toolResult(result, args.action).content[0].text).dialog.type, 'alert');
+    }
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0 }, 'buffer reads still answer');
+  } finally { native.close(); await host.close(); }
+});
+
+const downloadItem = async name => Object.assign(new (await import('node:events')).EventEmitter(), {
+  getFilename: () => name, getTotalBytes: () => 2048, getReceivedBytes: () => 2048, setSavePath() {},
+});
+
+test('handoff activity stays private: only state signals leave a tab outside automation, downloads stay hidden, queues purge at drain', async () => {
+  const { host, call, tabId, tab } = await setup();
+  privatized.length = 0;
+  try {
+    const other = await call({ action: 'open', url: 'http://127.0.0.1:8000/b' });
+    // Queued before the handoff, delivered never: the drain purges page content.
+    tab.contents.emit('did-navigate', {}, 'http://127.0.0.1:8000/before-handoff');
+    await call({ action: 'handoff', tabId });
+    tab.contents.emit('did-navigate', {}, 'http://127.0.0.1:8000/private-page?code=one-time');
+    const driver = drivers.get(tab.contents);
+    driver.onMessage('Page.javascriptDialogOpening', { type: 'alert', message: 'private dialog' });
+    driver.onMessage('Page.javascriptDialogClosed', {});
+    const privateDownload = await downloadItem('private-statement.pdf');
+    tab.profile.emit('will-download', { preventDefault() {} }, privateDownload, tab.contents);
+    const fromOther = rendered(await call({ action: 'observe', tabId: other.tabId }));
+    assert.doesNotMatch(fromOther, /before-handoff|private|statement|one-time|dialog/);
+    assert.match(fromOther, new RegExp(`\\nsignal ${tabId} handoff active: the person controls this page\\n`));
+    await tab.frame.menu.items.find(entry => entry.label === 'Resume automation').click();
+    // The download the person started finishes after the return: still private.
+    privateDownload.emit('done', {}, 'completed');
+    assert.equal(privatized.length, 1, 'fields the person typed become sensitive before the first agent observation');
+    const after = rendered(await call({ action: 'observe', tabId }));
+    assert.doesNotMatch(after, /private|statement|download/);
+    assert.match(after, /\nsignal returned to agent\n/);
+    assert.deepEqual((await call({ action: 'downloads', tabId })).items, []);
+    // Back in automation, page signals flow again.
+    const agentDownload = await downloadItem('agent.pdf');
+    tab.profile.emit('will-download', { preventDefault() {} }, agentDownload, tab.contents);
+    assert.match(rendered(await call({ action: 'observe', tabId })), /\nsignal download "agent\.pdf" started 2 KB\n/);
+  } finally { privatized.length = 0; await host.close(); }
+});
+
+test('page code never runs beside a filled sensitive field; trusted page input outside a dispatch fails closed', async () => {
+  page.nodes = [button(1, 'Go')];
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  let ran = 0;
+  evaluate = async () => { ran++; return 1; };
+  try {
+    sensitivePresent = true;
+    for (const args of [{ action: 'evaluate', tabId, expression: '1' }, { action: 'evaluate', tabId, expression: '1', world: 'page' },
+      { action: 'console', tabId, expression: 'document.title' }]) {
+      if (args.world) driver.pageWorlds.set('root', { contextId: 9 });
+      const refused = await call(args).catch(error => error);
+      assert.deepEqual([refused.code, refused.requestedInputDispatched], ['SENSITIVE_PRESENT', false], JSON.stringify(args));
+    }
+    assert.equal(ran, 0);
+    sensitivePresent = false;
+    // The agent's own press accounts for exactly one trusted pointerdown.
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'button "Go"');
+    await call({ action: 'click', tabId, ref });
+    driver.onMessage('Runtime.bindingCalled', { name: INPUT_BINDING, payload: 'pointerdown' }, '');
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+    // A second press right after it is the person's, around the shield.
+    driver.onMessage('Runtime.bindingCalled', { name: INPUT_BINDING, payload: 'pointerdown' }, '');
+    assert.notEqual((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+    await assert.rejects(call({ action: 'click', tabId, ref }), error => error.requestedInputDispatched === false);
+  } finally { sensitivePresent = false; evaluate = async () => 'unit-result'; page.nodes = []; await host.close(); }
+});
+
+test('a press or text that lands outside the validated element reports TARGET_MISMATCH and forms no click', async () => {
+  page.nodes = [button(1, 'Pay'), { ...button(2, 'Name'), r: 'textbox' }];
+  const { host, call, tabId } = await setup();
+  const mouse = [];
+  send = async (method, params) => { if (method === 'Input.dispatchMouseEvent') mouse.push([params.type, params.x, params.y]); return {}; };
+  callOn = async (_frame, _objectId, declaration) => declaration.includes('activeElement') ? true
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
+  try {
+    const text = rendered(await call({ action: 'observe', tabId }));
+    guardOutcome = { fired: true, inside: false };
+    const clicked = await call({ action: 'click', tabId, ref: refIn(text, 'button "Pay"') });
+    assert.deepEqual([clicked.disposition, clicked.code], ['executed', 'TARGET_MISMATCH']);
+    assert.deepEqual(mouse, [['mousePressed', 20, 24], ['mouseReleased', -100000, -100000]], 'released far away: no click forms');
+    const filled = await call({ action: 'fill', tabId, ref: refIn(text, 'textbox "Name"'), text: 'x' });
+    assert.deepEqual([filled.disposition, filled.code], ['executed', 'TARGET_MISMATCH']);
+  } finally {
+    guardOutcome = { fired: true, inside: true }; send = async () => ({}); page.nodes = [];
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    await host.close();
+  }
+});
+
+test('a fully acknowledged key is executed even when it moves focus, navigates or closes its widget', async () => {
+  page.nodes = [{ ...button(1, 'Field'), r: 'textbox' }];
+  const { host, call, tabId } = await setup();
+  let focused = true;
+  const sent = [];
+  callOn = async (_frame, _objectId, declaration) => declaration.includes('activeElement') ? focused
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
+  // The key's own effect: focus leaves the field once the key is down.
+  send = async (method, params) => { sent.push(params?.type ?? method); if (params?.type === 'rawKeyDown') focused = false; return {}; };
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'textbox "Field"');
+    for (const key of ['Tab', 'Enter', 'Escape']) {
+      focused = true;
+      const result = await call({ action: 'press', tabId, ref, key });
+      assert.deepEqual([result.disposition, result.code], ['executed', undefined], key);
+    }
+    focused = true;
+    send = async (method, params) => { sent.push(params?.type ?? method); if (params?.type === 'rawKeyDown' && params.key === 'Backspace') focused = false; return {}; };
+    assert.equal((await call({ action: 'fill', tabId, ref, text: '' })).disposition, 'executed', 'fill "" ends with its Backspace');
+    // Between steps the check still applies: focus lost after Ctrl+A stops the fill.
+    focused = true;
+    send = async (method, params) => { sent.push(params?.type ?? method); if (params?.type === 'rawKeyDown' && params.key === 'a') focused = false; return {}; };
+    const partial = await call({ action: 'fill', tabId, ref, text: 'x' });
+    assert.deepEqual([partial.disposition, partial.code], ['uncertain', 'TARGET_CHANGED']);
+    assert.ok(!sent.includes('Input.insertText'));
+  } finally {
+    send = async () => ({}); page.nodes = [];
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    await host.close();
+  }
+});
+
+test('a result the caller never receives moves no diff base and drains no signals; abort reasons keep their codes', async () => {
+  page.nodes = [button(1, 'Approve')];
+  const { host, tab, tabId, call } = await setup({ policy: delegatedPolicy() });
+  const driver = drivers.get(tab.contents);
+  const released = deferred();
+  try {
+    const seen = await call({ action: 'observe', tabId });
+    evaluate = async () => {
+      const native = nativeDialog(tab, 'confirm', 'Approve fixture');
+      native.response.then(() => { native.close(); released.resolve(); });
+      await released.promise;
+      return 'done';
+    };
+    // The dialog opened before the evaluation was acknowledged: unknown outcome.
+    const parked = await call({ action: 'evaluate', tabId, expression: 'confirm()' });
+    assert.deepEqual([parked.disposition, parked.operationPending, parked.replaySafe], ['uncertain', true, false]);
+    driver.onMessage('Runtime.consoleAPICalled', { type: 'error', args: [{ type: 'string', value: 'late' }], timestamp: Date.now() }, '');
+    const [pending] = parked.pendingRequests;
+    await call({ action: 'respond', tabId, requestRef: pending.requestRef, response: { optionRef: pending.options[0].optionRef } });
+    page.nodes.push(button(2, 'After'));
+    // The lane finished the parked evaluation without a recipient: the diff
+    // still starts at the agent's own last view and the signal is still queued.
+    const next = rendered(await call({ action: 'click', tabId, ref: refIn(rendered(seen), 'button "Approve"') }));
+    assert.match(next, new RegExp(`\\ndiff ${seen.snapshotId}→s\\d+ \\+1 ~0 -0\\n`));
+    assert.match(next, /\nsignal console 1 error \(use console\)\n/);
+    // Stop while an evaluation is in flight: the result says why.
+    const started = deferred();
+    evaluate = async () => { started.resolve(); await new Promise(() => {}); };
+    const pendingEval = call({ action: 'evaluate', tabId, expression: 'slow' });
+    await started.promise;
+    tab.frame.menu.items.find(entry => entry.label === 'Stop automation').click();
+    const stopped = await pendingEval;
+    assert.deepEqual([stopped.disposition, stopped.code], ['uncertain', 'AUTOMATION_PAUSED']);
+  } finally { released.resolve(); evaluate = async () => 'unit-result'; page.nodes = []; await host.close(); }
+});
+
+test('refs of a closed tab are stale, not foreign', async () => {
+  page.nodes = [button(1, 'Here')];
+  const { host, call, tabId } = await setup();
+  try {
+    const other = await call({ action: 'open', url: 'http://127.0.0.1:8000/c' });
+    const ref = refIn(rendered(await call({ action: 'observe', tabId: other.tabId })), 'button "Here"');
+    await call({ action: 'close_tab', tabId: other.tabId });
+    await assert.rejects(call({ action: 'click', tabId, ref }), error => error.code === 'STALE_REF' && /closed/.test(error.message));
+  } finally { page.nodes = []; await host.close(); }
+});
+
+test('page code is refused while any window of the profile is under the person\'s control', async () => {
+  const { host, call, tabId } = await setup();
+  let ran = 0;
+  evaluate = async () => { ran++; return 1; };
+  try {
+    // A named popup in handoff is reachable from its opener: open('', name).
+    const popup = await call({ action: 'open', url: 'http://127.0.0.1:8000/login' });
+    await call({ action: 'handoff', tabId: popup.tabId });
+    for (const args of [{ action: 'evaluate', tabId, expression: 'open("", "login").document.title' },
+      { action: 'evaluate', tabId, expression: 'opener', world: 'page' }, { action: 'console', tabId, expression: 'opener' }]) {
+      const refused = await call(args).catch(error => error);
+      assert.deepEqual([refused.code, refused.requestedInputDispatched, /person's control/.test(refused.message)],
+        ['SENSITIVE_PRESENT', false, true], JSON.stringify(args));
+    }
+    assert.equal(ran, 0);
+  } finally { evaluate = async () => 'unit-result'; await host.close(); }
+});
+
+test('text and keys go only to the focused frame: lost frame focus stops them, a stray event elsewhere is cancelled', async () => {
+  page.nodes = [{ ...button(1, 'Name'), r: 'textbox' }];
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  const [arm, disarm] = [FrameDriver.prototype.armGuard, FrameDriver.prototype.disarmGuard];
+  let frameFocused = false;
+  const sent = [];
+  callOn = async (_frame, _objectId, declaration) => declaration.includes('hasFocus()') ? frameFocused
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
+  send = async (method, params) => { sent.push(params?.type ?? method); return {}; };
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'textbox "Name"');
+    // activeElement is still the field, but its frame lost focus: no key goes out.
+    const unfocused = await call({ action: 'fill', tabId, ref, text: 'x' });
+    assert.equal(unfocused.code, 'TARGET_CHANGED');
+    assert.ok(!sent.includes('rawKeyDown') && !sent.includes('Input.insertText'));
+    // Another frame is armed for the same dispatch; a key that lands there is
+    // cancelled in that frame and nothing after it is sent.
+    frameFocused = true;
+    sent.length = 0;
+    driver.frames.set('child', { id: 'child', parentId: 'root', contextId: 5, documentId: 'child-document' });
+    const armed = [];
+    FrameDriver.prototype.armGuard = async (frame, id, type) => { armed.push([frame.id, id, type]); return { armed: true }; };
+    FrameDriver.prototype.disarmGuard = async frame => (frame.id === 'child' ? { fired: true, inside: false } : { fired: true, inside: true });
+    const stray = await call({ action: 'fill', tabId, ref, text: 'x' });
+    assert.deepEqual([stray.disposition, stray.code], ['executed', 'TARGET_MISMATCH']);
+    assert.deepEqual(sent.filter(type => ['rawKeyDown', 'Input.insertText'].includes(type)), ['rawKeyDown']);
+    assert.deepEqual(armed, [['root', 1, 'keydown'], ['child', 0, 'keydown']]);
+  } finally {
+    FrameDriver.prototype.armGuard = arm; FrameDriver.prototype.disarmGuard = disarm;
+    driver.frames.delete('child'); send = async () => ({}); page.nodes = [];
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    await host.close();
+  }
+});
+
+test('uploads take local files only: network and device paths are refused before any file access; the page gets the real path', async () => {
+  page.nodes = [button(1, 'Attach')];
+  const { host, call, tabId, dataDir } = await setup();
+  const applied = [];
+  send = async (method, params) => { if (method === 'DOM.setFileInputFiles') applied.push(params.files); return {}; };
+  callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'file', multiple: false, editable: false });
+  const file = path.join(dataDir, 'upload.txt');
+  await writeFile(file, 'x');
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'button "Attach"');
+    for (const bad of ['\\\\attacker.invalid\\share\\a.txt', '\\\\?\\UNC\\attacker.invalid\\share\\a.txt', '//attacker.invalid/share/a.txt',
+      '\\\\.\\pipe\\x', '\\\\?\\C:\\a.txt', 'upload.txt', path.join(dataDir, 'missing.txt'), dataDir]) {
+      const started = Date.now();
+      await assert.rejects(call({ action: 'upload', tabId, ref, files: [bad] }),
+        error => error.code === 'INVALID_UPLOAD_FILE' && error.requestedInputDispatched === false, bad);
+      assert.ok(Date.now() - started < 1000, `${bad} is refused without a network wait`);
+    }
+    assert.deepEqual(applied, []);
+    const indirect = `${dataDir}\\sub\\..\\upload.txt`;
+    assert.equal((await call({ action: 'upload', tabId, ref, files: [indirect] })).disposition, 'executed');
+    assert.deepEqual(applied, [[await realpath(file)]]);
+  } finally {
+    send = async () => ({}); page.nodes = [];
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    await host.close();
+  }
+});
+
+test('a code the dispatch reported survives an observation that could not follow', async () => {
+  page.nodes = [button(1, 'Pay')];
+  const { host, call, tabId, tab } = await setup({ policy: delegatedPolicy() });
+  const quiet = FrameDriver.prototype.quiet;
+  let native = null;
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'button "Pay"');
+    guardOutcome = { fired: true, inside: false };
+    // The page opens a dialog once the press was acknowledged.
+    FrameDriver.prototype.quiet = async () => { native ??= nativeDialog(tab, 'alert', 'picker'); return { quiet: true }; };
+    const result = await call({ action: 'click', tabId, ref });
+    assert.deepEqual([result.disposition, result.observed, result.cause, result.code], ['executed', false, 'DIALOG_OPEN', 'TARGET_MISMATCH']);
+    assert.match(rendered(result), /^executed click e\d+ tab=t\d+ code=TARGET_MISMATCH observed=false cause=DIALOG_OPEN/);
+  } finally {
+    guardOutcome = { fired: true, inside: true }; FrameDriver.prototype.quiet = quiet; native?.close(); page.nodes = [];
+    await host.close();
+  }
+});
+
+test('an input still unacknowledged 300 ms after it opened a file chooser is uncertain with the operation pending', async () => {
+  const { host, tab, tabId, call } = await setup({ policy: delegatedPolicy() });
+  const driver = drivers.get(tab.contents);
+  const release = deferred();
+  evaluate = async () => {
+    driver.onMessage('Page.fileChooserOpened', { frameId: 'root', backendNodeId: 3, mode: 'selectSingle' });
+    await release.promise;
+    return 'late';
+  };
+  try {
+    const started = Date.now();
+    const result = await call({ action: 'evaluate', tabId, expression: 'input.click()' });
+    assert.deepEqual([result.disposition, result.operationPending, result.replaySafe], ['uncertain', true, false]);
+    assert.ok(Date.now() - started >= 280, 'the grace ran out first');
+  } finally { release.resolve(); evaluate = async () => 'unit-result'; await host.close(); }
+});
+
+test('run executes a script through the same pipeline; steps keep the agent view and signals for the final diff', async () => {
+  const vm = await import('node:vm');
+  page.nodes = [button(1, 'Save')];
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-unit-'));
+  const host = new BrowserHost({
+    dataDir, consentHelperPath: path.join(dataDir, 'not-invoked.exe'), toolbarPreloadPath, onRevokeConnection() {},
+    createRunnerSandbox: async ({ onOp, preloadPath }) => {
+      assert.equal(preloadPath, undefined, 'no preload configured in this unit host');
+      return { evaluate: source => vm.runInNewContext(source, { window: { __wbBridge: { call: (op, args) => onOp(op, structuredClone(args)) } }, setTimeout, clearTimeout }),
+        destroy() {} };
+    },
+  });
+  const authority = caller('one');
+  const call = args => host.execute(args, authority);
+  const presses = [];
+  send = async (method, params) => { if (method === 'Input.dispatchMouseEvent') presses.push(params.type); return {}; };
+  try {
+    const opened = await call({ action: 'open', url: 'http://127.0.0.1:8000' });
+    const seen = await call({ action: 'observe', tabId: opened.tabId });
+    page.nodes.push(button(2, 'Saved'));
+    const report = await call({ action: 'run', tabId: opened.tabId, script: `
+      const found = await page.find('Save');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      return found.count;` });
+    assert.deepEqual([report.status, report.disposition, report.replaySafe], ['ok', 'executed', false], report.text);
+    assert.deepEqual(presses, ['mousePressed', 'mouseReleased']);
+    const text = toolResult(report, 'run').content[0].text;
+    assert.match(text, /^executed run tab=t\d+ replaySafe=false\nrun ok 2 steps \d+ ms\n1 observed find t\d+ "Save" \d+ms\n2 executed click t\d+ button "Save" \d+ms\nreturn 2\n-- t\d+\n/);
+    assert.match(text, new RegExp(`\\ndiff ${seen.snapshotId}→s\\d+ \\+1 ~0 -0\\n\\+ e\\d+ button "Saved"`), 'the final diff covers the whole run');
+    await assert.rejects(call({ action: 'run', script: ' ' }), error => error.code === 'INVALID_ARGUMENT');
+  } finally { send = async () => ({}); page.nodes = []; await host.close(); }
 });
 
 test.after(() => {

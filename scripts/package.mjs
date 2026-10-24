@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +22,15 @@ await cp(path.join(root, 'build/app'), path.join(destination, 'app'), { recursiv
 await cp(path.join(root, 'build/licenses'), path.join(destination, 'licenses'), { recursive: true });
 await put('build/bridge.exe', 'bin/bridge.exe');
 await put('build/native-consent.exe', 'bin/native-consent.exe');
-await cp(path.join(root, 'vendor/mixdog'), path.join(destination, 'vendor/mixdog'), { recursive: true });
+// Exactly the locked upstream artifacts, each verified against its locked git
+// blob id now; a file dropped from the lock is never shipped from a stale
+// vendor directory, and a modified one stops the package.
+for (const [name, expected] of Object.entries(JSON.parse(await readFile(path.join(root, 'upstream.lock.json'), 'utf8')).files)) {
+  const bytes = await readFile(path.join(root, 'vendor/mixdog', name));
+  const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  if (actual !== expected) throw new Error(`Vendored file differs from upstream.lock.json: ${name}`);
+  await put(`vendor/mixdog/${name}`);
+}
 await put('vendor/mixdog/LICENSE', 'LICENSE');
 for (const name of ['consent.cpp', 'bridge.cpp']) await put(`native/${name}`, `sources/native/${name}`);
 

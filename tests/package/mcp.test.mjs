@@ -16,14 +16,25 @@ const artifact = process.env.WB_PACKAGE_DIR;
 assert.ok(artifact && path.isAbsolute(artifact), 'Set WB_PACKAGE_DIR to the exact packaged plugin folder');
 const executable = path.join(artifact, 'bin/bridge.exe');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+// JSON actions (status, list_tabs, requests, respond, revoke, DevTools reads).
 const dataOf = result => JSON.parse(result.content.find(part => part.type === 'text').text);
+// Page actions answer text: a status line with tab=t<n>, then lines with e<n> refs.
+const textOf = result => result.content.find(part => part.type === 'text').text;
+const tabOf = result => textOf(result).match(/\btab=(t\d+)/)?.[1];
+const has = (result, text) => textOf(result).includes(JSON.stringify(text).slice(1, -1));
+const valueOf = result => JSON.parse(textOf(result).match(/\nvalue (.*)/)[1]);
+function refOf(result, role, name) {
+  const match = textOf(result).match(new RegExp(`(e\\d+) ${role} ${JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.ok(match, `Expected ${role} "${name}" in:\n${textOf(result)}`);
+  return match[1];
+}
 async function diagnostic(connection, session, result) {
-  if (!result.isError) return JSON.stringify(dataOf(result));
-  const body = dataOf(result);
-  const state = body.tabId
-    ? dataOf(await connection.call(session, { action: 'observe', tabId: body.tabId }))
-    : await connection.status();
-  return JSON.stringify({ result: body, followupObservation: state });
+  if (!result.isError) return textOf(result);
+  const tabId = tabOf(result);
+  const state = tabId
+    ? textOf(await connection.call(session, { action: 'observe', tabId }))
+    : JSON.stringify(await connection.status());
+  return `${textOf(result)}\n--- follow-up ---\n${state}`;
 }
 async function until(predicate, label) {
   const end = Date.now() + 8000;
@@ -126,6 +137,22 @@ async function fixture(t) {
         </script>`);
       return;
     }
+    if (req.url === '/form') {
+      res.end(`<!doctype html><title>Packaged run fixture</title><label>Email <input id="email"></label>
+        <label>Plan <select id="plan"><option value="free">Free</option><option value="pro">Pro</option></select></label>
+        <button onclick="navigator.sendBeacon('/count','x');document.querySelector('[role=status]').textContent='Saved '+email.value+' '+plan.value">Save</button>
+        <p role="status"></p>`);
+      return;
+    }
+    if (req.url === '/devtools-api') { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('missing'); return; }
+    if (req.url === '/devtools') {
+      res.end(`<!doctype html><title>Packaged DevTools fixture</title><p>DevTools</p><script>
+        window.devtoolsGlobal = { answer: 42 };
+        console.error('packaged devtools error');
+        fetch('/devtools-api');
+        </script>`);
+      return;
+    }
     if (req.url === '/nested') {
       res.end('<!doctype html><body style="margin:0"><iframe src="/outer" style="position:absolute;left:100px;top:100px;width:700px;height:500px;border:0"></iframe>');
       return;
@@ -184,22 +211,27 @@ test('packaged folder: standard SDK, hook admission, real page, replay/ownership
   const issued = await authorize(context.env, first.channel, 'owner-a', { action: 'open', url: page.url });
   const opened = await first.client.callTool({ name: 'browse', arguments: issued });
   assert.equal(opened.isError, false, await diagnostic(first, 'owner-a', opened));
-  const observation = dataOf(opened);
   assert.doesNotMatch(page.state.userAgents[0], /Electron\/|IndependentWindowsBrowser\//);
-  assert.ok(observation.frames[0].text.includes(page.state.userAgents[0]), 'Packaged navigator and first HTTP identity must agree');
-  assert.ok(opened.content.some(part => part.type === 'image' && part.mimeType === 'image/png'));
-  assert.ok(!JSON.stringify(observation).includes('DO_NOT_EXPORT_PASSWORD'));
-  const tabId = observation.tabId;
-  const reference = observation.frames.flatMap(frame => frame.elements).find(element => element.name === 'Count').ref;
-  assert.equal((await first.client.callTool({ name: 'browse', arguments: issued })).isError, true);
+  assert.deepEqual(opened.content.map(part => part.type), ['text'], 'no image unless requested');
+  assert.ok(!textOf(opened).includes('DO_NOT_EXPORT_PASSWORD'));
+  const tabId = tabOf(opened);
+  const readable = await first.call('owner-a', { action: 'observe', tabId, mode: 'text' });
+  assert.ok(has(readable, page.state.userAgents[0]), 'Packaged navigator and first HTTP identity must agree');
+  const shot = await first.call('owner-a', { action: 'observe', tabId, screenshot: true });
+  assert.ok(shot.content.some(part => part.type === 'image' && part.mimeType === 'image/png'));
+  assert.match(textOf(shot), /\nview \d+x\d+ scroll \d+\/\d+ points\n/);
+  const reference = refOf(opened, 'button', 'Count');
+  assert.equal((await first.client.callTool({ name: 'browse', arguments: issued })).isError, true, 'a used ticket is never replayed');
   const clicked = await first.call('owner-a', { action: 'click', tabId, ref: reference });
-  assert.equal(clicked.isError, false, JSON.stringify(dataOf(clicked)));
+  assert.equal(clicked.isError, false, textOf(clicked));
+  assert.match(textOf(clicked), /^executed click e\d+ tab=t\d+ snap=s\d+\n/);
   await until(() => page.state.count === 1, 'one local HTTP side effect from one browser click');
-  assert.equal((await first.call('owner-a', { action: 'click', tabId, ref: reference })).isError, true);
-  assert.equal(page.state.count, 1);
+  // The ref names the same unchanged button; a second click is a new, deliberate input.
+  assert.equal((await first.call('owner-a', { action: 'click', tabId, ref: reference })).isError, false);
+  await until(() => page.state.count === 2, 'the persistent ref acts once more');
   const foreign = await first.call('owner-b', { action: 'observe', tabId });
   assert.equal(foreign.isError, true);
-  assert.equal(dataOf(foreign).code, 'FOREIGN_TAB');
+  assert.match(textOf(foreign), /code=FOREIGN_TAB/);
 
   const late = await authorize(context.env, first.channel, 'owner-a', { action: 'observe', tabId });
   await hook(context.env, { hook_event_name: 'SessionEnd', session_id: 'owner-a' });
@@ -212,8 +244,8 @@ test('packaged folder: standard SDK, hook admission, real page, replay/ownership
 
   const second = await sdk(t, context);
   const other = await second.call('owner-c', { action: 'open', url: page.url });
-  assert.equal(other.isError, false, JSON.stringify(dataOf(other)));
-  const otherId = dataOf(other).tabId;
+  assert.equal(other.isError, false, textOf(other));
+  const otherId = tabOf(other);
   await first.client.close();
   assert.equal((await second.call('owner-c', { action: 'observe', tabId: otherId })).isError, false);
   const revoked = await second.call('owner-c', { action: 'revoke' });
@@ -236,14 +268,14 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
   assert.deepEqual(new Set(capabilities.filePickers.unsupported),
     new Set(['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker']));
   const opened = await connection.call(owner, { action: 'open', url: page.url + 'autonomous' });
-  assert.equal(opened.isError, false, JSON.stringify(dataOf(opened)));
-  const tabId = dataOf(opened).tabId;
+  assert.equal(opened.isError, false, textOf(opened));
+  const tabId = tabOf(opened);
   const fixturePath = path.join(context.directory, 'packaged-attachment.txt');
   const worker = await connection.call(owner, {
     action: 'evaluate', tabId, expression: WORKER_PROBE_EXPRESSION,
   });
-  assert.equal(worker.isError, false, JSON.stringify(dataOf(worker)));
-  assert.deepEqual(dataOf(worker).value, { kind: 'diagnostic-worker-ready', value: 7 });
+  assert.equal(worker.isError, false, textOf(worker));
+  assert.deepEqual(valueOf(worker), { kind: 'diagnostic-worker-ready', value: 7 });
   await writeFile(fixturePath, 'explicit package test input');
   for (const scenario of [
     { button: 'Attach local fixture', kind: 'file-picker', response: () => ({ files: [fixturePath] }),
@@ -262,7 +294,13 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
       resolution: 'allowed', expected: 'granted' },
   ]) {
     const click = await connection.call(owner, { action: 'click', tabId, target: { name: scenario.button, exact: true } });
-    assert.equal(click.isError, false, JSON.stringify(dataOf(click)));
+    // A JS dialog blocks the renderer before the click is acknowledged: the
+    // outcome is unknown (uncertain, never replayed). A file chooser or a
+    // permission prompt leaves the renderer running: the click is executed.
+    if (scenario.kind === 'javascript-dialog') {
+      assert.equal(click.isError, true, textOf(click));
+      assert.match(textOf(click), /^uncertain click e\d+ tab=t\d+ code=DIALOG_OPEN replaySafe=false\n[\s\S]*\nrequest \S+ javascript-dialog/, textOf(click));
+    } else assert.equal(click.isError, false, textOf(click));
     const requests = await connection.call(owner, { action: 'requests', tabId });
     assert.equal(requests.isError, false, JSON.stringify(dataOf(requests)));
     const pending = dataOf(requests).pending.filter(request => request.kind === scenario.kind);
@@ -274,51 +312,123 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
     assert.equal(dataOf(response).request.resolution, scenario.resolution, JSON.stringify(dataOf(response)));
     await until(() => page.state.nativeResults.includes(scenario.expected), 'actual site result: ' + scenario.expected);
     const observed = await connection.call(owner, { action: 'observe', tabId });
-    assert.equal(observed.isError, false, JSON.stringify(dataOf(observed)));
-    assert.ok(dataOf(observed).frames.some(frame => frame.text.includes(scenario.expected)));
+    assert.equal(observed.isError, false, textOf(observed));
+    assert.ok(has(observed, scenario.expected), textOf(observed));
     assert.equal(dataOf(await connection.call(owner, { action: 'list_tabs' })).tabs[0].mode, 'automation');
     assert.equal((await connection.call(owner, { action: 'respond', tabId, requestRef: request.requestRef,
       response: scenario.response(request) })).isError, true);
   }
   const unsupported = await connection.call(owner, { action: 'click', tabId, target: { name: 'Native prompt limitation', exact: true } });
-  assert.equal(unsupported.isError, false, JSON.stringify(dataOf(unsupported)));
+  assert.equal(unsupported.isError, false, textOf(unsupported));
   await until(() => page.state.nativeResults.includes('prompt() is not supported.'), 'actual unsupported native prompt');
   assert.equal(dataOf(await connection.call(owner, { action: 'requests', tabId })).pending.length, 0);
 });
 
-test('packaged browser clicks nested frames exactly once and rejects shadow text/new-root stale refs', { timeout: 60000 }, async t => {
+test('packaged browser clicks nested frames exactly once; a renamed shadow control retires its ref, an unrelated new root does not', { timeout: 60000 }, async t => {
   const context = await environment(t);
   const page = await fixture(t);
   const connection = await sdk(t, context);
   const owner = 'nested-shadow-owner';
-  const nestedResult = await connection.call(owner, { action: 'open', url: page.url + 'nested' });
-  assert.equal(nestedResult.isError, false, await diagnostic(connection, owner, nestedResult));
-  const nested = dataOf(nestedResult);
-  const frame = nested.frames.find(f => f.elements.some(e => e.name === 'Nested'));
-  assert.ok(frame, 'Nested target must be observed in its own frame');
-  const click = await connection.call(owner, {
-    action: 'click', tabId: nested.tabId, target: { name: 'Nested', exact: true, frameId: frame.frameId },
-  });
-  assert.equal(click.isError, false, JSON.stringify(dataOf(click)));
+  let nested = await connection.call(owner, { action: 'open', url: page.url + 'nested' });
+  assert.equal(nested.isError, false, await diagnostic(connection, owner, nested));
+  const nestedTab = tabOf(nested);
+  // open settles on the root document; nested frames may still be loading.
+  for (let tries = 0; tries < 40 && !/button "Nested"/.test(textOf(nested)); tries++) {
+    await delay(50);
+    nested = await connection.call(owner, { action: 'observe', tabId: nestedTab });
+  }
+  const click = await connection.call(owner, { action: 'click', tabId: nestedTab, ref: refOf(nested, 'button', 'Nested') });
+  assert.equal(click.isError, false, textOf(click));
   await until(() => page.state.count === 1, 'exactly one effect from the nested frame target');
 
   const shadowResult = await connection.call(owner, { action: 'open', url: page.url + 'shadow' });
   assert.equal(shadowResult.isError, false, await diagnostic(connection, owner, shadowResult));
-  const shadow = dataOf(shadowResult);
-  const old = shadow.frames.flatMap(f => f.elements).find(e => e.name === 'Safe').ref;
+  const shadowTab = tabOf(shadowResult);
+  const old = refOf(shadowResult, 'button', 'Safe');
+  const lightRef = refOf(shadowResult, 'button', 'Document action');
   page.state.shadowPhase = 'rename';
   await until(() => page.state.shadowApplies === 1, 'page-main shadow label mutation applied');
-  const renamed = await connection.call(owner, { action: 'click', tabId: shadow.tabId, ref: old });
-  assert.equal(renamed.isError, true, 'A label changed inside an open shadow tree must invalidate its old ref');
+  const renamed = await connection.call(owner, { action: 'click', tabId: shadowTab, ref: old });
+  assert.equal(renamed.isError, true, 'A label changed inside an open shadow tree must retire its old ref');
+  assert.match(textOf(renamed), /code=STALE_REF/);
+  assert.match(textOf(renamed), /dispatched=false/);
   assert.equal(page.state.count, 1, 'No shadow input may be dispatched with the old ref');
 
-  const fresh = await connection.call(owner, { action: 'observe', tabId: shadow.tabId });
-  assert.equal(fresh.isError, false, JSON.stringify(dataOf(fresh)));
-  const lightRef = dataOf(fresh).frames.flatMap(f => f.elements).find(e => e.name === 'Document action').ref;
   page.state.shadowPhase = 'attach';
   await until(() => page.state.shadowApplies === 2, 'open shadow root attached to an existing connected host');
-  const attached = await connection.call(owner, { action: 'click', tabId: shadow.tabId, ref: lightRef });
-  assert.equal(attached.isError, true, 'New roots must invalidate the previous combined observation');
+  const attached = await connection.call(owner, { action: 'click', tabId: shadowTab, ref: lightRef });
+  assert.equal(attached.isError, false, 'An unrelated new shadow root leaves the light-DOM ref valid');
+  await until(() => page.state.count === 2, 'the unchanged light-DOM button acts once');
+});
+
+test('packaged DevTools reads return compact JSON rows without observations or images', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  const page = await fixture(t);
+  const connection = await sdk(t, context);
+  const owner = 'devtools-owner';
+  const descriptor = (await connection.client.listTools()).tools.find(tool => tool.name === 'browse');
+  for (const action of ['console', 'network', 'inspect', 'performance']) assert.ok(descriptor.inputSchema.properties.action.enum.includes(action));
+  assert.deepEqual(descriptor.inputSchema.properties.world.enum, ['isolated', 'page']);
+  const opened = await connection.call(owner, { action: 'open', url: page.url + 'devtools' });
+  assert.equal(opened.isError, false, await diagnostic(connection, owner, opened));
+  const tabId = tabOf(opened);
+  const textOnly = result => {
+    assert.equal(result.isError, false, JSON.stringify(dataOf(result)));
+    assert.deepEqual(result.content.map(part => part.type), ['text']);
+    const body = dataOf(result);
+    assert.equal(['frames', 'screenshot', 'observation'].some(key => key in body), false);
+    return body;
+  };
+  const consoleRows = await until(async () => {
+    const body = textOnly(await connection.call(owner, { action: 'console', tabId, filter: 'level:error' }));
+    return body.rows?.some(row => row.msg === 'packaged devtools error') && body;
+  }, 'packaged console error');
+  assert.ok(consoleRows.next > 0);
+  const network = await until(async () => {
+    const body = textOnly(await connection.call(owner, { action: 'network', tabId, filter: 'status:4xx' }));
+    return body.rows?.length && body;
+  }, 'packaged 404 row');
+  assert.deepEqual(network.rows.map(row => [row.u.endsWith('/devtools-api'), row.s]), [[true, 404]]);
+  const read = textOnly(await connection.call(owner, { action: 'console', tabId, expression: 'window.devtoolsGlobal.answer' }));
+  assert.deepEqual([read.type, read.value], ['number', 42]);
+  const refused = await connection.call(owner, { action: 'console', tabId, expression: 'window.devtoolsGlobal.answer = 1' });
+  assert.equal(refused.isError, true);
+  assert.equal(dataOf(refused).code, 'SIDE_EFFECT');
+  const main = await connection.call(owner, { action: 'evaluate', tabId, world: 'page', expression: 'window.devtoolsGlobal.answer + 1' });
+  assert.equal(valueOf(main), 43);
+  const performance = textOnly(await connection.call(owner, { action: 'performance', tabId }));
+  assert.ok(performance.m.nodes > 0);
+});
+
+test('packaged run executes a multi-step form flow in one call with exactly one submit', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  const page = await fixture(t);
+  const connection = await sdk(t, context);
+  const owner = 'run-owner';
+  const descriptor = (await connection.client.listTools()).tools.find(tool => tool.name === 'browse');
+  assert.ok(descriptor.inputSchema.properties.action.enum.includes('run'));
+  const opened = await connection.call(owner, { action: 'open', url: page.url + 'form' });
+  assert.equal(opened.isError, false, await diagnostic(connection, owner, opened));
+  const tabId = tabOf(opened);
+  const ran = await connection.call(owner, {
+    action: 'run', tabId, script: `
+      await page.getByLabel('Email').fill('qa@example.test');
+      await page.getByRole('combobox', { name: 'Plan' }).selectOption('pro');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await page.waitForText('Saved qa@example.test pro');
+      return await page.getByRole('status').innerText();`,
+  });
+  assert.equal(ran.isError, false, textOf(ran));
+  assert.deepEqual(ran.content.map(part => part.type), ['text']);
+  assert.match(textOf(ran), /^executed run tab=t\d+ .*\nrun ok \d+ steps/);
+  assert.match(textOf(ran), /\ne\d+ combobox "Plan" ="Pro"/, 'a label wrapping its select names it without the options');
+  assert.match(textOf(ran), /\nreturn "Saved qa@example.test pro"/);
+  assert.equal(page.state.count, 1);
+  const escape = await connection.call(owner, { action: 'run', tabId, script: `
+    let net = 'blocked';
+    try { await fetch(${JSON.stringify(page.url + 'count')}); net = 'open'; } catch {}
+    return typeof require + ' ' + typeof process + ' ' + net;` });
+  assert.match(textOf(escape), /\nreturn "undefined undefined blocked"/, textOf(escape));
   assert.equal(page.state.count, 1);
 });
 
@@ -379,10 +489,11 @@ for (const requestId of [0, 17]) test(`JSON-RPC cancellation id ${requestId} abo
   const tools = await connection.request('tools', 'tools/list', {});
   const channel = tools.result.tools[0].inputSchema.properties._channel.enum[0];
   const open = await connection.request('open', 'tools/call', {
-    name: 'browse', arguments: await authorize(context.env, channel, 'zero-owner', { action: 'open', url: page.url }),
+    // A page without a filled sensitive field: page code is refused beside one.
+    name: 'browse', arguments: await authorize(context.env, channel, 'zero-owner', { action: 'open', url: page.url + 'form' }),
   });
-  assert.equal(open.result.isError, false, JSON.stringify(open.error ?? dataOf(open.result)));
-  const tabId = dataOf(open.result).tabId;
+  assert.equal(open.result.isError, false, JSON.stringify(open.error ?? textOf(open.result)));
+  const tabId = tabOf(open.result);
   let delayedResponse;
   let delayedError;
   const delayed = connection.request(requestId, 'tools/call', {

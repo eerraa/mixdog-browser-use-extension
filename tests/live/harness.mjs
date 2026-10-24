@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, nativeImage, session } from 'electron';
+import { app, BrowserWindow, Menu, session } from 'electron';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -7,7 +7,7 @@ import { BrowserHost } from '../../src/browser/host.mjs';
 import { BrowserPolicy } from '../../src/browser/policy.mjs';
 import { configureBrowserIdentity } from '../../src/browser/user-agent.mjs';
 import { runAdditionalScenarios } from './scenarios.mjs';
-import { assertShielded, pageContents, presentationOf, toolbarPreloadPath } from './presentation.mjs';
+import { assertShielded, pageContents, pixelAt, presentationOf, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';
 import { bounded, pause } from '../../src/async.mjs';
 
 const dataDir = process.argv[2];
@@ -141,11 +141,21 @@ try {
   const call = args => host.execute(args, caller);
   let tabId, observation;
   await check('open, isolated security settings, masked observation and screenshot', async () => {
-    observation = await call({ action: 'open', url: `http://127.0.0.1:${port}` });
+    observation = await call({ action: 'open', url: `http://127.0.0.1:${port}`, screenshot: true });
     tabId = observation.tabId;
+    assert.equal(observation.disposition, 'executed', rendered(observation));
     assert.ok(observation.snapshotId);
     assert.ok(observation.screenshot.data.length);
+    assert.match(rendered(observation), /\ne\d+ textbox "Name"\n/);
+    assert.match(rendered(observation), /textbox sensitive\n|textbox "[^"]*" sensitive\n/, 'the password field is marked, never valued');
     assert.ok(!JSON.stringify(observation).includes('DO_NOT_OBSERVE_PASSWORD'));
+    // Page code never runs beside a filled sensitive field; the agent clears
+    // it with an ordinary fill, and page code runs again.
+    const refused = await call({ action: 'evaluate', tabId, expression: 'document.title' }).catch(error => error);
+    assert.deepEqual([refused.code, refused.requestedInputDispatched], ['SENSITIVE_PRESENT', false]);
+    const password = rendered(observation).match(/(e\d+) textbox(?: "[^"]*")? sensitive(?=\n|$)/m)[1];
+    assert.equal((await call({ action: 'fill', tabId, ref: password, text: '', snapshot: 'none' })).disposition, 'executed');
+    assert.equal((await call({ action: 'evaluate', tabId, expression: '1+1', snapshot: 'none' })).value, 2);
     const page = pageContents(`http://127.0.0.1:${port}/`);
     const prefs = page.getLastWebPreferences();
     assert.equal(prefs.nodeIntegration, false);
@@ -163,11 +173,9 @@ try {
       assert.ok(chrome.getURL().startsWith('data:text/html'));
       assert.notEqual(chrome.session, page.session, 'Plugin chrome must never share the page profile');
     }
-    const image = nativeImage.createFromBuffer(Buffer.from(observation.screenshot.data, 'base64')).toBitmap();
-    const x = Math.round(820 * observation.screenshot.pixelsPerCssX), y = Math.round(40 * observation.screenshot.pixelsPerCssY);
-    const pixel = (y * observation.screenshot.pixelWidth + x) * 4;
-    assert.deepEqual([...image.subarray(pixel, pixel + 3)], [0, 0, 220], 'Shielded first capture must contain current red fixture pixels');
+    assert.deepEqual(pixelAt(observation.screenshot, 820, 40), [0, 0, 220], 'Shielded first capture must contain current red fixture pixels');
   });
+  const authorizationFound = async () => /: 1 match\n/.test(rendered(await call({ action: 'observe', tabId, find: 'UA authorization fixture' })));
   if (identityBaselineMode) {
     const guest = pageContents(`http://127.0.0.1:${port}/`);
     const { toolbar } = presentationOf(guest);
@@ -175,7 +183,7 @@ try {
     await guest.executeJavaScript('fetch("/ua-hints-baseline").then(r=>r.text())');
     console.log('UA_BASELINE_RESULT', JSON.stringify({
       ...identity, root: requestHeaders.get('/'), hints: requestHeaders.get('/ua-hints-baseline'),
-      authorizePresent: observation.frames[0].elements.some(e => e.name === 'UA authorization fixture'),
+      authorizePresent: await authorizationFound(),
       fallback: app.userAgentFallback, presentation: toolbar.getUserAgent(),
     }));
     await host.close();
@@ -188,8 +196,7 @@ try {
     assert.match(baseline.userAgent, /Electron\//, 'The separate untouched process must reproduce the desktop-client branch');
     assert.equal(baseline.hidAvailable, true);
     assert.equal(baseline.authorizePresent, false);
-    assert.ok(observation.frames[0].elements.some(e => e.name === 'UA authorization fixture'),
-      'Container detection must not hide the browser authorization control');
+    assert.ok(await authorizationFound(), 'Container detection must not hide the browser authorization control');
     const guest = pageContents(`http://127.0.0.1:${port}/`);
     const { toolbar, shield } = presentationOf(guest);
     const identity = await guest.executeJavaScript('({userAgent:navigator.userAgent,brands:navigator.userAgentData.brands})');
@@ -214,24 +221,20 @@ try {
     assert.deepEqual((await call({ action: 'permissions', tabId })).pending, []);
     console.log('UA_IDENTITY', JSON.stringify({ guest: identity, baseline, guestHints }));
   });
-  await check('actual input, form fill/select and fresh/stale refs', async () => {
-    const old = observation.frames.flatMap(f => f.elements).find(e => e.name === 'Add').ref;
-    observation = await call({ action: 'click', tabId, ref: old });
-    assert.equal(observation.disposition, 'observed', observation.disposition === 'uncertain'
-      ? JSON.stringify({ result: observation, tabs: await call({ action: 'list_tabs' }) })
-      : 'A fixture click must return a fresh observation');
-    assert.match(observation.frames[0].text, /1/);
-    const image = nativeImage.createFromBuffer(Buffer.from(observation.screenshot.data, 'base64')).toBitmap();
-    const x = Math.round(820 * observation.screenshot.pixelsPerCssX), y = Math.round(40 * observation.screenshot.pixelsPerCssY);
-    const pixel = (y * observation.screenshot.pixelWidth + x) * 4;
-    assert.deepEqual([...image.subarray(pixel, pixel + 3)], [0, 190, 0], 'Shielded click capture must show new green fixture pixels');
-    await assert.rejects(call({ action: 'click', tabId, ref: old }), /stale/i);
+  await check('actual input returns its diff; refs survive the change; form fill/type/select', async () => {
+    const add = refOf(observation, 'button', 'Add');
+    observation = await call({ action: 'click', tabId, ref: add, screenshot: true });
+    assert.equal(observation.disposition, 'executed', rendered(observation));
+    assert.equal(observation.observed, undefined, rendered(observation));
+    assert.match(rendered(observation), /\n~ e\d+ status ="1"/, 'the counter change is in the click diff');
+    assert.deepEqual(pixelAt(observation.screenshot, 820, 40), [0, 190, 0], 'Shielded click capture must show new green fixture pixels');
+    assert.equal((await call({ action: 'read', tabId, ref: add })).disposition, 'observed', 'the ref still names the same button');
     observation = await call({ action: 'fill', tabId, target: { role: 'textbox', name: 'Name', exact: true }, text: 'Local Alice' });
-    assert.equal(observation.frames[0].elements.find(e => e.name === 'Name').value, 'Local Alice');
+    assert.match(rendered(observation), /textbox "Name"[^\n]*="Local Alice"/, rendered(observation));
     observation = await call({ action: 'type', tabId, target: { name: 'Name', exact: true }, text: ' typed' });
-    assert.equal(observation.frames[0].elements.find(e => e.name === 'Name').value, 'Local Alice typed');
+    assert.match(rendered(observation), /textbox "Name"[^\n]*="Local Alice typed"/, rendered(observation));
     observation = await call({ action: 'select', tabId, target: { name: 'Choice', exact: true }, values: ['b'] });
-    assert.match(observation.frames[0].text, /b/);
+    assert.match(rendered(observation), /"Choice"[^\n]*="b"/, rendered(observation));
   });
   await check('ambiguous targets fail with candidates and ownership/late caller rejected', async () => {
     await assert.rejects(call({ action: 'click', tabId, target: { name: 'Duplicate', exact: true } }), e => e.code === 'AMBIGUOUS_TARGET' && e.candidates.length === 2);
@@ -240,31 +243,37 @@ try {
       ...caller, assertLive() { throw new Error('Late caller'); },
     }), /Late caller/);
   });
-  await check('same-origin and cross-origin frames have independent isolated refs and actionable geometry', async () => {
+  await check('same-origin and cross-origin frames are inlined with their own refs and actionable geometry', async () => {
     observation = await call({ action: 'observe', tabId });
-    const childFrames = observation.frames.filter(f => f.elements.some(e => e.name === 'Frame button'));
-    assert.equal(childFrames.length, 2);
-    for (const frame of childFrames) {
-      observation = await call({ action: 'click', tabId, target: { name: 'Frame button', exact: true, frameId: frame.frameId } });
-      assert.ok(observation.frames.find(f => f.frameId === frame.frameId).text.includes('Frame clicked'));
+    const text = rendered(observation);
+    const frames = [...text.matchAll(/(e\d+) iframe/g)].map(match => match[1]);
+    assert.equal(frames.length, 2, text);
+    assert.equal(text.match(/button "Frame button"/g)?.length, 2, text);
+    for (const frame of frames) {
+      observation = await call({ action: 'click', tabId, target: { name: 'Frame button', exact: true, frame } });
+      assert.match(rendered(observation), /button "Frame clicked"/, rendered(observation));
     }
   });
-  await check('raw coordinates require current combined snapshot and reject mutation/viewport changes', async () => {
-    observation = await call({ action: 'observe', tabId });
-    await assert.rejects(call({ action: 'click', tabId, point: { x: 1, y: 1, snapshotId: 'old' } }), /stale/i);
-    await call({ action: 'evaluate', tabId, expression: 'document.body.dataset.changed="yes"' });
-    await assert.rejects(call({ action: 'click', tabId, point: { x: 1, y: 1, snapshotId: observation.snapshotId } }), /stale/i);
+  await check('points require the latest screenshot and an unchanged tile around them', async () => {
+    observation = await call({ action: 'observe', tabId, screenshot: true });
+    assert.match(rendered(observation), /\nview \d+x\d+ scroll \d+\/\d+ points\n/);
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 1, y: 1, snapshotId: 's0' } }), error => error.code === 'STALE_COORDINATES');
+    // Repaint inside the 24×24 tile around the point.
+    await call({ action: 'evaluate', tabId, expression: 'document.querySelector("#paint").style.boxShadow="inset 0 0 0 40px rgb(0,0,255)"' });
+    await assert.rejects(call({ action: 'click', tabId, point: { x: 820, y: 40, snapshotId: observation.snapshotId } }),
+      error => error.code === 'STALE_COORDINATES' && error.requestedInputDispatched === false);
+    await call({ action: 'evaluate', tabId, expression: 'document.querySelector("#paint").style.boxShadow=""' });
   });
-  await check('model evaluate has no Node and cannot mutate the private ref world', async () => {
+  await check('model evaluate has no Node and cannot reach the private walker world', async () => {
     const result = await call({ action: 'evaluate', tabId,
-      expression: '({node:typeof process,refs:typeof globalThis.__mixdogAgentSnapshot,binding:typeof globalThis.__independentChanged})' });
-    assert.deepEqual(result.value, { node: 'undefined', refs: 'undefined', binding: 'undefined' });
+      expression: '({node:typeof process,walker:typeof globalThis.__independentState,refs:typeof globalThis.__mixdogAgentSnapshot})' });
+    assert.deepEqual(result.value, { node: 'undefined', walker: 'undefined', refs: 'undefined' });
   });
   await check('upload restricted to explicit file input and download uses plugin-owned path', async () => {
     const file = path.join(dataDir, 'fixture-upload.txt');
     await writeFile(file, 'test fixture only');
     observation = await call({ action: 'upload', tabId, target: { name: 'File', exact: true }, files: [file] });
-    assert.match(observation.frames[0].text, /fixture-upload.txt/);
+    assert.match(rendered(observation), /fixture-upload\.txt/);
     await call({ action: 'click', tabId, target: { name: 'Download fixture', exact: true } });
     const until = Date.now() + 5000;
     let downloads;
@@ -277,9 +286,12 @@ try {
   });
   await check('dialog input is not replayed, explicit handle_dialog unblocks it', async () => {
     const result = await call({ action: 'click', tabId, target: { name: 'Dialog', exact: true } });
-    assert.equal(result.disposition, 'executed');
-    assert.equal(result.dialog.type, 'alert');
+    // The alert opens inside the press: the release is not acknowledged until
+    // the dialog is answered, so the click's outcome is still pending.
+    assert.deepEqual([result.disposition, result.code, result.operationPending, result.replaySafe], ['uncertain', 'DIALOG_OPEN', true, false], rendered(result));
+    assert.match(rendered(result), /\ndialog alert "fixture dialog"/);
     observation = await call({ action: 'handle_dialog', tabId, accept: true });
+    assert.equal(observation.disposition, 'executed', rendered(observation));
     assert.ok(observation.snapshotId);
   });
   await check('popup is independently registered under same owner', async () => {
@@ -297,7 +309,7 @@ try {
       error.message += JSON.stringify(await call({ action: 'list_tabs' }));
       throw error;
     });
-    assert.match(popupObserved.frames[0].text, /Owned popup/);
+    assert.match(rendered(popupObserved), /h1 "Owned popup"/);
     await call({ action: 'close_tab', tabId: popup.tabId });
     await assert.rejects(call({ action: 'observe', tabId: popup.tabId }), /closed|unknown/i);
   });

@@ -2,9 +2,42 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
-import { FrameDriver } from '../../src/browser/frames.mjs';
+import { FrameDriver, INPUT_BINDING } from '../../src/browser/frames.mjs';
+import { DEVTOOLS_LIMITS, DevToolsRecorder } from '../../src/browser/devtools.mjs';
 import { bounded } from '../../src/async.mjs';
 import { BROWSER_STABLE_RECT } from '../../build/upstream.mjs';
+
+test('page code checks every same-origin frame for a filled secret; a same-origin frame that cannot be checked counts', async () => {
+  const { driver, debuggerAPI } = fixture();
+  const present = new Map([[7, false], [8, false], [9, true]]);
+  debuggerAPI.sendCommand = async (_method, params) => ({ result: { value: { present: present.get(params.contextId) } } });
+  driver.frames.set('root', { id: 'root', contextId: 7, origin: 'https://app.test' });
+  driver.frames.set('login', { id: 'login', parentId: 'root', contextId: 9, origin: 'https://app.test' });
+  driver.frames.set('ads', { id: 'ads', parentId: 'root', contextId: 8, origin: 'https://ads.test' });
+  assert.equal(await driver.sensitivePresent('https://app.test', false), true, 'a same-origin login iframe holds a password');
+  assert.equal(await driver.sensitivePresent('https://ads.test', false), false, 'cross-origin documents are not reachable');
+  driver.frames.set('capped', { id: 'capped', parentId: 'root', origin: 'https://ads.test', capped: true });
+  assert.equal(await driver.sensitivePresent('https://ads.test', false), true, 'a same-origin frame without a walker counts');
+});
+
+test('trusted page input is the agent\'s only when a dispatched press or key accounts for it, once and briefly', () => {
+  const { driver, page } = fixture();
+  const tripped = [];
+  page.onTrustedInput = type => tripped.push(type);
+  const event = type => driver.onMessage('Runtime.bindingCalled', { name: INPUT_BINDING, payload: type }, '');
+  driver.expectInput('pointerdown');
+  event('pointerdown');
+  event('pointerdown');
+  assert.deepEqual(tripped, ['pointerdown'], 'one press accounts for one pointerdown, in flight or not');
+  driver.settleCredit(driver.expectInput('keydown'));
+  event('pointerdown');
+  event('keydown');
+  assert.deepEqual(tripped, ['pointerdown', 'pointerdown'], 'a key credit never covers a press');
+  const late = driver.expectInput('keydown');
+  late.until = Date.now() - 1;
+  event('keydown');
+  assert.deepEqual(tripped, ['pointerdown', 'pointerdown', 'keydown'], 'a credit lapses after its command returned');
+});
 
 function fixture() {
   const changes = [], sent = [];
@@ -16,6 +49,8 @@ function fixture() {
   };
   const page = { contents: { debugger: debuggerAPI }, connected: true };
   const driver = new FrameDriver(page, reason => changes.push(reason));
+  // Tests place frames directly; the cached tree is current until an event.
+  driver.treeDirty = false;
   return { driver, page, changes, sent, debuggerAPI };
 }
 
@@ -37,6 +72,39 @@ test('frame presentation proves two animation frames and settles in the page whe
     const { method, params } = sent.at(-1);
     assert.deepEqual([method, params.contextId, params.awaitPromise], ['Runtime.evaluate', 7, true]);
   }
+});
+
+test('first input to a document waits out paint holding of every local root on the target chain, once per document', async () => {
+  const { driver, sent, debuggerAPI } = fixture();
+  driver.frames.set('root', { id: 'root', contextId: 7, documentId: 'D1' });
+  // An out-of-process iframe (its own session) is its own local root.
+  driver.frames.set('child', { id: 'child', parentId: 'root', contextId: 8, documentId: 'D2', sessionId: 'S1' });
+  driver.frames.set('inner', { id: 'inner', parentId: 'child', contextId: 10, documentId: 'D4', sessionId: 'S1' });
+  // Run the exact page expression against a timeline without contentful paint.
+  const timeline = { root: { now: 300, start: 50, fcp: false }, child: { now: 300, start: 280, fcp: true } };
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    sent.push({ method, params, sessionId });
+    const t = params.contextId === 7 ? timeline.root : timeline.child;
+    return { result: { value: vm.runInNewContext(params.expression, { performance: {
+      now: () => t.now,
+      // A page mark named like a paint entry cannot satisfy the check.
+      getEntriesByName: () => [{ name: 'first-contentful-paint', entryType: 'mark' }],
+      getEntriesByType: type => (type === 'paint' ? (t.fcp ? [{ name: 'first-contentful-paint' }] : []) : [{ responseStart: t.start }]),
+    } }) } };
+  };
+  const started = Date.now();
+  await driver.inputReady(driver.frames.get('child'));
+  const waited = Date.now() - started;
+  // Root: no contentful paint, 250 ms after responseStart → wait the remaining 450 ms.
+  assert.ok(waited >= 400 && waited < 1000, `waited ${waited} ms`);
+  assert.deepEqual(sent.map(entry => entry.params.contextId).sort(), [7, 8]);
+  sent.length = 0;
+  await driver.inputReady(driver.frames.get('child'));
+  assert.equal(sent.length, 0, 'a document past paint holding is not probed again');
+  driver.frames.set('child', { id: 'child', parentId: 'root', contextId: 9, documentId: 'D3', sessionId: 'S1' });
+  timeline.child.fcp = false; timeline.child.start = 0; timeline.child.now = 5000;
+  await driver.inputReady(driver.frames.get('child'));
+  assert.deepEqual(sent.map(entry => entry.params.contextId), [9], 'only the new document is probed');
 });
 
 test('stable geometry measurement never scrolls the target or its ancestors', async () => {
@@ -80,26 +148,72 @@ test('preparation scrolls the pinned node and frame ancestors under the input gu
   ]);
 });
 
-test('fresh refs follow the pinned DOM object, never an identical replacement', async () => {
-  const { driver } = fixture();
-  const document = {};
-  const target = { ownerDocument: document, isConnected: true };
-  const replacement = { ownerDocument: document, isConnected: true };
-  const refs = new Map([['fresh-ref', { element: target }]]);
-  driver.callOn = async (_frame, _objectId, source) =>
-    vm.runInNewContext(`(${source})`, { document, __mixdogAgentSnapshot: { refs } }).call(target);
-  assert.equal(await driver.refForObject({}, 'pinned-object'), 'fresh-ref');
-  refs.set('fresh-ref', { element: replacement });
-  await assert.rejects(driver.refForObject({}, 'pinned-object'), /replaced|absent/);
+test('walker ids resolve only in the document that issued them', async () => {
+  const { driver, debuggerAPI } = fixture();
+  const element = { localName: 'button' };
+  const state = { documentId: 'D1', resolve: id => (id === 3 ? element : null), describe: id => (id === 3 ? { role: 'button', name: 'Go' } : null) };
+  debuggerAPI.sendCommand = async (_method, params) => {
+    // Run the exact page expression against a walker state.
+    const value = vm.runInNewContext(params.expression, { __independentState: state });
+    return params.returnByValue === false
+      ? { result: value ? { type: 'object', objectId: 'node-3' } : { type: 'object', subtype: 'null' } }
+      : { result: { value: JSON.parse(JSON.stringify(value)) } };
+  };
+  const frame = { id: 'root', contextId: 1 };
+  assert.equal(await driver.resolveObject(frame, 3, 'D1'), 'node-3');
+  await assert.rejects(driver.resolveObject(frame, 3, 'D2'), error => error.code === 'STALE_REF', 'ids restart in every document');
+  await assert.rejects(driver.resolveObject(frame, 4, 'D1'), error => error.code === 'STALE_REF');
+  assert.deepEqual(await driver.describe(frame, 3, 'D1'), { described: { role: 'button', name: 'Go' } });
+  assert.deepEqual(await driver.describe(frame, 3, 'D2'), { stale: 'document' });
 });
 
-test('main-target binding events with Electron empty session ID invalidate authoritative observations', () => {
+test('the frame tree is cached until a frame, target or walker-world event; other events change nothing', () => {
   const { driver, changes } = fixture();
-  driver.frames.set('root', { contextId: 42, sessionId: undefined });
-  driver.onMessage('Runtime.bindingCalled', { name: '__independentChanged', executionContextId: 42 }, '');
-  assert.deepEqual(changes, ['document-revision']);
-  driver.onMessage('Runtime.bindingCalled', { name: '__independentChanged', executionContextId: 99 }, '');
-  assert.equal(changes.length, 1);
+  for (const [method, params, dirty] of [
+    ['Runtime.consoleAPICalled', { type: 'log', args: [] }, false],
+    ['Runtime.executionContextCreated', { context: { id: 5, name: 'page-world', auxData: { frameId: 'root' } } }, false],
+    ['Page.navigatedWithinDocument', { frameId: 'root' }, false],
+    ['Runtime.executionContextCreated', { context: { id: 6, name: driver.worldName, auxData: { frameId: 'root' } } }, true],
+    ['Page.frameAttached', { frameId: 'child', parentFrameId: 'root' }, true],
+    ['Page.frameNavigated', { frame: { id: 'root' } }, true],
+  ]) {
+    driver.treeDirty = false;
+    driver.onMessage(method, params, '');
+    assert.equal(driver.treeDirty, dirty, method);
+  }
+  assert.ok(!changes.includes('document-revision'), 'DOM changes never void anything');
+});
+
+test('snapshots run per frame in parallel; a subframe failure is reported in its entry, never thrown', async () => {
+  const { driver, debuggerAPI } = fixture();
+  const root = { id: 'root', contextId: 1 };
+  const ad = { id: 'ad', parentId: 'root', contextId: 2, sessionId: 'oopif', url: 'https://ads.test/' };
+  const broken = { id: 'broken', parentId: 'root', contextId: 3 };
+  for (const frame of [root, ad, broken]) driver.frames.set(frame.id, frame);
+  const checkpoint = { documentId: 'D', revision: 0, w: 100, h: 80, x: 0, y: 0, dpr: 1 };
+  let inFlight = 0, overlapped = false;
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Runtime.evaluate') {
+      inFlight++;
+      await new Promise(resolve => setImmediate(resolve));
+      overlapped ||= inFlight > 1;
+      inFlight--;
+      if (params.contextId === 3) throw new Error('Cannot find context with specified id');
+      const nodes = params.contextId === 1 ? [{ id: 9, k: 'f', r: 'iframe', n: '', b: [0, 0, 10, 10], vp: true, o: 0 }] : [];
+      return { result: { value: { checkpoint, nodes, texts: [], gone: [], renamed: [], url: 'u', title: 't', scrollHeight: 80 } } };
+    }
+    if (method === 'DOM.getFrameOwner') return { backendNodeId: params.frameId === 'ad' ? 70 : 71 };
+    if (method === 'DOM.resolveNode') return { object: { objectId: `owner-${params.backendNodeId}` } };
+    if (method === 'Runtime.callFunctionOn') return { result: { value: params.objectId === 'owner-70' ? 9 : 0 } };
+    return {};
+  };
+  const frames = await driver.snapshot();
+  assert.equal(overlapped, true, 'frames are captured concurrently');
+  const byId = Object.fromEntries(frames.map(frame => [frame.frameId, frame]));
+  assert.ok(byId.root.snapshot && byId.ad.snapshot);
+  assert.deepEqual([byId.broken.snapshot, byId.broken.error], [null, 'FRAME_SNAPSHOT_FAILED']);
+  assert.equal(byId.ad.ownerId, 9, 'the owner element is mapped to its walker id');
+  assert.equal(byId.broken.ownerId, -1, 'an owner that exists but was not emitted marks its frame hidden');
 });
 
 test('user evaluation gets a separate isolated world without universal access or fake user activation', async () => {
@@ -110,7 +224,8 @@ test('user evaluation gets a separate isolated world without universal access or
     return { result: { value: 'no private refs' } };
   };
   const frame = { id: 'child', contextId: 42, sessionId: 'oopif' };
-  assert.equal(await driver.evaluateUser(frame, 'typeof __mixdogAgentSnapshot'), 'no private refs');
+  const contextId = await driver.evaluationContext(frame, 'isolated');
+  assert.equal(await driver.evaluateUser(frame, 'typeof __independentState', 'isolated', contextId), 'no private refs');
   assert.notEqual(sent[0].params.worldName, driver.worldName);
   assert.equal(sent[0].params.grantUniveralAccess, false);
   assert.equal(sent[1].params.contextId, 900);
@@ -166,8 +281,14 @@ test('iframe initialization still precedes startup release and worker descendant
   await driver.waitForIdle();
   assert.deepEqual(sent.map(command => command.method), [
     'Page.enable', 'Runtime.enable', 'DOM.enable', 'Page.setInterceptFileChooserDialog',
-    'Runtime.addBinding', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger',
+    'Page.addScriptToEvaluateOnNewDocument', 'Runtime.addBinding', 'Emulation.setFocusEmulationEnabled', 'Target.setAutoAttach',
+    'Runtime.runIfWaitingForDebugger',
   ]);
+  const binding = sent.find(command => command.method === 'Runtime.addBinding');
+  assert.deepEqual([binding.params.name, binding.params.executionContextName], [INPUT_BINDING, driver.worldName],
+    'the trusted-input binding exists only in the walker world');
+  const install = sent.find(command => command.method === 'Page.addScriptToEvaluateOnNewDocument');
+  assert.deepEqual([install.sessionId, install.params.worldName], ['frame', driver.worldName], 'the walker runs only in its isolated world');
   assert.equal(driver.sessions.get('frame'), 'child-frame');
   driver.onMessage('Target.attachedToTarget', {
     sessionId: 'parent-worker', targetInfo: { type: 'worker', targetId: 'parent' }, waitingForDebugger: true,
@@ -225,8 +346,27 @@ test('failed iframe initialization never becomes an uninitialized iframe startup
     sessionId: 'frame', targetInfo: { type: 'iframe', targetId: 'target' }, waitingForDebugger: true,
   });
   await driver.waitForIdle();
-  assert.match(page.frameFailure, /Child target initialization failed/);
   assert.equal(sent.some(command => command.method === 'Runtime.runIfWaitingForDebugger'), false);
+  // The failed iframe stays paused and is an unavailable frame; it never
+  // blocks observing the page.
+  assert.ok(!page.frameFailure);
+  assert.ok(driver.targets.get('frame').failure);
+  sent.length = 0;
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    sent.push({ method, params, sessionId });
+    if (method === 'Page.getFrameTree') {
+      return { frameTree: { frame: { id: 'root', url: 'http://a.test/' }, childFrames: [{ frame: { id: 'target', parentId: 'root', url: 'http://b.test/' } }] } };
+    }
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: params.frameId === 'root' ? 5 : 6 };
+    if (method === 'Runtime.evaluate') return { result: { value: true } };
+    return {};
+  };
+  driver.treeDirty = true;
+  const frames = await driver.refresh();
+  assert.deepEqual(frames.map(frame => [frame.id, !!frame.unavailable]).sort(), [['root', false], ['target', true]]);
+  assert.equal(sent.filter(command => command.sessionId === 'frame').length, 0, 'a failed session is never used');
+  await assert.rejects(driver.evaluate(frames.find(frame => frame.id === 'target'), '1'), error => error.code === 'FRAME_UNAVAILABLE',
+    'an unavailable frame is never evaluated (no context id would mean the page main world)');
 });
 
 test('target startup actual replies remain fenced after actor cancellation', async () => {
@@ -409,7 +549,7 @@ test('actual child content-box scaling and parent occlusion are checked before r
   const child = { id: 'child', parentId: 'root', sessionId: 'oopif', contextId: 2 };
   driver.frames.set('root', parent);
   driver.frames.set('child', child);
-  driver.checkpoint = async f => ({ width: f === child ? 200 : 1000, height: f === child ? 100 : 800 });
+  driver.viewport = async f => ({ w: f === child ? 200 : 1000, h: f === child ? 100 : 800 });
   driver.send = async method => {
     if (method === 'DOM.getFrameOwner') return { backendNodeId: 7 };
     if (method === 'DOM.getBoxModel') return { model: { content: [100, 50, 500, 50, 500, 250, 100, 250] } };
@@ -432,7 +572,7 @@ test('nested same-target quads are normalized into the immediate parent before c
     const inner = { id: 'inner', parentId: 'outer', contextId: 3 };
     for (const frame of [root, outer, inner]) driver.frames.set(frame.id, frame);
     const sizes = { root: [1000, 800], outer: [700, 500], inner: [400, 250] };
-    driver.checkpoint = async frame => ({ width: sizes[frame.id][0], height: sizes[frame.id][1] });
+    driver.viewport = async frame => ({ w: sizes[frame.id][0], h: sizes[frame.id][1] });
     const quads = scaled ? {
       outer: [100, 100, 625, 100, 625, 475, 100, 475],
       inner: [137.5, 145, 377.5, 145, 377.5, 295, 137.5, 295],
@@ -459,19 +599,6 @@ test('nested same-target quads are normalized into the immediate parent before c
   }
 });
 
-test('frame membership, property revisions and viewport changes reject old checkpoints', async () => {
-  const { driver } = fixture();
-  const root = { id: 'root' };
-  const base = { documentId: 'd', revision: 0, width: 100, height: 100, x: 0, y: 0 };
-  driver.refresh = async () => [root];
-  driver.checkpoint = async () => ({ ...base });
-  await driver.assertCheckpoints(new Map([['root', base]]));
-  driver.checkpoint = async () => ({ ...base, revision: 1 });
-  await assert.rejects(driver.assertCheckpoints(new Map([['root', base]])), /Stale/);
-  driver.refresh = async () => [root, { id: 'new-frame' }];
-  await assert.rejects(driver.assertCheckpoints(new Map([['root', base]])), /membership/);
-});
-
 test('rotated frames fail rather than falling back to guessed offsets', async () => {
   const { driver } = fixture();
   driver.frames.set('root', { id: 'root' });
@@ -483,7 +610,7 @@ test('rotated frames fail rather than falling back to guessed offsets', async ()
 test('even subpixel rotation/skew is rejected rather than approximated as an axis-aligned frame', async () => {
   const { driver } = fixture();
   driver.frames.set('root', { id: 'root' });
-  driver.checkpoint = async () => ({ width: 100, height: 100 });
+  driver.viewport = async () => ({ w: 100, h: 100 });
   driver.callOn = async () => true;
   driver.send = async method => {
     if (method === 'DOM.getFrameOwner') return { backendNodeId: 1 };
@@ -493,29 +620,6 @@ test('even subpixel rotation/skew is rejected rather than approximated as an axi
   };
   await assert.rejects(driver.toRoot({ id: 'child', parentId: 'root' }, { x: 50, y: 50 }),
     error => error.code === 'UNSUPPORTED_FRAME_GEOMETRY');
-});
-
-test('silent property writes, shadow values and nested scroll advance revision without returning passwords', async () => {
-  const { driver } = fixture();
-  const password = { value: 'PRIVATE_PASSWORD', isConnected: true, children: [], scrollTop: 0 };
-  const shadowInput = { value: 'one', isConnected: true, children: [], scrollTop: 0 };
-  const context = vm.createContext({
-    document: { documentElement: { children: [password], shadowRoot: { children: [shadowInput] } } },
-    __independentState: { documentId: 'document', revision: 0, syncShadows: () => [password, shadowInput] },
-    __independentChanged() {},
-    innerWidth: 100, innerHeight: 80, scrollX: 0, scrollY: 0,
-  });
-  driver.evaluate = async (_frame, expression) => vm.runInContext(expression, context);
-  const first = await driver.checkpoint({});
-  assert.equal(first.revision, 0);
-  assert.equal(JSON.stringify(first).includes('PRIVATE_PASSWORD'), false);
-  password.value = 'NEW_PRIVATE_PASSWORD';
-  assert.equal((await driver.checkpoint({})).revision, 1);
-  shadowInput.value = 'two';
-  assert.equal((await driver.checkpoint({})).revision, 2);
-  shadowInput.scrollTop = 10;
-  assert.equal((await driver.checkpoint({})).revision, 3);
-  assert.equal((await driver.checkpoint({})).revision, 3);
 });
 
 test('actor cancellation reaches reused CDP termination and keeps actual cleanup fenced; releases bypass aborted actor', async () => {
@@ -594,38 +698,139 @@ test('input dispatch rechecks its hiddenness/generation guard AFTER an earlier c
   assert.equal(sent.filter(s => s.method === 'Input.dispatchMouseEvent').length, 0);
 });
 
-test('redundant resize notifications do not invent revisions; real viewport changes including round trips remain stale', async () => {
+test('refresh rebuilds the tree once per change, installs the walker in each frame and reuses the cache', async () => {
   const { driver } = fixture();
-  const listeners = new Map(), reasons = [];
-  let mutated;
-  const context = vm.createContext({
-    document: { documentElement: { children: [] } },
-    innerWidth: 100, innerHeight: 80, devicePixelRatio: 1, scrollX: 0, scrollY: 0,
-    MutationObserver: class {
-      constructor(callback) { mutated = callback; }
-      observe() {}
-    },
-    addEventListener(name, handler) { listeners.set(name, handler); },
-    __independentChanged(reason) { reasons.push(reason); },
-  });
-  driver.send = async method => method === 'Page.getFrameTree'
-    ? { frameTree: { frame: { id: 'root', url: 'http://fixture.invalid/' } } }
-    : { executionContextId: 1 };
-  driver.evaluate = async (_frame, expression) => vm.runInContext(expression, context);
+  const commands = [];
+  driver.send = async (method, params, sessionId) => {
+    commands.push(method);
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'root', url: 'http://fixture.invalid/' }, childFrames: [{ frame: { id: 'child', parentId: 'root', url: 'about:blank' } }] } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: params.frameId === 'root' ? 1 : 2 };
+    return { result: { value: true } };
+  };
+  driver.treeDirty = true;
+  const [first, second] = await Promise.all([driver.refresh(), driver.refresh()]);
+  assert.deepEqual([first.length, second.length], [2, 2]);
+  assert.equal(commands.filter(method => method === 'Page.getFrameTree').length, 1, 'concurrent refreshes share one rebuild');
+  assert.equal(commands.filter(method => method === 'Runtime.evaluate').length, 2, 'walker installed once per frame');
+  commands.length = 0;
   await driver.refresh();
-  const initial = await driver.checkpoint(driver.frames.get('root'));
-  listeners.get('resize')();
-  const duplicate = await driver.checkpoint(driver.frames.get('root'));
-  assert.equal(duplicate.revision, initial.revision, 'Unchanged geometry is the same viewport, not a stale observation');
-  context.innerWidth = 101;
-  listeners.get('resize')();
-  context.innerWidth = 100;
-  listeners.get('resize')();
-  assert.equal((await driver.checkpoint(driver.frames.get('root'))).revision, initial.revision + 2);
-  context.devicePixelRatio = 2;
-  listeners.get('resize')();
-  mutated();
-  listeners.get('scroll')();
-  assert.equal((await driver.checkpoint(driver.frames.get('root'))).revision, initial.revision + 5);
-  assert.deepEqual(reasons, ['resize', 'resize', 'resize', 'mutation', 'scroll']);
+  assert.deepEqual(commands, [], 'a current tree costs no commands');
+  driver.onMessage('Page.frameDetached', { frameId: 'child' }, '');
+  await driver.refresh();
+  assert.equal(commands.filter(method => method === 'Page.getFrameTree').length, 1);
+});
+
+test('focus emulation is on in automation and off while the person controls the page', async () => {
+  const { driver, sent } = fixture();
+  await driver.setNativeMode(true);
+  await driver.setNativeMode(false);
+  assert.deepEqual(sent.filter(command => command.method === 'Emulation.setFocusEmulationEnabled')
+    .map(command => [command.params.enabled, command.sessionId]), [[false, undefined], [true, undefined]]);
+});
+
+test('DevTools recording starts on main, iframe and worker sessions before they run and never fails their setup', async () => {
+  const { driver, page, sent, debuggerAPI, changes } = fixture();
+  page.devtools = new DevToolsRecorder(() => 'automation', sessionId => driver.targets.get(sessionId)?.type);
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    sent.push({ method, params, sessionId });
+    if (method === 'Log.enable') throw new Error('Log is unavailable on this target');
+    return {};
+  };
+  await driver.start();
+  // Recording (and its replay cutoff) precedes Runtime.enable on page and iframe sessions.
+  assert.deepEqual(sent.map(command => command.method), [
+    'Network.enable', 'Log.enable', 'Performance.enable', 'Page.enable', 'Runtime.enable', 'DOM.enable',
+    'Page.setInterceptFileChooserDialog', 'Page.addScriptToEvaluateOnNewDocument', 'Runtime.addBinding', 'Emulation.setFocusEmulationEnabled', 'Target.setAutoAttach',
+  ]);
+  assert.equal(sent[0].params.maxTotalBufferSize, 6 * 1024 * 1024);
+  sent.length = 0;
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'frame', targetInfo: { type: 'iframe', targetId: 'child-frame' }, waitingForDebugger: true,
+  });
+  await driver.waitForIdle();
+  assert.deepEqual(sent.map(command => command.method), [
+    'Network.enable', 'Log.enable', 'Page.enable', 'Runtime.enable', 'DOM.enable', 'Page.setInterceptFileChooserDialog',
+    'Page.addScriptToEvaluateOnNewDocument', 'Runtime.addBinding', 'Emulation.setFocusEmulationEnabled', 'Target.setAutoAttach',
+    'Runtime.runIfWaitingForDebugger',
+  ]);
+  assert.equal(sent[0].params.maxTotalBufferSize, 1024 * 1024);
+  sent.length = 0;
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'worker', targetInfo: { type: 'worker', targetId: 'w' }, waitingForDebugger: true,
+  });
+  await driver.waitForIdle();
+  // Worker recording starts after the startup release, outside the startup fence.
+  assert.deepEqual(sent.map(command => [command.method, command.sessionId]), [
+    ['Target.setAutoAttach', 'worker'], ['Runtime.runIfWaitingForDebugger', 'worker'],
+    ['Runtime.enable', 'worker'], ['Network.enable', 'worker'], ['Log.enable', 'worker'],
+  ]);
+  assert.equal(page.frameFailure ?? null, null, 'A missing diagnostic domain is not a target failure');
+  assert.equal(driver.sessions.has('worker'), false);
+  // Worker Runtime events are DevTools records only, never observation changes.
+  const before = changes.length;
+  driver.onMessage('Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: 'from worker' }], timestamp: Date.now() }, 'worker');
+  driver.onMessage('Runtime.executionContextsCleared', {}, 'worker');
+  assert.equal(changes.length, before);
+  assert.deepEqual(page.devtools.consoleRows({}).rows, [{ i: 1, msg: 'from worker', in: 'worker' }]);
+});
+
+test('worker recording never holds the startup fence; replays, console stores and flushes are bounded per session', async () => {
+  const { driver, page, sent, debuggerAPI } = fixture();
+  page.devtools = new DevToolsRecorder(() => 'automation', sessionId => driver.targets.get(sessionId)?.type);
+  const hung = [];
+  debuggerAPI.sendCommand = (method, params, sessionId) => {
+    sent.push({ method, params, sessionId });
+    // A worker whose recording domains never answer.
+    if (sessionId === 'worker' && ['Runtime.enable', 'Network.enable', 'Log.enable'].includes(method)) return new Promise(resolve => hung.push(resolve));
+    return Promise.resolve({});
+  };
+  await driver.start();
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'worker', targetInfo: { type: 'worker', targetId: 'w' }, waitingForDebugger: true,
+  });
+  await driver.waitForIdle();
+  driver.assertNoDialogCleanup();
+  assert.equal(hung.length, 3, 'Recording was requested but is not part of startup');
+  // An already-running iframe replays stored console entries on Runtime.enable: they are cut off.
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'frame', targetInfo: { type: 'iframe', targetId: 'f' }, waitingForDebugger: false,
+  });
+  await driver.waitForIdle();
+  const log = (value, timestamp, sessionId) => driver.onMessage('Runtime.consoleAPICalled', {
+    type: 'log', args: [{ type: 'string', value }], timestamp,
+  }, sessionId);
+  log('replayed', Date.now() - 1000, 'frame');
+  await new Promise(resolve => setTimeout(resolve, 2));
+  log('fresh', Date.now(), 'frame');
+  assert.deepEqual(page.devtools.consoleRows({}).rows.map(row => row.msg), ['fresh']);
+  sent.length = 0;
+  for (let i = 0; i < DEVTOOLS_LIMITS.discardEvery; i++) log(`m${i}`, Date.now(), 'frame');
+  assert.deepEqual(sent.map(command => [command.method, command.sessionId]), [['Runtime.discardConsoleEntries', 'frame']]);
+  sent.length = 0;
+  await driver.devtoolsFlush();
+  assert.deepEqual(sent.map(command => [command.method, command.sessionId]).sort(),
+    [['Runtime.getIsolateId', 'frame'], ['Runtime.getIsolateId', 'worker'], ['Runtime.getIsolateId', undefined]].sort());
+  for (const resolve of hung) resolve({});
+});
+
+test('page-world evaluation is an explicit opt-in bound to the frame main world of its own session', async () => {
+  const { driver, sent, debuggerAPI } = fixture();
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    sent.push({ method, params, sessionId });
+    return { result: { value: 'page global' } };
+  };
+  driver.onMessage('Runtime.executionContextCreated', { context: { id: 5, auxData: { isDefault: true, frameId: 'root' } } }, '');
+  driver.onMessage('Runtime.executionContextCreated', { context: { id: 6, auxData: { isDefault: false, frameId: 'root' } } }, '');
+  driver.onMessage('Runtime.executionContextCreated', { context: { id: 9, auxData: { isDefault: true, frameId: 'child' } } }, 'oopif');
+  const root = { id: 'root', contextId: 1 };
+  assert.equal(await driver.evaluateUser(root, 'window.app', 'page', await driver.evaluationContext(root, 'page')), 'page global');
+  assert.deepEqual(sent.map(command => [command.method, command.params.contextId, command.params.userGesture]), [['Runtime.evaluate', 5, undefined]]);
+  assert.deepEqual(driver.pageContext('child'), { contextId: 9, sessionId: 'oopif' });
+  // The context is resolved before dispatch: a missing page world sends nothing.
+  await assert.rejects(driver.evaluationContext({ id: 'child' }, 'page'), error => error.code === 'STALE_FRAME');
+  driver.onMessage('Runtime.executionContextDestroyed', { executionContextId: 9 }, 'oopif');
+  assert.equal(driver.pageContext('child'), undefined);
+  driver.onMessage('Runtime.executionContextsCleared', {}, '');
+  await assert.rejects(driver.evaluationContext({ id: 'root' }, 'page'), error => error.code === 'STALE_FRAME');
+  assert.equal(sent.length, 1);
 });

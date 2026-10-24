@@ -23,13 +23,14 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 | deps | `npm ci` | `node_modules/` |
 | runtime | `node node_modules/electron/install.js` (when install scripts were skipped) | `node_modules/electron/dist/` |
 | upstream | `npm run vendor` | `vendor/mixdog/**` fetched at the lock commit, git-blob sha1 verified |
-| bundle | `npm run build` | `build/upstream.mjs`, `build/app/{mcp,hook,companion}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/bundle-inputs.json` |
+| bundle | `npm run build` | `build/upstream.mjs`, `build/app/{mcp,hook,companion}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
 | native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/licenses/native/*` |
 | package | `npm run package` | a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | verify | `$env:WB_PACKAGE_DIR="<directory>"; npm run test:package` | — |
 
 - The licenses dir must contain `gcc/COPYING3`, `gcc/COPYING.RUNTIME`, `mingw-w64/COPYING.MinGW-w64-runtime.txt` and `winpthreads/COPYING`. MinGW-w64 ships it next to `bin`: `"$(Split-Path (Split-Path (Get-Command g++).Source))\licenses"`.
-- `scripts/build.mjs` adapters (vendored `settle` and `command` shims, scroll removal in `stable-rect.ts`, frame branch in `snapshot-scripts.ts`) throw unless each applies exactly once.
+- `scripts/build.mjs` adapters (vendored `settle` and `command` shims, scroll removal in `stable-rect.ts`, extraction of `compact`, `inferRole`, `accessibleName` and `stateList` from `snapshot-scripts.ts` via `walker.mjs extractUpstreamSources`, which removes the `textContent` name fallback and routes the label, `aria-labelledby` and content reads of `accessibleName` through `renderedText`) throw unless each applies exactly once.
+- `scripts/package.mjs` ships exactly the `upstream.lock.json` files from `vendor/mixdog/` and stops when one differs from its locked git blob id (checked at package time); `tests/package/layout.test.mjs` asserts the shipped set.
 - The SDK patch (`adaptSdkCancellation`) matches files under `<repo>/node_modules/@modelcontextprotocol/sdk` by real path. In a copied tree, copy `node_modules` (only `electron` may be a junction); otherwise the patch silently skips and package cancellation tests fail.
 - `scripts/package.mjs` copies an explicit list. A new shipped file needs `package.mjs` and `tests/package/layout.test.mjs`. npm license texts come from the real bundle graph (`build/bundle-inputs.json`); a bundled package without a LICENSE or NOTICE file fails packaging.
 
@@ -61,6 +62,7 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
 | --- | --- | --- |
 | v0.1.0 | `f9ed383`, before the history reset; not an ancestor of `main` | `win-browser-v0.1.0-windows-x64.zip` (sha256 `78aa171135fb61cec9e700c7039d0e41eb98db5173eba4a7eb6464724cff414b`) and its `.sha256` |
 | v0.2.0 | tag `v0.2.0` on `main` | `win-browser-v0.2.0-windows-x64.zip` (sha256 `7c270649a7ac1463c51a2428a037520a7249349fe3b4ae648593a8fc4445da80`) and its `.sha256` |
+| v0.3.0 | tag `v0.3.0` on `main` | `win-browser-v0.3.0-windows-x64.zip` (sha256 `4120dfb2846936072b04ab555fceb1acba5789eaf64dbc1aabe585e248a4b831`) and its `.sha256` |
 
 ## Licensing
 

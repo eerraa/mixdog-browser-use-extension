@@ -9,8 +9,13 @@ function errorData(error) {
   return {
     code: typeof error?.code === 'string' ? error.code : 'RPC_ERROR',
     message: String(error?.message ?? error),
-    ...(typeof error?.snapshotId === 'string' ? { snapshotId: error.snapshotId } : {}),
     ...(Array.isArray(error?.candidates) ? { candidates: error.candidates } : {}),
+    // The not-executed disposition of a browser input that never dispatched.
+    ...(error?.requestedInputDispatched === false ? {
+      requestedInputDispatched: false,
+      ...(typeof error.preparation === 'string' ? { preparation: error.preparation } : {}),
+      ...(typeof error.tabId === 'string' ? { tabId: error.tabId } : {}),
+    } : {}),
   };
 }
 

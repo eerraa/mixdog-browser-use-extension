@@ -81,15 +81,16 @@ test('transport closure aborts owned handlers and rejects pending calls without 
 });
 
 test('structured failures preserve actionable target evidence without changing it', async t => {
-  const candidates = [{ ref: 'fresh-ref', name: 'Save', frameId: 'frame-1' }];
+  const candidates = ['e4 button "Save"', 'e9 button "Save"'];
   const { client } = await pair(t, () => {
     throw Object.assign(new Error('Ambiguous target'), {
-      code: 'AMBIGUOUS_TARGET', snapshotId: 'fresh-snapshot', candidates,
+      code: 'AMBIGUOUS_TARGET', candidates, requestedInputDispatched: false, preparation: 'none', tabId: 't1', private: 'not sent',
     });
   });
   await assert.rejects(client.request('work', {}), error =>
-    error.code === 'AMBIGUOUS_TARGET' && error.snapshotId === 'fresh-snapshot'
-      && JSON.stringify(error.candidates) === JSON.stringify(candidates));
+    error.code === 'AMBIGUOUS_TARGET' && JSON.stringify(error.candidates) === JSON.stringify(candidates)
+      && error.requestedInputDispatched === false && error.preparation === 'none' && error.tabId === 't1'
+      && error.private === undefined);
 });
 
 test('oversized input is rejected before service dispatch', async t => {

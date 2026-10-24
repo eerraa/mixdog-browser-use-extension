@@ -11,11 +11,11 @@ sections it names → `testing.md` matrix.
 | Key | Value |
 | --- | --- |
 | Product | Independent Windows Browser, a folder-registered Mixdog plugin named `win-browser` |
-| Agent surface | MCP tool `mcp__plugin-win-browser__browse` (24 actions), skill `independent-browser`, host hooks (auth and lifecycle only) |
+| Agent surface | MCP tool `mcp__plugin-win-browser__browse` (29 actions, including DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs), skill `independent-browser`, host hooks (auth and lifecycle only) |
 | Runtime | Own Electron 44.9.1 companion per MCP connection; one window per page (toolbar + live page + input shield) |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
-| Version | `0.2.0`: single-window toolbar UI. Release history and tags: `build-release.md` |
+| Version | `0.3.0`: text perception, agent DevTools and script runner. Release history and tags: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
 ## Doc system
@@ -26,11 +26,11 @@ Each fact has one owner. Other docs link to the owner instead of repeating it.
 | --- | --- | --- |
 | `AGENTS.md` | identity, hard rules, doc ownership, commands, task router | always first |
 | `docs/agents/architecture.md` | processes, call path, module map, Electron hooks, page and window model, data and package layout | locating code, tracing a flow |
-| `docs/agents/contracts.md` | binding invariants C1–C10, authority, observation and input rules, handoff state machine, permissions, result vocabulary | before any behavior change or review |
-| `docs/agents/change-map.md` | recipes R1–R16: request → files and symbols → co-changes → tests → docs | implementing a request |
+| `docs/agents/contracts.md` | binding invariants C1–C10, authority, observation and input rules, DevTools reads, script runner, handoff state machine, permissions, result vocabulary | before any behavior change or review |
+| `docs/agents/change-map.md` | recipes R1–R18: request → files and symbols → co-changes → tests → docs | implementing a request |
 | `docs/agents/testing.md` | suites, prerequisites, fixtures, where to add tests, manual checks, test artifacts | verifying a change |
 | `docs/agents/build-release.md` | pins, build and package pipeline, versioning, release, licensing | building, packaging, upgrading, releasing |
-| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D10) | proposing a design change; "why not X?" |
+| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D22) | proposing a design change; "why not X?" |
 | `README.md` | end-user install, usage, safety (shipped) | user-visible behavior changes |
 | `skills/independent-browser/SKILL.md` | how agents use the tool (shipped) | tool behavior or usage changes |
 | `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | pins, vendored files or patches change |
@@ -87,7 +87,7 @@ Prerequisites and caveats: `testing.md`, `build-release.md`.
 | New or changed `browse` action or argument | R1 |
 | Toolbar, window chrome, labels, languages | R2 |
 | Handoff, Stop, resume, fail-closed behavior | R3 |
-| Observation, targeting, frames, input dispatch | R4 |
+| Observation, perception, text results, refs, settle, signals, targeting, frames, input dispatch | R4 |
 | JS dialogs, file uploads, downloads | R5 |
 | Device or web permissions, delegation policy | R6 |
 | Profiles, data directories, connection lifetime | R7 |
@@ -100,6 +100,8 @@ Prerequisites and caveats: `testing.md`, `build-release.md`.
 | MCP SDK upgrade | R14 |
 | Native helpers | R15 |
 | Browser identity (user agent) | R16 |
+| DevTools reads (console, network, inspect, performance), page-world evaluate, human DevTools | R17 |
+| Script runner (`run`): script API, ops, sandbox, run report | R18 |
 | Not listed | find the module in `architecture.md`, apply the nearest recipe, then add a recipe |
 
 ## Done when

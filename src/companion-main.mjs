@@ -57,6 +57,7 @@ app.whenReady().then(async () => {
     dataDir: paths.directory,
     consentHelperPath: path.join(root, 'bin', 'native-consent.exe'),
     toolbarPreloadPath: path.join(root, 'app', 'toolbar-preload.cjs'),
+    runnerPreloadPath: path.join(root, 'app', 'runner-preload.cjs'),
     policy: await BrowserPolicy.load(root),
     onRevokeConnection: () => terminate('permission-revocation'),
   });
@@ -95,6 +96,7 @@ app.whenReady().then(async () => {
         if (method === 'end') {
           // Keep tombstones even when end precedes the first tool request.
           authority.end(params.sessionId, params.event);
+          host.endSession(params.sessionId);
           return { ended: true };
         }
         if (method === 'issue') {

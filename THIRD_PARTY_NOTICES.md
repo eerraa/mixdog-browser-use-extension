@@ -15,13 +15,20 @@ Only these browser implementation files are reused:
 - `apps/desktop/src/main/browser/snapshot-scripts.ts`
 - `apps/desktop/src/main/browser/semantic-query.ts`
 - `apps/desktop/src/main/browser/stable-rect.ts`
-- `apps/desktop/src/main/browser/ref-recovery.ts`
 - `apps/desktop/src/main/browser/actionability.ts`
 - `apps/desktop/src/main/browser/cdp-execution.ts`
 
 Statement of changes: the original files remain unmodified as source artifacts.
-The build disables recursive same-origin frame traversal in the DOM fallback
-because this host captures each frame in its own isolated world. Standalone
+At build time, `scripts/build.mjs` extracts the `compact`, `inferRole`,
+`accessibleName` and `stateList` functions from `snapshot-scripts.ts`, each
+guarded to match exactly once (`src/browser/perception/walker.mjs`
+`extractUpstreamSources`), removes the `|| el.textContent` accessible-name
+fallback, and replaces the `textContent` reads of labels and `aria-labelledby`
+targets and the `innerText` content read with a plugin-owned rendered-text
+helper, so style, script and unrendered text never become names. The independent
+perception walker composes them; the upstream snapshot expression itself is no
+longer used. `semantic-query.ts` ranks `find` matches and `snapshot-scripts.ts`
+supplies the target point expression. Standalone
 abort/pause and bounded CDP timeout adapters replace host-local imports.
 The build removes scrolling from stable-rectangle measurements; the host
 prepares the exact target and ancestor viewports before a new observation

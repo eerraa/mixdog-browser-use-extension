@@ -5,9 +5,26 @@ let focused = null;
 export const ownedWindows = [];
 export const ownedViews = [];
 export const profiles = [];
-const image = Buffer.alloc(24);
-image.writeUInt32BE(100, 16);
-image.writeUInt32BE(80, 20);
+// A 100×80 native image whose pixels a test can change (fixtureImage.pixels).
+export const fixtureImage = { width: 100, height: 80, pixels: Buffer.alloc(100 * 80 * 4) };
+const nativeImage = (width = fixtureImage.width, height = fixtureImage.height, pixels = Buffer.from(fixtureImage.pixels), crop = null) => ({
+  isEmpty: () => false,
+  getSize: () => ({ width, height }),
+  toBitmap: () => {
+    if (!crop) return Buffer.from(pixels);
+    const rows = [];
+    for (let y = crop.y; y < crop.y + crop.height; y++) rows.push(pixels.subarray((y * width + crop.x) * 4, (y * width + crop.x + crop.width) * 4));
+    return Buffer.concat(rows);
+  },
+  crop: rect => nativeImage(width, height, pixels, rect),
+  resize: ({ width: w, height: h }) => nativeImage(w, h, Buffer.alloc(w * h * 4)),
+  toPNG: () => {
+    const png = Buffer.alloc(24);
+    png.writeUInt32BE(width, 16);
+    png.writeUInt32BE(height, 20);
+    return png;
+  },
+});
 export const app = { getLocale: () => 'en-US', commandLine: { appendSwitch() {} } };
 export const nativeTheme = { shouldUseDarkColors: false };
 // Models OS keyboard focus arriving before its focus event is handled.
@@ -36,17 +53,32 @@ export class FixtureContents extends EventEmitter {
   }
   setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }
   setBackgroundThrottling(allowed) { this.backgroundThrottling = allowed; }
-  async capturePage() { return { toPNG: () => image, isEmpty: () => false }; }
+  async capturePage() { this.captures = (this.captures ?? 0) + 1; return nativeImage(); }
   async executeJavaScript() { return null; }
   send(channel, ...args) { this.sent.push([channel, ...args]); }
   reload() { this.reloads++; }
   stop() {}
+  // Human DevTools: models only the opened state and its events. With
+  // devToolsDelay the front end loads first; like Electron, it is not yet
+  // "opened" then, and a close request during that load has no effect.
+  // devToolsDelay 'manual' loads until finishDevToolsLoad(), however long.
+  openDevTools(options) {
+    this.devToolsOptions = options;
+    if (this.devTools || this.devToolsLoading) return;
+    const open = () => { this.devToolsLoading = null; this.devTools = true; this.emit('devtools-opened'); };
+    if (this.devToolsDelay === 'manual') this.devToolsLoading = this.finishDevToolsLoad = open;
+    else if (this.devToolsDelay) this.devToolsLoading = setTimeout(open, this.devToolsDelay);
+    else open();
+  }
+  closeDevTools() { if (this.devTools) { this.devTools = false; this.emit('devtools-closed'); } }
+  isDevToolsOpened() { return !!this.devTools; }
   async loadURL(url) {
     if (this.destroyed) throw new Error('Object has been destroyed');
     this.url = url;
     this.mainFrame.url = url;
     this.emit('did-start-navigation', { url, isSameDocument: false, isMainFrame: true, frame: this.mainFrame });
     this.emit('did-navigate');
+    this.emit('dom-ready');
   }
   close() {
     if (this.destroyed) return;
@@ -93,8 +125,12 @@ export class BrowserWindow extends EventEmitter {
   isMinimized() { return this.minimized; }
   minimize() { this.minimized = true; this.emit('minimize'); }
   restore() { if (this.minimized) { this.minimized = false; this.emit('restore'); } }
-  focus() {}
-  show() { this.visible = true; this.emit('show'); }
+  // Models OS activation: show() activates the window, showInactive() never does.
+  focus() { this.activated = true; }
+  isFocused() { return !!this.activated; }
+  flashFrame(flag) { this.flashing = flag; }
+  show() { this.visible = true; this.activated = true; this.emit('show'); }
+  showInactive() { this.visible = true; this.emit('show'); }
   hide() { this.visible = false; this.emit('hide'); }
   loadURL(url) { return this.webContents.loadURL(url); }
   // Child views and their contents outlive the window, as in Electron.
@@ -106,6 +142,7 @@ export class BrowserWindow extends EventEmitter {
   }
 }
 export const Menu = { buildFromTemplate: items => ({ items }) };
+export const ipcMain = { handle() {}, removeHandler() {} };
 export const dialog = { showMessageBox: async () => { throw new Error('Human prompts must not run in unit tests'); } };
 export const webContents = { fromFrame: frame => frame.owner };
 export const session = {
