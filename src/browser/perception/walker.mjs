@@ -197,6 +197,18 @@ function pageInstall(U) {
       try { globalThis.__wbTrustedInput?.(type); } catch { /* binding absent */ }
     }, true);
   }
+  // A choice in a browser picker or dropdown window is made in a separate
+  // popup: the page sees no pointerdown or keydown, only the trusted value
+  // change on the control that opened it.
+  const pickerTypes = new Set(['date', 'datetime-local', 'month', 'week', 'time', 'color']);
+  const opensPicker = el => el?.localName === 'select' ? !el.multiple && el.size <= 1
+    : el?.localName === 'input' && (pickerTypes.has(el.type) || !!el.list);
+  for (const type of ['input', 'change']) {
+    addEventListener(type, event => {
+      if (!event.isTrusted || !opensPicker(event.composedPath()[0])) return;
+      try { globalThis.__wbTrustedInput?.('value'); } catch { /* binding absent */ }
+    }, true);
+  }
 
   const labelledName = el => {
     const labelledBy = compact(el.getAttribute('aria-labelledby'), 200);

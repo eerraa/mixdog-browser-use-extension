@@ -614,8 +614,9 @@ export class BrowserHost {
       p.settleInterrupt?.('dialog');
       return this.dialogs.opened(p, record);
     };
-    // Trusted pointer or key input in the page outside an agent dispatch came
-    // from an escape path around the shield (native pickers, popups).
+    // Trusted pointer, key or picker value input in the page outside an agent
+    // dispatch came from an escape path around the shield (native pickers,
+    // dropdowns, popups).
     p.onTrustedInput = () => {
       if (p.closed || p.presentation.mode !== 'automation') return;
       p.presentation.failClosed('unexpected-page-input');
@@ -1464,19 +1465,21 @@ export class BrowserHost {
     // The ownership check, the pressed mark and markSent run inside the
     // guarded command itself, right before it is sent (L1): a Stop in
     // between leaves nothing marked sent and nothing to release. A press or
-    // key also takes the one credit its trusted event may claim (M5).
+    // key also takes the one credit its trusted event may claim (M5), and
+    // every command a value credit for the picker value changes it causes.
     const dispatch = async (method, params, sessionId, onDispatch = () => {}) => {
       const expected = method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed' ? 'pointerdown'
         : method === 'Input.dispatchKeyEvent' && ['rawKeyDown', 'keyDown'].includes(params.type) ? 'keydown' : null;
-      let credit = null;
+      const credits = [];
       try {
         return await p.driver.send(method, params, sessionId, undefined, () => {
           this.#owned(p.id, caller, signal, true);
           onDispatch();
           markSent();
-          if (expected) credit = p.driver.expectInput(expected);
+          credits.push(p.driver.expectInput('value'));
+          if (expected) credits.push(p.driver.expectInput(expected));
         });
-      } finally { if (credit) p.driver.settleCredit(credit); }
+      } finally { for (const credit of credits) p.driver.settleCredit(credit); }
     };
     // One-shot guard in the target's walker world: did the trusted event land
     // on the validated element (H1)? Read-only until the dispatch. Text and

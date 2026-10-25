@@ -69,8 +69,10 @@ export class FrameDriver {
     this.treeDirty = true;
     // Trusted pointerdown/keydown events the agent's own commands cause: one
     // credit per dispatched press or key, claimed by one event, lapsing
-    // INPUT_CREDIT_MS after its command returned (M5). Any other trusted
-    // input came from the person around the shield.
+    // INPUT_CREDIT_MS after its command returned (M5). A value credit per
+    // dispatched command covers every picker value change it causes and
+    // lapses the same way. Any other trusted input came from the person
+    // around the shield.
     this.inputCredits = [];
     // Child frameId → its owner element's walker id in the parent document.
     this.owners = new Map();
@@ -663,6 +665,8 @@ export class FrameDriver {
   claimInput(type) {
     const now = Date.now();
     this.inputCredits = this.inputCredits.filter(credit => credit.until >= now);
+    // One command can change a value several times (typing into a date field).
+    if (type === 'value') return this.inputCredits.some(credit => credit.type === 'value');
     const at = this.inputCredits.findIndex(credit => credit.type === type);
     if (at < 0) return false;
     this.inputCredits.splice(at, 1);

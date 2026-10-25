@@ -75,6 +75,9 @@ const pages = () => {
     '/reinsert': `<!doctype html><title>Reinsert</title><div id="box"><button id="cached" onclick="${beacon('cached')}">Cached</button></div>
       <button onclick="window.held=document.getElementById('cached');window.held.remove()">Remove</button>
       <button onclick="document.getElementById('box').append(window.held)">Restore</button>`,
+    '/pickers': `<!doctype html><title>Pickers</title>
+      <label>Fruit <select id="fruit"><option value="apple">apple</option><option value="banana">banana</option><option value="cherry">cherry</option></select></label>
+      <label>City <input id="city" list="cities"></label><datalist id="cities"><option value="Seoul"><option value="Busan"></datalist>`,
     '/many': `<!doctype html><title>Many frames</title><button>Top</button>
       <script>for(let i=0;i<1000;i++){const f=document.createElement('iframe');f.srcdoc='<p>frame '+i+'</p>';f.style.cssText='width:12px;height:12px;border:0';document.body.append(f)}</script>`,
     // display:contents: Chromium's own layout overflows its stack on a deep
@@ -247,6 +250,35 @@ async function run() {
       page.contents.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 });
       page.contents.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 });
       await until(async () => (await tab(page.tabId)).paused === 'unexpected-page-input', 'fail closed on escaped input');
+      await resume(page.tabId, page.contents);
+      await call({ action: 'close_tab', tabId: page.tabId });
+    });
+
+    await check('a picker or dropdown choice outside an agent dispatch fails closed; agent input on those controls never does', async () => {
+      const page = await open('/pickers');
+      const seen = await call({ action: 'observe', tabId: page.tabId });
+      const fruit = refOf(seen, 'combobox', 'Fruit');
+      const city = refOf(seen, '(?:combobox|textbox)', 'City');
+      const value = id => page.contents.executeJavaScript(`document.getElementById('${id}').value`, true);
+      // The agent's own key, select and text input change these values inside its dispatches.
+      await call({ action: 'press', tabId: page.tabId, ref: fruit, key: 'ArrowDown' });
+      assert.equal(await value('fruit'), 'banana', 'ArrowDown on a closed select changes it');
+      await call({ action: 'select', tabId: page.tabId, ref: fruit, values: ['cherry'] });
+      await call({ action: 'fill', tabId: page.tabId, ref: city, text: 'Busan' });
+      assert.deepEqual([await value('fruit'), await value('city')], ['cherry', 'Busan']);
+      await pause(1200);
+      assert.equal((await tab(page.tabId)).paused, null, 'agent input on picker controls never trips the guard');
+      // A choice in a dropdown or datalist window changes the value with no
+      // pointerdown or keydown in the page. Typeahead (a char without a key
+      // down) and text the agent never sent stand in for the person.
+      await page.contents.executeJavaScript("document.getElementById('fruit').focus(); 1", true);
+      await page.contents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'char', text: 'a' });
+      await until(async () => (await tab(page.tabId)).paused === 'unexpected-page-input', 'fail closed on a dropdown choice');
+      assert.equal(await value('fruit'), 'apple');
+      await resume(page.tabId, page.contents);
+      await page.contents.executeJavaScript("document.getElementById('city').focus(); 1", true);
+      await page.contents.debugger.sendCommand('Input.insertText', { text: 'Daegu' });
+      await until(async () => (await tab(page.tabId)).paused === 'unexpected-page-input', 'fail closed on a datalist choice');
       await resume(page.tabId, page.contents);
       await call({ action: 'close_tab', tabId: page.tabId });
     });

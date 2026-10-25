@@ -39,6 +39,27 @@ test('trusted page input is the agent\'s only when a dispatched press or key acc
   assert.deepEqual(tripped, ['pointerdown', 'pointerdown', 'keydown'], 'a credit lapses after its command returned');
 });
 
+test('a trusted picker value change is the agent\'s only while one of its commands is in flight or just returned', () => {
+  const { driver, page } = fixture();
+  const tripped = [];
+  page.onTrustedInput = type => tripped.push(type);
+  const event = type => driver.onMessage('Runtime.bindingCalled', { name: INPUT_BINDING, payload: type }, '');
+  event('value');
+  assert.deepEqual(tripped, ['value'], 'a value change with no agent command is the person\'s');
+  const command = driver.expectInput('value');
+  driver.expectInput('keydown');
+  event('value');
+  event('value');
+  event('keydown');
+  assert.deepEqual(tripped, ['value'], 'one command accounts for every value change it causes and keeps its key credit');
+  driver.settleCredit(command);
+  event('value');
+  assert.deepEqual(tripped, ['value'], 'still the agent\'s just after its command returned');
+  command.until = Date.now() - 1;
+  event('value');
+  assert.deepEqual(tripped, ['value', 'value'], 'the value credit lapses like a press or key credit');
+});
+
 function fixture() {
   const changes = [], sent = [];
   const debuggerAPI = new EventEmitter();

@@ -15,7 +15,7 @@ registerHooks({
 const { deliverFocus, FixtureContents, ownedViews, ownedWindows, profiles, dialog } = await import('./electron-fixture.mjs');
 const { BrowserHost } = await import('../../src/browser/host.mjs');
 const { BrowserHostError } = await import('../../src/shared/contract.mjs');
-const { FrameDriver, INPUT_BINDING } = await import('../../src/browser/frames.mjs');
+const { FrameDriver, INPUT_BINDING, INPUT_CREDIT_MS } = await import('../../src/browser/frames.mjs');
 const { BrowserPolicy } = await import('../../src/browser/policy.mjs');
 
 // Stub ONLY the CDP boundary. Exercise the real host, queue, caller authority
@@ -1919,6 +1919,29 @@ test('page code never runs beside a filled sensitive field; trusted page input o
   } finally { sensitivePresent = false; evaluate = async () => 'unit-result'; page.nodes = []; await host.close(); }
 });
 
+test('a picker value change during or just after an agent dispatch is the agent\'s; one with no dispatch fails closed', async () => {
+  page.nodes = [button(1, 'Go')];
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents);
+  const value = () => driver.onMessage('Runtime.bindingCalled', { name: INPUT_BINDING, payload: 'value' }, '');
+  const state = async () => (await call({ action: 'list_tabs' })).tabs[0];
+  // The press changes the control while it is in flight, as a key into a date field does.
+  send = async (method, params) => {
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') { value(); value(); }
+    return {};
+  };
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'button "Go"');
+    await call({ action: 'click', tabId, ref });
+    value();
+    assert.equal((await state()).mode, 'automation', 'one dispatch accounts for every value change it causes, in flight and just after');
+    await new Promise(resolve => setTimeout(resolve, INPUT_CREDIT_MS + 100));
+    value();
+    const after = await state();
+    assert.deepEqual([after.mode === 'automation', after.paused], [false, 'unexpected-page-input'], 'a value change with no dispatch is the person\'s');
+  } finally { send = async () => ({}); page.nodes = []; await host.close(); }
+});
+
 test('a press or text that lands outside the validated element reports TARGET_MISMATCH and forms no click', async () => {
   page.nodes = [button(1, 'Pay'), { ...button(2, 'Name'), r: 'textbox' }];
   const { host, call, tabId } = await setup();
@@ -1992,7 +2015,8 @@ test('Enter goes down with its character, as a keyboard sends it, and takes the 
       { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
       { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
     ]);
-    assert.deepEqual(credits, ['keydown', 'keydown'], 'each key, Enter included, takes one keydown credit');
+    assert.deepEqual(credits.filter(kind => kind === 'keydown'), ['keydown', 'keydown'], 'each key, Enter included, takes one keydown credit');
+    assert.equal(credits.filter(kind => kind === 'value').length, 4, 'every dispatched command, focus and key, takes a value credit');
   } finally {
     FrameDriver.prototype.expectInput = expectInput;
     send = async () => ({}); page.nodes = [];
