@@ -9,7 +9,7 @@ import { browserTool, errorResult, toolResult } from './tool.mjs';
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
   const gateway = await createGateway(root, pluginData());
-  const server = new Server({ name: 'win-browser', version: '0.3.1' }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'win-browser', version: '0.3.2' }, { capabilities: { tools: {} } });
   const descriptor = browserTool(gateway.channel);
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [descriptor] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
