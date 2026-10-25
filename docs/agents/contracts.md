@@ -1,22 +1,13 @@
 # Contracts
 
-Owns: what must stay true. A change that breaks an item is a defect even when tests
-pass. Rationale: `decisions.md`.
-
-## Product contract
-
-| ID | Invariant |
-| --- | --- |
-| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses. Users never install dev tools, build, or patch Mixdog. |
-| C2 | Natural selection: one MCP tool and the `independent-browser` skill; agents choose them for interactive web work without being told. Own names are fine; built-in names and UI are not cloned. |
-| C3 | Real browser work: navigation, DOM and screenshot observation, exact targeting, click, typing, forms, tabs, frames, HTML uploads, downloads, dialogs and result checks, with ref freshness and validation, cancellation and uncertainty semantics. |
-| C4 | Independence: works with built-in Browser Use off; own windows and profiles; the person handles login, passwords, CAPTCHA and 2FA in the same window; no copying of profiles, cookies or accounts; no built-in handoff. |
-| C5 | Protected requests follow the trusted package policy below. The agent never operates an approval UI; MCP arguments never create policy or approval. |
-| C6 | Denial and cancellation are never bypassed or re-asked. One requester's navigation or cancel never aborts another valid requester. Revocation removes real Chromium grants (process termination), never just caches. Unverifiable requester or scope: refuse with a reason. OS approval, user activation and browser security stay on. |
-| C7 | Change is not stop: navigation, reload, frame swap, hide, human intervention and disconnect recover through fresh observation; Stop, denial and revocation are never auto-cleared. Stale refs, points and snapshot IDs are never reused; executed or uncertain input is never resent. |
-| C8 | Isolation: tabs are owned per caller session; input is serialized per tab; ended callers' late calls are rejected; hooks affect only this plugin's tool. |
-| C9 | Reuse boundary: only the Mixdog browser code forked at 1.3.4 (`third_party/mixdog/provenance.json`), not tracked afterwards; no Mixdog core, ASAR or private bridge; no agent runner or agent settings; provenance and licenses preserved. |
-| C10 | Honest verification: unit, live Electron, packaged MCP and real-device evidence are reported separately. |
+Owns: the binding behavior rules: authority and isolation, observation and input,
+DevTools reads, script runner, human DevTools, handoff state machine, native requests
+and permissions, result vocabulary. A change that breaks a rule is a defect even when
+tests pass.
+Not here: requirements C1–C10 and acceptance criteria (`requirements.md`), rationale
+(`decisions.md`), code locations (`architecture.md`).
+Update when: a rule, state, error code or result field changes, in the same change as
+the code.
 
 ## Authority and isolation
 

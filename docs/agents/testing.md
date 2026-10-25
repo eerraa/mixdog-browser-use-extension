@@ -1,6 +1,11 @@
 # Testing
 
-Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts.md`.
+Owns: suites, prerequisites, expected counts, the Electron substitute, live harnesses,
+where to add tests, the real-device check procedure, test rules and `%TEMP%` artifacts.
+Not here: acceptance criteria and their status (`requirements.md`), build and package
+steps (`build-release.md`), the rules under test (`contracts.md`).
+Update when: a suite, harness, fixture, test file, expected count or check procedure
+changes.
 
 ## Suites
 
@@ -67,20 +72,15 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 | real Electron behavior | `tests/live/scenarios.mjs` |
 | packaged folder, MCP end to end | `tests/package/*.test.mjs` |
 
-## Manual checks (not automated)
+## Real-device checks
 
-| Check | Status at the initial commit |
-| --- | --- |
-| Register the package in Mixdog with built-in Browser Use off; the agent picks the tool unprompted | not run for the current UI |
-| Real mouse and keyboard on toolbar, shield and handoff | not run (tests use synthetic input) |
-| Korean IME, real secrets, Windows consent prompt | not run |
-| Real HID/USB selection and I/O | not run for the current UI |
-| Human DevTools opened from the real menu bar (Alt) and used by a person during handoff | not run (live test invokes the native menu callback) |
-| Agent DevTools on large real sites (token sizes, buffer pressure) | not run (local fixtures only) |
-| Text projection token sizes on large real sites (e.g. naver main and login) through the real tool | not run; Phase A simulation from saved samples only |
-| Focus emulation and flash-only handoff seen by a person on a real desktop | not run |
-| `run` scripts chosen by an agent through the registered package on real sites | not run (local fixtures only) |
-| Native picker or dropdown windows (`showPicker`, date and color pickers) used by a person during automation, and the `unexpected-page-input` fail-closed | not run (live test sends synthetic trusted input) |
+Criteria with a Real device status in `requirements.md` need the package registered
+in Mixdog on the user's PC; no suite proves them.
+
+1. Build a fresh package (`build-release.md` Clean package build) and pass `test:package` on it.
+2. The user registers that `win-browser` folder in Mixdog, turns built-in Browser Use off and restarts Mixdog (user-only steps).
+3. Run only while the user is not using the PC. Use local fixtures or public pages without an account; never real accounts for login, posting, payment or deletion.
+4. Set each checked criterion to `verified` in `requirements.md`, or leave it `not verified`; record no dates, logs or results elsewhere.
 
 ## Rules
 

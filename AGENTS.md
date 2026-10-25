@@ -1,10 +1,10 @@
 # AGENTS.md
 
 Entry point for agents maintaining this repository. Read this file, then only the
-doc the task router points to.
+docs its Edit table names.
 
-Read order for a task: this file → `change-map.md` recipe → the `contracts.md`
-sections it names → `testing.md` matrix.
+Read order for a task: this file (Edit table) → the `change-map.md` steps → the
+`contracts.md` sections they name → `testing.md`.
 
 ## Identity
 
@@ -18,32 +18,35 @@ sections it names → `testing.md` matrix.
 | Version | `0.3.1`: text perception, agent DevTools and script runner; image-only links and buttons named by their embedded content. Release history and tags: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
-## Doc system
+## Docs
 
-Each fact has one owner. Other docs link to the owner instead of repeating it.
+Each fact has one owner; other docs link to it. Every doc under `docs/agents/` opens
+with Owns, Not here and Update when.
 
-| Doc | Owns | Read when |
-| --- | --- | --- |
-| `AGENTS.md` | identity, hard rules, doc ownership, commands, task router | always first |
-| `docs/agents/architecture.md` | processes, call path, module map, Electron hooks, page and window model, data and package layout | locating code, tracing a flow |
-| `docs/agents/contracts.md` | binding invariants C1–C10, authority, observation and input rules, DevTools reads, script runner, handoff state machine, permissions, result vocabulary | before any behavior change or review |
-| `docs/agents/change-map.md` | recipes R1–R18: request → files and symbols → co-changes → tests → docs | implementing a request |
-| `docs/agents/testing.md` | suites, prerequisites, fixtures, where to add tests, manual checks, test artifacts | verifying a change |
-| `docs/agents/build-release.md` | pins, build and package pipeline, versioning, release, licensing | building, packaging, upgrading, releasing |
-| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D22) | proposing a design change; "why not X?" |
-| `README.md` | end-user install, usage, safety (shipped) | user-visible behavior changes |
-| `skills/independent-browser/SKILL.md` | how agents use the tool (shipped) | tool behavior or usage changes |
-| `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | pins, derived Mixdog files or patches change |
+| Doc | Owns | Not here | Read when |
+| --- | --- | --- | --- |
+| `AGENTS.md` | identity, doc list, hard rules, repo map, commands, Edit table | how code connects, rules, symbol-level steps | always first |
+| `docs/agents/requirements.md` | requirements C1–C10, acceptance criteria, covering suites and real-device status per criterion | behavior rules, test procedures | scoping a change; reporting verification |
+| `docs/agents/architecture.md` | processes, call path, module map, import direction, Electron hooks, page and window model, data and package layout | rules, edit steps, build steps | locating code, tracing a flow |
+| `docs/agents/contracts.md` | binding behavior rules: authority, observation and input, DevTools reads, script runner, human DevTools, handoff state machine, permissions, result vocabulary | requirements, rationale, code locations | before any behavior change or review |
+| `docs/agents/change-map.md` | symbol-level edit steps, rules to keep and extra steps per Edit table ID | which files, tests and docs | implementing a request |
+| `docs/agents/testing.md` | suites, prerequisites, expected counts, Electron substitute, live harnesses, where to add tests, real-device check procedure, test rules | criteria and their status, build steps | verifying a change |
+| `docs/agents/build-release.md` | pins, build and package pipeline, clean package build, versioning, release, licensing upkeep | notice texts, verification | building, packaging, upgrading, releasing |
+| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D23) | the rules themselves | proposing a design change; "why not X?" |
+| `README.md` | end-user install, usage, safety (Korean, shipped) | maintainer detail | user-visible behavior changes |
+| `skills/independent-browser/SKILL.md` | how agents use the tool (shipped) | implementation | tool behavior or usage changes |
+| `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | when to update it (`build-release.md` Licensing) | pins, derived Mixdog files or patches change |
 
 Doc rules:
-- Update the owning doc in the same change as the code; each recipe lists its docs.
-- Cite `path` + symbol, never line numbers. Tables over prose.
-- A new recurring change pattern gets a recipe in `change-map.md` and a router row here.
+- Update the owning doc in the same change as the code; the Edit table lists the docs per request.
+- Cite `path` + symbol, never line numbers. Tables and paths over prose.
+- No progress notes, work logs or histories in docs; real-device status per criterion lives in `requirements.md`.
+- A new recurring change pattern gets an Edit table row, and `change-map.md` steps when files alone are not enough.
 
 ## Hard rules
 
 1. Official Mixdog plugin contract only: skills, MCP servers, hooks. Never patch installed Mixdog, its ASAR or runtime, call its private bridge, depend on built-in Browser Use, or assume an undocumented extension API.
-2. `contracts.md` is binding. Never weaken it to pass a test, auto-resume Stop, handoff or denial, or replay executed or uncertain input.
+2. `requirements.md` and `contracts.md` are binding. Never weaken them to pass a test, auto-resume Stop, handoff or denial, or replay executed or uncertain input.
 3. Never copy external browser profiles, cookies or accounts. Never use real accounts for login, posting, payment or deletion during verification.
 4. Do not modify installed Mixdog, account, auth or server settings, `D:\Engineering\mixdog-computer-use-extension`, or `D:\Engineering\antigravity-aistudio-bridge`.
 5. User-only steps: plugin registration and activation, disabling built-in Browser Use, app restart, OS consent prompts.
@@ -54,15 +57,28 @@ Doc rules:
 
 ## Repo map
 
-| Path | Contents | Details |
-| --- | --- | --- |
-| `src/` | `mcp/` MCP server and gateway, `hook/` host hooks, `companion/` Electron main, `browser/` browser engine, `shared/` modules used by more than one process | `architecture.md` |
-| `native/` | `bridge.cpp` launcher with Job object; `consent.cpp` Windows consent helper | `architecture.md` |
-| `scripts/` | build, build-native, package, SDK adapter | `build-release.md` |
-| `tests/` | unit, live Electron, packaged MCP | `testing.md` |
-| `plugin.json`, `hooks/`, `skills/`, `browser-policy.json` | shipped plugin surface and policy | `architecture.md`, `contracts.md` |
-| `third_party/mixdog/`, `THIRD_PARTY_NOTICES.md`, `LICENSE` | Mixdog fork record, license and NOTICE; shipped notices; project license | `build-release.md` |
-| `docs/agents/` | this doc system; not shipped | — |
+| Path | Responsibility |
+| --- | --- |
+| `src/mcp/` | MCP stdio server, `browse` schema and result text, gateway that spawns and owns the companion |
+| `src/hook/` | host hook process: lease injection, lifecycle fan-out |
+| `src/companion/` | Electron main per connection: pipe server, role and method auth, termination |
+| `src/browser/` | browser engine: pages, dispatch and handoff (`host.mjs`), CDP and frames, window presentation, permissions, dialogs, DevTools |
+| `src/browser/perception/` | walker source and the pure text projection: model, refs, render, `find` |
+| `src/browser/runner/` | `run`: sandbox window, op bridge, script API |
+| `src/shared/` | modules of more than one process, without Electron: browse contract, authority, RPC, paths, async |
+| `native/` | `bridge.cpp` launcher (Job object), `consent.cpp` Windows consent helper |
+| `scripts/` | `build.mjs` bundles, `build-native.mjs`, `package.mjs`, `sdk-adapter.mjs` SDK patch |
+| `tests/shared/`, `tests/companion/`, `tests/scripts/` | core unit tests (`npm test`) |
+| `tests/browser/` | engine unit tests on an Electron fixture (`test:browser`) |
+| `tests/native/` | native helper test (`test:native`) |
+| `tests/live/` | real Electron harnesses (`test:live`) |
+| `tests/package/` | packaged folder and MCP end to end (`test:package`) |
+| `plugin.json`, `hooks/`, `skills/`, `browser-policy.json` | shipped plugin surface and policy |
+| `third_party/mixdog/` | Mixdog fork record `provenance.json`, Mixdog `LICENSE` and `NOTICE.md` |
+| `THIRD_PARTY_NOTICES.md`, `LICENSE` | shipped notices; project license |
+| `docs/agents/` | this doc system; not shipped |
+
+Modules, entry points and import direction: `architecture.md`.
 
 ## Commands
 
@@ -77,35 +93,42 @@ Doc rules:
 | Native test | `npm run test:native` | native helpers |
 | Package | `npm run package` | build, native helpers |
 | Package tests | `$env:WB_PACKAGE_DIR="<abs>\win-browser"; npm run test:package` | package |
+| Real-device check | procedure in `testing.md` Real-device checks; criteria in `requirements.md` | fresh package, user registration, PC not in use |
 
 Prerequisites and caveats: `testing.md`, `build-release.md`.
 
-## Task router
+## Edit table
 
-| Request | Recipe in `change-map.md` |
-| --- | --- |
-| New or changed `browse` action or argument | R1 |
-| Toolbar, window chrome, labels, languages | R2 |
-| Handoff, Stop, resume, fail-closed behavior | R3 |
-| Observation, perception, text results, refs, settle, signals, targeting, frames, input dispatch | R4 |
-| JS dialogs, file uploads, downloads | R5 |
-| Device or web permissions, delegation policy | R6 |
-| Profiles, data directories, connection lifetime | R7 |
-| MCP transport, timeouts, process lifecycle | R8 |
-| Caller identity, hooks | R9 |
-| Plugin, server or tool rename | R10 |
-| Version bump | R11 |
-| Electron upgrade | R12 |
-| Code derived from Mixdog (fork notices) | R13 |
-| MCP SDK upgrade | R14 |
-| Native helpers | R15 |
-| Browser identity (user agent) | R16 |
-| DevTools reads (console, network, inspect, performance), page-world evaluate, human DevTools | R17 |
-| Script runner (`run`): script API, ops, sandbox, run report | R18 |
-| Not listed | find the module in `architecture.md`, apply the nearest recipe, then add a recipe |
+Where a request lands: files to edit, tests to update or run, docs to update.
+Symbol-level steps and the rules to keep: `change-map.md` under the same ID (R11, R15
+and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
+`layout.test.mjs` are in `tests/package/`.
+
+| ID | Request | Edit | Tests | Docs |
+| --- | --- | --- | --- | --- |
+| R1 | New or changed `browse` action or argument | `src/shared/contract.mjs`, `src/mcp/tool.mjs`, `src/browser/host.mjs` | `tests/shared/contract.test.mjs` (enumerates every action), `tests/browser/host.test.mjs`; real browser effect: `scenarios.mjs`; MCP-visible: `mcp.test.mjs` | `SKILL.md`, `README.md` action table |
+| R2 | Toolbar, window chrome, labels, languages | `src/browser/presentation.mjs`, `src/browser/toolbar-preload.cjs`, `src/browser/host.mjs`, `src/browser/consent.mjs`; a new chrome file also `scripts/build.mjs`, `scripts/package.mjs` | toolbar tests in `tests/browser/host.test.mjs` on `tests/browser/electron-fixture.mjs`; the `toolbar: …` check in `scenarios.mjs`, probes in `presentation.mjs`; a new chrome file also `layout.test.mjs` | `README.md` (Korean button names), `SKILL.md` (button names agents cite), `architecture.md` Window composition |
+| R3 | Handoff, Stop, resume, fail-closed behavior | `src/browser/presentation.mjs`, `src/browser/host.mjs`, `src/browser/permissions.mjs` | handoff, Stop, drain and fail-closed tests in `tests/browser/host.test.mjs`; `scenarios.mjs` | `contracts.md` Handoff state machine, `README.md` handoff paragraphs, `SKILL.md` step 6 and Recovery |
+| R4 | Observation, perception, text results, refs, settle, signals, targeting, frames, input dispatch | `src/browser/perception/*`, `src/browser/frames.mjs`, `src/browser/host.mjs`, `src/browser/settle.mjs`, `src/browser/signals.mjs`, `src/shared/contract.mjs` | `tests/browser/perception.test.mjs` (pure modules), `frames.test.mjs`, `host.test.mjs`, `tests/shared/contract.test.mjs`; `perception-harness.mjs` (real Chromium walker), `security-harness.mjs` (privacy, frame races, secrets, points, escape paths, bounds), `review-harness.mjs` (geometry, shadow), `observation-harness.mjs`, `workers-harness.mjs`, `scenarios.mjs`; nested-frame test in `mcp.test.mjs` | `contracts.md` Observation and input (text grammar), `SKILL.md` Reading results and targeting guidance |
+| R5 | JS dialogs, file uploads, downloads | `src/browser/dialogs.mjs`, `src/browser/host.mjs`, `src/browser/frames.mjs`, `src/browser/requests.mjs` | `tests/browser/dialogs.test.mjs`, `requests.test.mjs`, `host.test.mjs`; `autonomous-harness.mjs`; request test in `mcp.test.mjs` | `README.md` limits, `SKILL.md` step 4 |
+| R6 | Device or web permissions, delegation policy | `src/browser/permissions.mjs`, `permission-broker.mjs`, `policy.mjs`, `consent.mjs`, `host.mjs`; `browser-policy.json`; `native/consent.cpp` | `tests/browser/permission-broker.test.mjs`, `policy.test.mjs`, permission tests in `host.test.mjs`; `autonomous-harness.mjs`, device checks in `scenarios.mjs`; `layout.test.mjs` (shipped policy) | `README.md` 권한과 안전 경계, `SKILL.md` steps 4–5, `contracts.md` Native requests and permissions |
+| R7 | Profiles, data directories, connection lifetime | `src/browser/host.mjs`, `src/shared/paths.mjs`, `src/companion/main.mjs`, `src/mcp/gateway.mjs` | isolation test in `tests/browser/host.test.mjs`; teardown test in `mcp.test.mjs` | `architecture.md` Data layout, `README.md` |
+| R8 | MCP transport, timeouts, process lifecycle | `src/mcp/main.mjs`, `src/mcp/gateway.mjs`, `src/shared/rpc.mjs`, `src/companion/main.mjs`, `src/browser/host.mjs`, `plugin.json`, `native/bridge.cpp` | `tests/shared/rpc.test.mjs`, `tests/companion/termination.test.mjs`, `mcp.test.mjs` (EOF, teardown) | `architecture.md` Processes and Call path |
+| R9 | Caller identity, hooks | `src/hook/main.mjs`, `src/shared/authority.mjs`, `src/companion/main.mjs`, `hooks/hooks.json` | `tests/shared/authority*.test.mjs`; hook admission test in `mcp.test.mjs` | `contracts.md` Authority and isolation |
+| R10 | Plugin, server or tool rename (avoid) | `plugin.json`, `hooks/hooks.json`, `src/shared/authority.mjs`, `src/mcp/tool.mjs`, `src/mcp/main.mjs`, `skills/independent-browser/SKILL.md`, `scripts/package.mjs` | `layout.test.mjs` | `README.md`, Identity |
+| R11 | Version bump | the files in `build-release.md` Versioning | — | Identity |
+| R12 | Electron upgrade | `package.json`, `package-lock.json`, `src/browser/dialogs.mjs`, `src/browser/host.mjs`, `scripts/package.mjs` | version strings in `tests/browser/user-agent.test.mjs`, `tests/companion/fixture.mjs`, `autonomous-harness.mjs`, `mcp.test.mjs`; every suite, live and package included | `README.md`, `THIRD_PARTY_NOTICES.md`, `build-release.md` Pins, Identity |
+| R13 | Code derived from Mixdog | the derived file (`third_party/mixdog/provenance.json` `derived[].files`); the record itself when a file moves, splits or is added | the tests of the file's area (R4); `layout.test.mjs` (fork record, Mixdog notices) | `THIRD_PARTY_NOTICES.md` Mixdog rows |
+| R14 | MCP SDK upgrade | `package.json`, `package-lock.json`, `scripts/sdk-adapter.mjs` | `tests/scripts/sdk-adapter.test.mjs`; SDK version assert in `layout.test.mjs` | `THIRD_PARTY_NOTICES.md` SDK section, `build-release.md` Pins |
+| R15 | Native helpers | `native/bridge.cpp`, `native/consent.cpp`, `scripts/build-native.mjs` (flags, outputs, license list) | `tests/native/consent.test.mjs`; package suite | `THIRD_PARTY_NOTICES.md` Native helpers |
+| R16 | Browser identity (user agent) | `src/browser/user-agent.mjs` | `tests/browser/user-agent.test.mjs`, `tests/companion/fixture.mjs`; identity baseline run in `tests/live/browser-host.test.mjs` | `README.md` 권한과 안전 경계 |
+| R17 | DevTools reads (console, network, inspect, performance), page-world evaluate, human DevTools | `src/browser/devtools.mjs`, `src/browser/host.mjs`, `src/browser/frames.mjs`, `src/browser/consent.mjs`; arguments as R1 | `tests/browser/devtools.test.mjs`, `frames.test.mjs` (recording order, worker fence, replays, discard, flush, page worlds), `host.test.mjs` (gates, lane independence, Stop, profile-shared workers, human DevTools exits), `tests/shared/contract.test.mjs`; `devtools-harness.mjs`; DevTools test in `mcp.test.mjs` | `contracts.md` DevTools reads and Human DevTools, `SKILL.md` DevTools section, `README.md` action table and 개발자 도구 paragraph, `architecture.md` CDP rows |
+| R18 | Script runner (`run`): script API, ops, sandbox, run report | `src/browser/runner/*`, `src/browser/host.mjs`, `src/companion/main.mjs`, `scripts/build.mjs`; arguments as R1 | `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), run test in `host.test.mjs`, `tests/shared/contract.test.mjs`; `runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); run test in `mcp.test.mjs` | `contracts.md` Script runner, `SKILL.md` Scripts section, `README.md` action table |
+| — | Not listed | the module's row in `architecture.md` Module map, then the nearest row above | as that row | as that row; add a row here |
 
 ## Done when
 
-- Code, owning docs, and `README.md` or `SKILL.md` when user- or agent-visible behavior changed.
+- Code, the docs in its Edit table row, and `README.md` or `SKILL.md` when user- or agent-visible behavior changed.
+- Real-device status in `requirements.md` goes back to `not verified` for criteria on a changed path.
 - Suites for the touched area pass (`testing.md`); shipped-surface changes also pass `test:package` on a fresh package.
 - No generated files committed; `%TEMP%` test directories removed when cleaning up (prefixes in `testing.md`).

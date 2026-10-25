@@ -1,6 +1,11 @@
 # Architecture
 
-Owns: what exists and how it connects. Rules: `contracts.md`. Edits: `change-map.md`.
+Owns: processes, call path, module map, import direction, Electron hooks, page model,
+window composition, data layout and package layout.
+Not here: rules (`contracts.md`), where a request lands (`AGENTS.md` Edit table,
+`change-map.md`), build and package steps (`build-release.md`).
+Update when: a process, entry point, module, named symbol, Electron hook, data path or
+package path is added, moved, renamed or removed.
 
 ## Processes
 

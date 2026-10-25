@@ -1,6 +1,11 @@
 # Build and release
 
-Owns: toolchain pins, artifacts, versions, release, licensing. Verification: `testing.md`.
+Owns: pins, build and package pipeline, clean package build, versioning, release
+procedure and licensing upkeep.
+Not here: notice texts (`THIRD_PARTY_NOTICES.md`, `third_party/mixdog/`), verification
+(`testing.md`), package contents (`architecture.md` Package layout).
+Update when: a pin, build or package step, version location, release step or notice
+section changes.
 
 ## Pins
 
