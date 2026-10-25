@@ -53,10 +53,11 @@ Real-device checks). `verified` = checked on a package built from the current tr
 | AC12 | C5 | Real HID devices can be selected and used under the shipped policy | unit `host`; live `browser-host` (device permission checks) | verified |
 | AC13 | C6 | Denial and cancellation are never bypassed or re-asked; one requester's cancel never aborts another; revocation terminates the companion | unit `host`, `permission-broker`, `requests`, `termination`; live `autonomous`, `security`; package `mcp` (teardown) | — |
 | AC14 | C7 | Navigation, reload, frame swap, hide and human intervention recover through fresh observation; Stop and denial are never auto-cleared; stale refs and points are refused; executed or uncertain input is never resent | unit `host`, `perception`, `runner`; live `browser-host`, `security`, `runner` | — |
-| AC15 | C7 | Native picker and dropdown windows (`showPicker`, date and color pickers, `select` dropdowns, datalists) used by a person during automation fail closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (picker value changes, synthetic trusted input), `runner` (synthetic trusted input) | not verified |
+| AC15 | C7 | Native picker and dropdown windows (`showPicker`, date and color pickers, `select` dropdowns) used by a person during automation fail closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (picker value changes, synthetic trusted input), `runner` (synthetic trusted input) | verified |
 | AC16 | C8 | Tabs are owned per caller session, input is serialized per tab, ended callers' late calls are rejected, and hooks act only on this tool | unit `authority`, `authority-turns`, `authority-lifecycle`, `queue`, `host`; package `mcp` (hook admission) | — |
 | AC17 | C9 | Only the forked Mixdog browser code is used, and its fork record and Mixdog's notices ship unmodified | package `layout` | — |
 | AC18 | C3, C7 | Closing every tab keeps the connection: the same channel opens new pages; only MCP EOF and revocation end the companion | package `mcp` (last tab, teardown) | verified |
 | AC19 | C5 | Real USB devices can be selected and used under the shipped policy | unit `host`; live `browser-host` (device permission checks) | not verified |
+| AC20 | C7 | A choice a person makes in a `datalist` suggestion window during automation fails closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (inserted text) | not verified |
 
 C10 governs every verification report (`testing.md` Rules) and has no criterion of its own.
