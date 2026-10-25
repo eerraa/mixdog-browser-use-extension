@@ -1,7 +1,7 @@
 {
   "name": "win-browser",
   "title": "Independent Windows Browser",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Independent interactive web browsing with owned Windows browser windows, explicit human handoff and scoped permissions.",
   "license": "Apache-2.0",
   "skills": "./skills",
