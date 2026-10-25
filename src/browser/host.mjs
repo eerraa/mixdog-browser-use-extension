@@ -14,7 +14,7 @@ import { PagePresentation, TOOLBAR_HEIGHT } from './presentation.mjs';
 import {
   DEVTOOLS_LIMITS, DevToolsRecorder, INSPECT_ELEMENT, PrivacyWindows, inspectNode, pageRead, performanceSnapshot, responseBody, selectElement,
 } from './devtools.mjs';
-import { rankBrowserSemanticMatch } from '../../build/upstream.mjs';
+import { rankBrowserSemanticMatch } from './perception/match.mjs';
 import { composeModel } from './perception/model.mjs';
 import { RefRegistry } from './perception/refs.mjs';
 import { displayURL, quote, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from './perception/render.mjs';

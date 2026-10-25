@@ -1,46 +1,37 @@
 # Third-party source and runtime notices
 
-## Mixdog browser source
+## Mixdog browser source (independent fork)
 
 Mixdog, Copyright (c) 2026 tribgames, Apache License 2.0.
 
 - Repository: https://github.com/tribgames/mixdog
-- Version: 1.3.4
-- Fixed commit: `968ee08965e75c3fa1999ab8d18d20e45229fc89`
-- Untouched originals and upstream license/notices: `vendor/mixdog/`
-- Verified source blob identities: `upstream.lock.json`
+- Fork point: version 1.3.4, commit `968ee08965e75c3fa1999ab8d18d20e45229fc89`
+- Upstream tracking: none. This plugin carries an independent fork of the
+  files below; Mixdog changes after the fork point are not tracked or applied.
+- Mixdog's unmodified `LICENSE` and `NOTICE.md` and the fork record
+  (`provenance.json`, with the original files' git blob ids): `licenses/mixdog/`
 
-Only these browser implementation files are reused:
+Derived files (paths in this plugin's source repository; each carries a
+notice of its changes, and the bundled `app/*.cjs.map` source maps embed them):
 
-- `apps/desktop/src/main/browser/snapshot-scripts.ts`
-- `apps/desktop/src/main/browser/semantic-query.ts`
-- `apps/desktop/src/main/browser/stable-rect.ts`
-- `apps/desktop/src/main/browser/actionability.ts`
-- `apps/desktop/src/main/browser/cdp-execution.ts`
+| Original file (`apps/desktop/src/main/browser/`) | Derived file | Changes |
+| --- | --- | --- |
+| `cdp-execution.ts` | `src/browser/cdp-execution.mjs` | TypeScript types removed; the CDP request timeout imported from `./command` is a local constant (15 s) |
+| `actionability.ts` | `src/browser/actionability.mjs` | TypeScript types removed; `pause` comes from the plugin's async helper instead of `./settle` |
+| `stable-rect.ts` | `src/browser/perception/target-point.mjs` (`BROWSER_STABLE_RECT`) | scrolling removed from the measurement: the host prepares the exact target and ancestor viewports first, so geometry and hit testing stay mutation-free |
+| `snapshot-scripts.ts` | `src/browser/perception/target-point.mjs` (`browserRefPointExpression`), `src/browser/perception/semantics.mjs` (`compact`, `inferRole`, `accessibleName`, `stateList`) | only these are kept; the snapshot expression is not used. The accessible name reads labels, `aria-labelledby` targets and element content through a plugin-owned rendered-text helper instead of `textContent`/`innerText`, and its `textContent` fallback is removed, so style, script and unrendered text never become names |
+| `semantic-query.ts` | `src/browser/perception/match.mjs` | only the element matcher is kept; TypeScript types removed |
 
-Statement of changes: the original files remain unmodified as source artifacts.
-At build time, `scripts/build.mjs` extracts the `compact`, `inferRole`,
-`accessibleName` and `stateList` functions from `snapshot-scripts.ts`, each
-guarded to match exactly once (`src/browser/perception/walker.mjs`
-`extractUpstreamSources`), removes the `|| el.textContent` accessible-name
-fallback, and replaces the `textContent` reads of labels and `aria-labelledby`
-targets and the `innerText` content read with a plugin-owned rendered-text
-helper, so style, script and unrendered text never become names. The independent
-perception walker composes them; the upstream snapshot expression itself is no
-longer used. `semantic-query.ts` ranks `find` matches and `snapshot-scripts.ts`
-supplies the target point expression. Standalone
-abort/pause and bounded CDP timeout adapters replace host-local imports.
-The build removes scrolling from stable-rectangle measurements; the host
-prepares the exact target and ancestor viewports before a new observation
-and same-object identity check. Geometry and hit testing remain mutation-free.
-TypeScript is compiled and bundled. The independent host owns lifecycle,
-permissions, profiles, observation authority, human presentation and MCP.
-The queue's actual-operation fence is an independent implementation of the
-attributed upstream invariant.
+The independent perception walker composes the role, name and state helpers;
+`match.mjs` ranks `find` matches and `target-point.mjs` supplies the target
+point expression. The independent host owns lifecycle, permissions, profiles,
+observation authority, human presentation and MCP. The queue's
+actual-operation fence is an independent implementation of the invariant of
+Mixdog's command queue and CDP execution fence at the fork point.
 
 No agent runner, default agent settings, installed core, private bridge,
 password-import sidecar or old plugin implementation is included.
-The complete upstream NOTICE is preserved for reference; its unrelated
+The complete Mixdog NOTICE is preserved for reference; its unrelated
 components are not claims that those components are shipped here.
 
 ## Electron

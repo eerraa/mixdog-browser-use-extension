@@ -1,21 +1,19 @@
-// Real-Chromium check of the perception walker composed from the vendored
-// upstream source, driven over CDP the way the frame driver will drive it.
+// Real-Chromium check of the perception walker composed with its role, name
+// and state helpers, driven over CDP the way the frame driver drives it.
 import { app, BrowserWindow } from 'electron';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import {
-  armGuardExpression, describeExpression, disarmGuardExpression, extractUpstreamSources, quietExpression, snapshotExpression, walkerInstallSource,
+  armGuardExpression, describeExpression, disarmGuardExpression, quietExpression, snapshotExpression, walkerInstallSource,
 } from '../../src/browser/perception/walker.mjs';
+import { ELEMENT_SEMANTICS } from '../../src/browser/perception/semantics.mjs';
 import { composeModel } from '../../src/browser/perception/model.mjs';
 import { RefRegistry } from '../../src/browser/perception/refs.mjs';
 import { estimateTokens, renderDiff, renderSnapshot } from '../../src/browser/perception/render.mjs';
 
 const directory = process.argv[2];
 app.setPath('userData', path.join(directory, 'electron'));
-const root = fileURLToPath(new URL('../../', import.meta.url));
 const WORLD = 'independent-browser-perception-live';
 
 const PAGE = `<!doctype html><meta charset="utf-8"><title>Perception fixture</title>
@@ -73,8 +71,7 @@ async function run() {
   await send('Page.enable');
   await send('DOM.enable');
   await send('Runtime.enable');
-  const upstream = extractUpstreamSources(await readFile(path.join(root, 'vendor/mixdog/apps/desktop/src/main/browser/snapshot-scripts.ts'), 'utf8'));
-  const install = walkerInstallSource(upstream);
+  const install = walkerInstallSource(ELEMENT_SEMANTICS);
   const evaluate = async (contextId, expression) => {
     const result = await send('Runtime.evaluate', { expression, contextId, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(`Walker evaluation failed: ${JSON.stringify(result.exceptionDetails)}`);

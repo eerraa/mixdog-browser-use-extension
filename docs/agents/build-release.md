@@ -11,7 +11,7 @@ Owns: toolchain pins, artifacts, versions, release, licensing. Verification: `te
 | Electron (shipped runtime) | 44.9.1 | `package.json` `devDependencies`, `allowScripts` |
 | esbuild | 0.28.2 | `package.json` |
 | MCP SDK (bundled, patched) | 1.32.1 | `package.json`; `scripts/sdk-adapter.mjs` |
-| Upstream Mixdog browser code | 1.3.4 at `968ee08965e75c3fa1999ab8d18d20e45229fc89` | `upstream.lock.json` |
+| Mixdog fork point (not tracked) | 1.3.4 at `968ee08965e75c3fa1999ab8d18d20e45229fc89` | `third_party/mixdog/provenance.json` |
 | Native compiler | MinGW-w64 `g++` on PATH, not pinned, so rebuilds are not byte-identical; v0.1.0 used i686-posix-sjlj 8.1.0 | package `licenses/native/provenance.json` |
 
 Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
@@ -22,15 +22,13 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 | --- | --- | --- |
 | deps | `npm ci` | `node_modules/` |
 | runtime | `node node_modules/electron/install.js` (when install scripts were skipped) | `node_modules/electron/dist/` |
-| upstream | `npm run vendor` | `vendor/mixdog/**` fetched at the lock commit, git-blob sha1 verified |
-| bundle | `npm run build` | `build/upstream.mjs`, `build/app/{mcp,hook,companion}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
+| bundle | `npm run build` | `build/app/{mcp,hook,companion}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
 | native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/licenses/native/*` |
 | package | `npm run package` | a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | verify | `$env:WB_PACKAGE_DIR="<directory>"; npm run test:package` | — |
 
 - The licenses dir must contain `gcc/COPYING3`, `gcc/COPYING.RUNTIME`, `mingw-w64/COPYING.MinGW-w64-runtime.txt` and `winpthreads/COPYING`. MinGW-w64 ships it next to `bin`: `"$(Split-Path (Split-Path (Get-Command g++).Source))\licenses"`.
-- `scripts/build.mjs` adapters (vendored `settle` and `command` shims, scroll removal in `stable-rect.ts`, extraction of `compact`, `inferRole`, `accessibleName` and `stateList` from `snapshot-scripts.ts` via `walker.mjs extractUpstreamSources`, which removes the `textContent` name fallback and routes the label, `aria-labelledby` and content reads of `accessibleName` through `renderedText`) throw unless each applies exactly once.
-- `scripts/package.mjs` ships exactly the `upstream.lock.json` files from `vendor/mixdog/` and stops when one differs from its locked git blob id (checked at package time); `tests/package/layout.test.mjs` asserts the shipped set.
+- `scripts/package.mjs` ships Mixdog's `LICENSE` and `NOTICE.md` and the fork record from `third_party/mixdog/` as `licenses/mixdog/`; `tests/package/layout.test.mjs` checks the notices against the blob ids in the record.
 - The SDK patch (`adaptSdkCancellation`) matches files under `<repo>/node_modules/@modelcontextprotocol/sdk` by real path. In a copied tree, copy `node_modules` (only `electron` may be a junction); otherwise the patch silently skips and package cancellation tests fail.
 - `scripts/package.mjs` copies an explicit list. A new shipped file needs `package.mjs` and `tests/package/layout.test.mjs`. npm license texts come from the real bundle graph (`build/bundle-inputs.json`); a bundled package without a LICENSE or NOTICE file fails packaging.
 
@@ -38,7 +36,7 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 
 Build in an isolated copy so the repo `build/` stays free of native helpers (live-test caveat in `testing.md`):
 
-1. Copy `src`, `scripts`, `native`, `vendor`, `skills`, `hooks`, `plugin.json`, `browser-policy.json`, `README.md`, `THIRD_PARTY_NOTICES.md`, `upstream.lock.json`, `package.json` and `LICENSE` to a fresh temp dir.
+1. Copy `src`, `scripts`, `native`, `third_party`, `skills`, `hooks`, `plugin.json`, `browser-policy.json`, `README.md`, `THIRD_PARTY_NOTICES.md`, `package.json` and `LICENSE` to a fresh temp dir.
 2. Copy `node_modules` there; only `electron` may be a junction.
 3. In that dir run `node scripts/build-native.mjs <licenses dir>`, `node scripts/build.mjs`, `node scripts/package.mjs`.
 4. Copy the printed `dist/win-browser-XXXXXX` allocation into the repo `dist/`, the folder users register. Run `test:package` from the repo with `WB_PACKAGE_DIR` set to that copy's `win-browser` folder, then delete the temp copy.
@@ -69,10 +67,10 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
 
 | `THIRD_PARTY_NOTICES.md` section | Update when |
 | --- | --- |
-| Mixdog browser source | `upstream.lock.json` or the `scripts/build.mjs` adapters change |
+| Mixdog browser source (independent fork) | a derived file changes, moves or is added (`third_party/mixdog/provenance.json` `derived`) |
 | Electron | the Electron pin changes |
 | Bundled MCP dependencies | the SDK pin or `sdk-adapter.mjs` patch changes, or new bundled npm packages appear |
 | Native helpers | `native/` or `scripts/build-native.mjs` changes |
 
-- The package `LICENSE` is copied from `vendor/mixdog/LICENSE` (Apache-2.0); `vendor/mixdog/NOTICE.md` ships too.
-- Banners in `scripts/build.mjs` cite the upstream commit; keep them equal to `upstream.lock.json`.
+- The package `LICENSE` is the repository `LICENSE` (Apache-2.0). `licenses/mixdog/` ships Mixdog's unmodified `LICENSE` and `NOTICE.md` and the fork record.
+- The bundle banner in `scripts/build.mjs` and each derived file's header cite the fork point; keep them equal to `third_party/mixdog/provenance.json`.

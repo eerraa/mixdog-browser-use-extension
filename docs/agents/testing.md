@@ -7,9 +7,9 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 | Command | Scope | Needs | Real windows | `%TEMP%` dirs left |
 | --- | --- | --- | --- | --- |
 | `npm test` | `tests/core/*.test.mjs`, `tests/authority*.test.mjs`, `tests/rpc.test.mjs`, `tests/sdk-adapter.test.mjs`, `tests/companion-termination.test.mjs` | `node_modules` | no | `companion-termination-*` |
-| `npm run test:browser` | `tests/browser/run.mjs` → contract, frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner in one `node --test` (30 s cap); arguments select a subset | `npm run build` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
+| `npm run test:browser` | `tests/browser/run.mjs` → contract, frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
 | `npm run test:native` | `tests/native-consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
-| `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `npm run build`, `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
+| `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
 - Baseline at v0.3.1 (image-only control names): `npm test` 27, `test:browser` 187, `test:live` 10, `test:package` 11, `test:native` 1 passing (v0.3.0 after the runner review fixes, D22: 27, 187, 10, 11, 1; script runner R18 and Phase B review fixes: 27, 174, 10, 11, 1; text-result perception D13–D19: 27, 157, 8, 9, 1; DevTools round: 27, 134, 7, 9, 1; v0.2.0: 27, 111, 6, 8, 1). A lower count means skipped or lost tests.
@@ -48,7 +48,7 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 | --- | --- |
 | argument shapes, URL rules, target matching, checkpoints | `tests/browser/contract.test.mjs` |
 | CDP, frames, workers, geometry, `presented()`, `inputReady()` | `tests/browser/frames.test.mjs` |
-| walker extraction, model, refs, text projection, diff, find, settle, signals (pure) | `tests/browser/perception.test.mjs` |
+| walker composition, model, refs, text projection, diff, find, settle, signals (pure) | `tests/browser/perception.test.mjs` |
 | walker in real Chromium | `tests/live/perception-harness.mjs` |
 | security-relevant behavior through the real host (privacy, frame races, secrets, points, escape paths, bounds) | `tests/live/security-harness.mjs` |
 | script API, op allowlist, run outcomes and report | `tests/browser/runner.test.mjs` |

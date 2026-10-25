@@ -1,0 +1,42 @@
+{
+  "name": "Mixdog",
+  "repository": "https://github.com/tribgames/mixdog",
+  "license": "Apache-2.0",
+  "forkPoint": {
+    "version": "1.3.4",
+    "commit": "968ee08965e75c3fa1999ab8d18d20e45229fc89"
+  },
+  "tracking": "none",
+  "statement": "Independent fork of the Mixdog browser code listed under derived. Mixdog changes after the fork point are not tracked or applied. Each derived file carries a notice of its changes; derived[].files are paths in this plugin's source repository. LICENSE and NOTICE.md are Mixdog's, unmodified.",
+  "notices": {
+    "LICENSE": "89ff06d7096963d1f645b20dfc967cbac76a9b54",
+    "NOTICE.md": "a3c63aa779a02da00620f3fcb2271f6289c40f0d"
+  },
+  "derived": [
+    {
+      "original": "apps/desktop/src/main/browser/actionability.ts",
+      "originalBlob": "bab0cd57b489a879afe9caf642a26eb3f9cf64bf",
+      "files": ["src/browser/actionability.mjs"]
+    },
+    {
+      "original": "apps/desktop/src/main/browser/cdp-execution.ts",
+      "originalBlob": "495deffe329e3f62502696cd67fb3a040178e5d3",
+      "files": ["src/browser/cdp-execution.mjs"]
+    },
+    {
+      "original": "apps/desktop/src/main/browser/semantic-query.ts",
+      "originalBlob": "e6ed60bbe6ac3480b695e8f68fe44b4bab54d776",
+      "files": ["src/browser/perception/match.mjs"]
+    },
+    {
+      "original": "apps/desktop/src/main/browser/snapshot-scripts.ts",
+      "originalBlob": "82d7be1289c8053c79c2df5520256979f3df847c",
+      "files": ["src/browser/perception/semantics.mjs", "src/browser/perception/target-point.mjs"]
+    },
+    {
+      "original": "apps/desktop/src/main/browser/stable-rect.ts",
+      "originalBlob": "30c574653c12a85cbb563fd4dc8527713d4a8db0",
+      "files": ["src/browser/perception/target-point.mjs"]
+    }
+  ]
+}

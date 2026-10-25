@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { FrameDriver, INPUT_BINDING } from '../../src/browser/frames.mjs';
 import { DEVTOOLS_LIMITS, DevToolsRecorder } from '../../src/browser/devtools.mjs';
 import { bounded } from '../../src/async.mjs';
-import { BROWSER_STABLE_RECT } from '../../build/upstream.mjs';
+import { BROWSER_STABLE_RECT } from '../../src/browser/perception/target-point.mjs';
 
 test('page code checks every same-origin frame for a filled secret; a same-origin frame that cannot be checked counts', async () => {
   const { driver, debuggerAPI } = fixture();

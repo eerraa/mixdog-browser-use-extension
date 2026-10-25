@@ -43,11 +43,13 @@ Mixdog host
 | `src/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
 | `src/paths.mjs` | plugin data root, connection directory, pipe name | `pluginData`, `connectionPaths`, `validChannel` |
 | `src/async.mjs` | abortable pause; timeout + signal bound | `pause`, `bounded` |
-| `src/upstream-entry.mjs` | re-exports vendored Mixdog browser code and the build-time extracted role/name/state functions; bundled to `build/upstream.mjs` | `PERCEPTION_UPSTREAM`, `rankBrowserSemanticMatch`, `browserRefPointExpression` |
 | `src/core/queue.mjs` | per-key FIFO lane; abort settles the caller, the actual operation keeps fencing | `FenceQueue` |
 | `src/core/permissions.mjs` | connection permission ledger: shared prompts, exact-scope reuse, terminal deny, revoke | `PermissionBroker` |
 | `src/browser/host.mjs` | pages, ownership, action dispatch, perception and text results, validation/perform/settle, refs, signals, handoff and resume, popups, downloads, dialog and file-picker requests, revoke | `BrowserHost`: `execute`, `status`, `#run`, `#read`, `#perceive`, `#present`, `#screenshot`, `#captureImage`, `#validate`, `#validatePoint`, `#perform`, `#liveRef`, `#drainSignals`, `#dialogFirst`, `#pause`, `#handoff`, `#resume`, `#registerPage`, `#createPage`, `#profile`, `#nativeDialog`, `#humanDialog`, `#nativeFilePicker`, `#revoke` |
-| `src/browser/perception/walker.mjs` | isolated-world walker source: iterative synchronous per-frame snapshot with checkpoint, persistent element ids, rendered text (`renderedText`), embedded-content names for image-only controls (`embeddedName`), sticky sensitivity and handoff privatization, label proxies for hidden inputs, occlusion, quiet; `describe`/`target`/`resolve`/`inView`/`hitAt` helpers; the dispatch guard; the trusted-input binding listeners; build-time extraction of vendored role/name/state functions | `walkerInstallSource`, `extractUpstreamSources`, `describeExpression`, `targetPointExpression`, `resolveExpression`, `armGuardExpression`, `sensitivePresentExpression`, `privatizeExpression`, `hitExpression` |
+| `src/browser/perception/walker.mjs` | isolated-world walker source: iterative synchronous per-frame snapshot with checkpoint, persistent element ids, rendered text (`renderedText`), embedded-content names for image-only controls (`embeddedName`), sticky sensitivity and handoff privatization, label proxies for hidden inputs, occlusion, quiet; `describe`/`target`/`resolve`/`inView`/`hitAt` helpers; the dispatch guard; the trusted-input binding listeners; composes the role/name/state helpers of `semantics.mjs` | `walkerInstallSource`, `describeExpression`, `targetPointExpression`, `resolveExpression`, `armGuardExpression`, `sensitivePresentExpression`, `privatizeExpression`, `hitExpression` |
+| `src/browser/perception/semantics.mjs` | role, accessible-name and state helper sources the walker composes (derived from Mixdog, R13) | `ELEMENT_SEMANTICS` |
+| `src/browser/perception/target-point.mjs` | page-side stable-rect measurement and ref-to-point resolver behind `targetPointExpression` (derived, R13) | `BROWSER_STABLE_RECT`, `browserRefPointExpression` |
+| `src/browser/perception/match.mjs` | `find` ranking (derived, R13) | `rankBrowserSemanticMatch` |
 | `src/browser/perception/model.mjs` | compose frame snapshots into one root-coordinate model; degrade hidden or unavailable frames | `composeModel`, `subtree` |
 | `src/browser/perception/refs.mjs` | connection-wide `e<n>` registry; retire on removal, rename, document or generation change | `RefRegistry`, `REF_PATTERN` |
 | `src/browser/perception/render.mjs` | text projection: snapshot, diff, find, text, header, status line; token budgets | `renderSnapshot`, `renderDiff`, `renderFind`, `renderText`, `renderHeader`, `statusLine`, `BUDGETS` |
@@ -61,6 +63,8 @@ Mixdog host
 | `src/browser/presentation.mjs` | one window per page: toolbar, page view, shield; mode machine; toolbar IPC; en/ko strings; occlusion switch | `PagePresentation`, `TOOLBAR_HEIGHT`, `STRINGS` |
 | `src/browser/toolbar-preload.cjs` | toolbar controller in the toolbar's isolated preload world | — |
 | `src/browser/frames.mjs` | CDP attach, cached frame tree (per-frame setup failures become unavailable frames; at most `FRAME_CAP` frames set up), iframes, workers, walker installation (new documents and existing ones), parallel per-frame snapshots, quiet probes (outside the execution fence), describe/resolve/inView/point/owner stability/toRoot, hit chain for points, dispatch guard, sensitive checks, paint-holding wait before first input, native mode with focus emulation (page and OOPIF sessions), the walker-world input binding, page-world contexts, `presented()` (3 s); forwards CDP events to the page's recorder and starts recording per session | `FrameDriver`: `snapshot`, `quiet`, `describe`, `resolveObject`, `inView`, `pointFor`, `hitChain`, `armGuard`, `disarmGuard`, `sensitivePresent`, `privatize`, `inputReady`, `setNativeMode`, `evaluateUser(world)`, `evaluationContext`, `devtoolsCommand`, `FRAME_CAP`, `INPUT_BINDING` |
+| `src/browser/cdp-execution.mjs` | CDP command fence: after a cancelled or timed-out command, later commands wait until the actual dispatch and any termination settle (derived, R13) | `createBrowserCdpExecution` |
+| `src/browser/actionability.mjs` | retries read-only preflight failures until a deadline (derived, R13) | `waitForBrowserActionable`, `BrowserActionabilityError` |
 | `src/browser/devtools.mjs` | agent DevTools: per-page bounded console/exception/log/network records with page and profile privacy windows and bounded linear redaction; page-world best-effort side-effect-free reads; element inspection; performance snapshot | `DevToolsRecorder` (`attach`, `detach`, `boundary`, `record`), `PrivacyWindows`, `redactURL`, `redactText`, `redactHeaders`, `redactBody`, `DEVTOOLS_LIMITS`, `pageRead`, `responseBody`, `performanceSnapshot`, `selectElement`, `inspectNode`, `INSPECT_ELEMENT` |
 | `src/browser/contract.mjs` | action table, argument validation, keys, URL rules, error type | `actions`, `inputActions`, `keys`, `validateArgs`, `pageURL`, `addressURL`, `fail`, `BrowserHostError` |
 | `src/browser/requests.mjs` | native request registry: requestRef/optionRef, 120 s TTL, withdraw | `BrowserRequests` |
@@ -72,7 +76,7 @@ Mixdog host
 | `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; Job object | `wmain` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
 
-Import direction: entry points → `browser/host.mjs` → other `browser/*` → `core/*`, `contract.mjs`, `async.mjs`. Only `frames.mjs` and `host.mjs` (`rankBrowserSemanticMatch` for `find`) import `build/upstream.mjs`; `perception/*` modules are pure and take vendored functions as arguments.
+Import direction: entry points → `browser/host.mjs` → other `browser/*` → `core/*`, `contract.mjs`, `async.mjs`. `perception/*` modules are pure. Nothing under `src/` imports `build/`.
 
 ## Electron hooks
 
@@ -132,6 +136,6 @@ Root: `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered folder; a new pack
 ## Package layout
 
 `npm run package` → `dist/win-browser-XXXXXX/win-browser/`:
-`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist), `app/{mcp,hook,companion}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `vendor/mixdog/` (exactly the `upstream.lock.json` files, each verified against its locked git blob id at package time), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`, `upstream.lock.json`.
+`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist), `app/{mcp,hook,companion}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and the fork record `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
 Mixdog derives the registry stem from the folder basename, so it must stay `win-browser` (server `plugin-win-browser`).

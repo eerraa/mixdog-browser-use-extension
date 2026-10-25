@@ -1,21 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { extractUpstreamSources, walkerInstallSource, snapshotExpression, targetPointExpression } from '../../src/browser/perception/walker.mjs';
+import { walkerInstallSource, snapshotExpression, targetPointExpression } from '../../src/browser/perception/walker.mjs';
+import { ELEMENT_SEMANTICS } from '../../src/browser/perception/semantics.mjs';
+import { rankBrowserSemanticMatch } from '../../src/browser/perception/match.mjs';
 import { composeModel } from '../../src/browser/perception/model.mjs';
 import { RefRegistry, REF_PATTERN } from '../../src/browser/perception/refs.mjs';
 import { estimateTokens, renderDiff, renderFind, renderHeader, renderSnapshot, renderText, statusLine } from '../../src/browser/perception/render.mjs';
 import { armNavigation, settle } from '../../src/browser/settle.mjs';
 import { formatSignals, SignalQueue } from '../../src/browser/signals.mjs';
-
-const vendor = name => readFile(new URL(`../../vendor/mixdog/apps/desktop/src/main/browser/${name}`, import.meta.url), 'utf8');
-// The vendored matcher, as the build will expose it (template literal source).
-async function vendoredMatcher() {
-  const source = await vendor('semantic-query.ts');
-  const start = source.indexOf('export const BROWSER_SEMANTIC_MATCH_SOURCE = `') + 'export const BROWSER_SEMANTIC_MATCH_SOURCE = `'.length;
-  const raw = source.slice(start, source.indexOf('}`;', start) + 1);
-  return Function(`return (${Function(`return \`${raw}\`;`)()})`)();
-}
 
 // Minimal walker output builders.
 const checkpoint = (documentId, w = 1000, h = 700) => ({ documentId, revision: 1, w, h, x: 0, y: 0, dpr: 1 });
@@ -51,17 +43,16 @@ function loginModel(overrides = {}) {
 }
 const refsFor = (registry, tabId = 't1', generation = 1) => item => registry.ref({ tabId, generation, ...item });
 
-test('upstream role, name and state logic is composed from the pinned vendored source exactly once', async () => {
-  const source = await vendor('snapshot-scripts.ts');
-  const upstream = extractUpstreamSources(source);
-  assert.deepEqual(Object.keys(upstream), ['compact', 'inferRole', 'accessibleName', 'stateList']);
-  assert.match(upstream.inferRole, /^const inferRole = \(el, tag\) => \{/);
-  assert.match(upstream.compact, /replace\(\/\\s\+\/g/, 'template escapes are cooked');
-  assert.doesNotMatch(upstream.accessibleName, /textContent|innerText/, 'names read rendered text only, never textContent');
-  assert.equal(upstream.accessibleName.match(/renderedText\(/g).length, 3, 'labels, aria-labelledby targets and the content fallback');
+test('role, name and state helpers compose into the walker and name from rendered text only', () => {
+  const semantics = ELEMENT_SEMANTICS;
+  assert.deepEqual(Object.keys(semantics), ['compact', 'inferRole', 'accessibleName', 'stateList']);
+  assert.match(semantics.inferRole, /^const inferRole = \(el, tag\) => \{/);
+  assert.match(semantics.compact, /replace\(\/\\s\+\/g/, 'regular expressions keep their single backslash');
+  assert.doesNotMatch(semantics.accessibleName, /textContent|innerText/, 'names read rendered text only, never textContent');
+  assert.equal(semantics.accessibleName.match(/renderedText\(/g).length, 3, 'labels, aria-labelledby targets and the content fallback');
   // innerText of an unrendered element is its textContent: the helper returns
   // nothing for it, except an aria-labelledby target's text outside code.
-  const renderedText = new Function('NodeFilter', `${walkerInstallSource(upstream).split('\nconst compact')[0].replace(/^\(\(\) => \{\n/, '')}\nreturn renderedText;`)({ SHOW_TEXT: 4 });
+  const renderedText = new Function('NodeFilter', `${walkerInstallSource(semantics).split('\nconst compact')[0].replace(/^\(\(\) => \{\n/, '')}\nreturn renderedText;`)({ SHOW_TEXT: 4 });
   const textNode = (data, parentTag) => ({ data, parentElement: { closest: selector => (selector.split(',').includes(parentTag) ? {} : null) } });
   const hidden = { nodeType: 1, checkVisibility: () => false, innerText: 'body{color:red} Visible label', ownerDocument: {
     createTreeWalker: (_root, _what, filter) => {
@@ -89,14 +80,11 @@ test('upstream role, name and state logic is composed from the pinned vendored s
     } } };
   assert.equal(renderedText(wrapping, false, select).trim(), 'Plan');
   assert.equal(renderedText(wrapping), 'Plan\nFree\nPro');
-  const install = walkerInstallSource(upstream);
+  const install = walkerInstallSource(semantics);
   assert.doesNotThrow(() => new Function(install), 'composed install script parses');
   assert.doesNotThrow(() => new Function(snapshotExpression({ maxScan: 10 })));
   assert.doesNotThrow(() => new Function(targetPointExpression(3, '(async () => ({x:1,y:2}))()')));
-  assert.throws(() => extractUpstreamSources(source + source), /exactly once/);
-  assert.throws(() => extractUpstreamSources(source.replace('          || el.textContent\n', '')), /exactly once/);
-  assert.throws(() => extractUpstreamSources(source.replace(".map((label) => label.textContent || '')", ".map((label) => label.innerText)")), /exactly once/);
-  assert.throws(() => walkerInstallSource({ ...upstream, stateList: '' }), /stateList/);
+  assert.throws(() => walkerInstallSource({ ...semantics, stateList: '' }), /stateList/);
 });
 
 test('model inlines placed frames in root coordinates and degrades the rest without failing', () => {
@@ -269,8 +257,8 @@ test('diff reports changed states, new content including live and toast text, re
   assert.equal(lost.large, true);
 });
 
-test('find ranks with the vendored matcher, returns usable refs with ancestry, and never matches sensitive values', async () => {
-  const match = await vendoredMatcher();
+test('find ranks with the semantic matcher, returns usable refs with ancestry, and never matches sensitive values', () => {
+  const match = rankBrowserSemanticMatch;
   const registry = new RefRegistry();
   order = 0;
   const root = snap('D1', [

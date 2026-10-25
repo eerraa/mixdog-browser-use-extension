@@ -4,26 +4,11 @@
 // isolated world: page scripts cannot reach it, and sensitive values never
 // leave it.
 //
-// Role, accessible-name and state logic is NOT copied here (AGENTS.md rule 7):
-// `extractUpstreamSources` takes it from the pinned vendored Mixdog
-// `snapshot-scripts.ts` at build time, behind exact-once guards, and
-// `walkerInstallSource` composes it with this module's own traversal.
+// Role, accessible-name and state logic comes from `semantics.mjs` (derived
+// from Mixdog); `walkerInstallSource` composes it with this module's own
+// traversal and `renderedText`.
 
-const UPSTREAM = Object.freeze({
-  compact: { start: '    const compact = (value, max) =>', end: ';\n' },
-  inferRole: { start: '    const inferRole = (el, tag) => {', end: '\n    };\n' },
-  accessibleName: { start: '    const accessibleName = (el, tag) => {', end: '\n    };\n' },
-  stateList: { start: '    const stateList = (el, style) => {', end: '\n    };\n' },
-});
-// Changed: the upstream name reads textContent (labels, aria-labelledby
-// targets, and a final fallback), which carries CSS, script and unrendered
-// text into names. Every one of them uses `renderedText` instead.
-const TEXT_CONTENT_FALLBACK = '\n          || el.textContent';
-const NAME_TEXT = Object.freeze([
-  [".map((id) => byId(id)?.textContent || '')", '.map((id) => renderedText(byId(id), true))'],
-  [".map((label) => label.textContent || '')", '.map((label) => renderedText(label, false, el))'],
-  ['\n          || el.innerText\n', '\n          || renderedText(el)\n'],
-]);
+const SEMANTICS = Object.freeze(['compact', 'inferRole', 'accessibleName', 'stateList']);
 // Rendered text of an element: innerText when it is rendered (innerText of an
 // unrendered element is its textContent). An aria-labelledby target may be
 // hidden (ARIA names include it); then only its text nodes outside script,
@@ -49,41 +34,9 @@ const RENDERED_TEXT = `const renderedText = (node, hidden = false, exclude = nul
   return out;
 };`;
 
-const once = (source, marker, what) => {
-  const at = source.indexOf(marker);
-  if (at < 0 || source.indexOf(marker, at + 1) >= 0) throw new Error(`Upstream ${what} adapter no longer applies exactly once`);
-  return at;
-};
-// The upstream functions live inside a template literal; cook the raw text the
-// way that template would (they contain no interpolation).
-const cook = raw => {
-  if (raw.includes('${') || /(^|[^\\])`/.test(raw)) throw new Error('Upstream walker source contains template syntax');
-  return Function(`"use strict";return \`${raw}\`;`)();
-};
-
-/** Build-time extraction from vendored `snapshot-scripts.ts`; throws when the pinned text moved. */
-export function extractUpstreamSources(snapshotScriptsSource) {
-  const out = {};
-  for (const [name, { start, end }] of Object.entries(UPSTREAM)) {
-    const at = once(snapshotScriptsSource, start, name);
-    const stop = snapshotScriptsSource.indexOf(end, at);
-    if (stop < 0) throw new Error(`Upstream ${name} adapter has no end marker`);
-    let raw = snapshotScriptsSource.slice(at, stop + end.length);
-    if (name === 'accessibleName') {
-      once(raw, TEXT_CONTENT_FALLBACK, 'accessible-name text');
-      raw = raw.replace(TEXT_CONTENT_FALLBACK, '');
-      for (const [from, to] of NAME_TEXT) {
-        once(raw, from, 'accessible-name rendered text');
-        raw = raw.replace(from, to);
-      }
-    }
-    out[name] = cook(raw).trim();
-  }
-  return Object.freeze(out);
-}
-
 // Self-contained: serialized with toString(), so it must not close over
-// anything in this module. `U` carries the composed upstream functions.
+// anything in this module. `U` carries the composed role, name and state
+// helpers (semantics.mjs) and `renderedText`.
 function pageInstall(U) {
   if (globalThis.__independentState) return true;
   const { compact, inferRole, accessibleName, stateList, renderedText } = U;
@@ -267,7 +220,7 @@ function pageInstall(U) {
     if (role === 'slider' || role === 'spinbutton' || role === 'progressbar') return compact(el.getAttribute('aria-valuetext') || el.getAttribute('aria-valuenow'), 40);
     return '';
   };
-  // A control whose vendored name is empty (an image-only link or button) is
+  // A control whose computed name is empty (an image-only link or button) is
   // named by the text alternatives of its rendered embedded content in tree
   // order, each taken as accessible-name computation takes it
   // (aria-labelledby, aria-label, an img's alt, an svg's own title, title); a
@@ -586,7 +539,7 @@ function pageInstall(U) {
     if (style.position === 'fixed') return { role: 'toast', name: '' };
     return { role, name: nameOf(el, tag, 'img') };
   };
-  // Exposes one validated element to the vendored ref-point expression.
+  // Exposes one validated element to the ref-point expression (target-point.mjs).
   state.target = id => {
     const el = state.actionTarget(id);
     window.__mixdogAgentSnapshot = el ? { id: 'independent-target', refs: new Map([['t', { element: el, frames: [] }]]) } : undefined;
@@ -698,17 +651,17 @@ function pageInstall(U) {
   return true;
 }
 
-/** Install script for one isolated world; compose with `extractUpstreamSources` output. */
-export function walkerInstallSource(upstream) {
-  for (const name of Object.keys(UPSTREAM)) {
-    if (typeof upstream?.[name] !== 'string' || !upstream[name]) throw new TypeError(`Missing upstream ${name} source`);
+/** Install script for one isolated world; compose with `ELEMENT_SEMANTICS` (semantics.mjs). */
+export function walkerInstallSource(semantics) {
+  for (const name of SEMANTICS) {
+    if (typeof semantics?.[name] !== 'string' || !semantics[name]) throw new TypeError(`Missing ${name} source`);
   }
   return `(() => {
 ${RENDERED_TEXT}
-${upstream.compact}
-${upstream.inferRole}
-${upstream.accessibleName}
-${upstream.stateList}
+${semantics.compact}
+${semantics.inferRole}
+${semantics.accessibleName}
+${semantics.stateList}
 return (${pageInstall.toString()})({ compact, inferRole, accessibleName, stateList, renderedText });
 })()`;
 }
@@ -734,6 +687,6 @@ export const inViewExpression = (id, documentId) => call(`return { view: s.inVie
 export const actionTargetExpression = (id, documentId) => call(`return s.actionTarget(${Number(id)});`, documentId, 'null');
 export const coveringExpression = (id, documentId) => call(`return { covering: s.coveringAt(${Number(id)}) };`, documentId);
 export const hitExpression = (x, y) => call(`return { hit: s.hitAt(${Number(x)}, ${Number(y)}) };`);
-/** Runs the vendored `browserRefPointExpression('t')` against one validated element. */
+/** Runs `browserRefPointExpression('t')` (target-point.mjs) against one validated element. */
 export const targetPointExpression = (id, refPointExpression, documentId) => call(
   `if (!s.target(${Number(id)})) return { error: 'stale' }; return ${refPointExpression};`, documentId, "{ error: 'stale' }");

@@ -9,7 +9,6 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "vendor": "node scripts/upstream.mjs",
     "build:native": "node scripts/build-native.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test tests/core/*.test.mjs tests/authority*.test.mjs tests/rpc.test.mjs tests/sdk-adapter.test.mjs tests/companion-termination.test.mjs",

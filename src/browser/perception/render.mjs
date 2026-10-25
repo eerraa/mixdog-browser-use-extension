@@ -297,7 +297,7 @@ export function renderDiff(model, base, { from, to, refFor = () => null, isGone 
 }
 
 /**
- * Text/regex search over the full model (vendored semantic matcher), with the
+ * Text/regex search over the full model (semantic matcher, match.mjs), with the
  * nearest referable ancestors as context. Sensitive values are never matched.
  */
 export function renderFind(model, query, { match, refFor = () => null, limit = 20 } = {}) {

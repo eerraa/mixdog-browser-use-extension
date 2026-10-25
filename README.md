@@ -184,5 +184,6 @@ File System Access API의 `showOpenFilePicker`·`showSaveFilePicker`·`showDirec
 `AGENTS.md`에서 시작하는 `docs/agents/` 문서를 기준으로 합니다.
 이 문서들은 배포 폴더에 포함되지 않습니다.
 
-원본 고정 버전, 라이선스와 변경 범위는 `THIRD_PARTY_NOTICES.md`와
-`upstream.lock.json`에 있습니다.
+Mixdog에서 가져온 코드는 Mixdog 1.3.4(`968ee089`)에서 분기한 독자 코드이며, 이후
+원본 변경은 따라가지 않습니다. 분기 시점, 라이선스와 변경 범위는 `THIRD_PARTY_NOTICES.md`와
+`third_party/mixdog/`에 있습니다.

@@ -33,7 +33,7 @@ Each fact has one owner. Other docs link to the owner instead of repeating it.
 | `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D22) | proposing a design change; "why not X?" |
 | `README.md` | end-user install, usage, safety (shipped) | user-visible behavior changes |
 | `skills/independent-browser/SKILL.md` | how agents use the tool (shipped) | tool behavior or usage changes |
-| `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | pins, vendored files or patches change |
+| `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | pins, derived Mixdog files or patches change |
 
 Doc rules:
 - Update the owning doc in the same change as the code; each recipe lists its docs.
@@ -48,9 +48,9 @@ Doc rules:
 4. Do not modify installed Mixdog, account, auth or server settings, `D:\Engineering\mixdog-computer-use-extension`, or `D:\Engineering\antigravity-aistudio-bridge`.
 5. User-only steps: plugin registration and activation, disabling built-in Browser Use, app restart, OS consent prompts.
 6. Commit, push, tag, release and remote changes only on explicit user request.
-7. Upstream code enters only through `vendor/mixdog` + `upstream.lock.json`. Adapt it in `scripts/build.mjs` behind exact-once guards; never edit vendored files.
+7. Code derived from Mixdog is an independent fork of 1.3.4 (`968ee089`), recorded in `third_party/mixdog/provenance.json`; Mixdog is not tracked or re-synced. Edit derived files in place and, in the same change, keep their change notice, the provenance record and `THIRD_PARTY_NOTICES.md` current (R13).
 8. Report verification per layer (unit, live Electron, packaged MCP, real device). Unverified is not done.
-9. `build/`, `dist/`, `vendor/mixdog/`, `node_modules/` and `%TEMP%` test directories are generated. Never commit them. Mixdog runs a registered package in place, so never delete a `dist/` package without asking.
+9. `build/`, `dist/`, `node_modules/` and `%TEMP%` test directories are generated. Never commit them. Mixdog runs a registered package in place, so never delete a `dist/` package without asking.
 
 ## Repo map
 
@@ -58,21 +58,21 @@ Doc rules:
 | --- | --- | --- |
 | `src/` | MCP server, hook, gateway, companion, browser host | `architecture.md` |
 | `native/` | `bridge.cpp` launcher with Job object; `consent.cpp` Windows consent helper | `architecture.md` |
-| `scripts/` | vendor, build, build-native, package, SDK adapter | `build-release.md` |
+| `scripts/` | build, build-native, package, SDK adapter | `build-release.md` |
 | `tests/` | unit, live Electron, packaged MCP | `testing.md` |
 | `plugin.json`, `hooks/`, `skills/`, `browser-policy.json` | shipped plugin surface and policy | `architecture.md`, `contracts.md` |
-| `upstream.lock.json`, `THIRD_PARTY_NOTICES.md`, `LICENSE` | provenance and licensing | `build-release.md` |
+| `third_party/mixdog/`, `THIRD_PARTY_NOTICES.md`, `LICENSE` | Mixdog fork record, license and NOTICE; shipped notices; project license | `build-release.md` |
 | `docs/agents/` | this doc system; not shipped | — |
 
 ## Commands
 
 | Purpose | Command | Needs |
 | --- | --- | --- |
-| Setup | `npm ci`; `node node_modules/electron/install.js`; `npm run vendor` | network |
-| Bundle | `npm run build` | vendor |
+| Setup | `npm ci`; `node node_modules/electron/install.js` | network |
+| Bundle | `npm run build` | node_modules |
 | Core tests | `npm test` | node_modules |
-| Browser unit tests | `npm run test:browser` | build |
-| Live Electron tests | `npm run test:live` | build, unlocked desktop |
+| Browser unit tests | `npm run test:browser` | node_modules |
+| Live Electron tests | `npm run test:live` | node_modules, unlocked desktop |
 | Native helpers | `npm run build:native -- "<MinGW licenses dir>"` | MinGW-w64 `g++` |
 | Native test | `npm run test:native` | native helpers |
 | Package | `npm run package` | build, native helpers |
@@ -96,7 +96,7 @@ Prerequisites and caveats: `testing.md`, `build-release.md`.
 | Plugin, server or tool rename | R10 |
 | Version bump | R11 |
 | Electron upgrade | R12 |
-| Upstream Mixdog upgrade | R13 |
+| Code derived from Mixdog (fork notices) | R13 |
 | MCP SDK upgrade | R14 |
 | Native helpers | R15 |
 | Browser identity (user agent) | R16 |

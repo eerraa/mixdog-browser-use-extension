@@ -34,7 +34,7 @@ test('folder includes its launch/runtime/skill/hook dependencies and original re
     'runtime/resources/default_app.asar',
     'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
     'skills/independent-browser/SKILL.md', 'hooks/hooks.json',
-    'LICENSE', 'THIRD_PARTY_NOTICES.md', 'vendor/mixdog/LICENSE', 'vendor/mixdog/NOTICE.md',
+    'LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/mixdog/LICENSE', 'licenses/mixdog/NOTICE.md', 'licenses/mixdog/provenance.json',
     'sources/native/bridge.cpp', 'sources/native/consent.cpp',
   ]) await present(relative);
   const native = await json('licenses/native/provenance.json');
@@ -52,20 +52,18 @@ test('folder includes its launch/runtime/skill/hook dependencies and original re
   }
 });
 
-test('shipped vendor/mixdog is exactly the locked upstream set, byte-identical to its locked blobs', async () => {
-  const lock = await json('upstream.lock.json');
-  const shipped = [];
-  const walk = async relative => {
-    for (const entry of await readdir(path.join(artifact, 'vendor/mixdog', relative), { withFileTypes: true })) {
-      const next = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) await walk(next); else shipped.push(next);
-    }
-  };
-  await walk('');
-  assert.deepEqual(shipped.sort(), Object.keys(lock.files).sort());
-  for (const [name, expected] of Object.entries(lock.files)) {
-    const bytes = await readFile(path.join(artifact, 'vendor/mixdog', name));
+test('Mixdog-derived code ships its fork record and Mixdog\'s unmodified LICENSE and NOTICE, not Mixdog sources', async () => {
+  const fork = await json('licenses/mixdog/provenance.json');
+  assert.deepEqual(fork.forkPoint, { version: '1.3.4', commit: '968ee08965e75c3fa1999ab8d18d20e45229fc89' });
+  assert.equal(fork.tracking, 'none');
+  assert.equal(fork.license, 'Apache-2.0');
+  assert.deepEqual((await readdir(path.join(artifact, 'licenses/mixdog'))).sort(), ['LICENSE', 'NOTICE.md', 'provenance.json']);
+  for (const [name, expected] of Object.entries(fork.notices)) {
+    const bytes = await readFile(path.join(artifact, 'licenses/mixdog', name));
     assert.equal(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'), expected, name);
+  }
+  for (const gone of ['vendor', 'upstream.lock.json']) {
+    await assert.rejects(stat(path.join(artifact, gone)), { code: 'ENOENT' }, `${gone} is not shipped`);
   }
 });
 

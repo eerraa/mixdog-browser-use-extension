@@ -1,7 +1,7 @@
-import {
-  browserRefPointExpression, BROWSER_STABLE_RECT, BrowserActionabilityError, createBrowserCdpExecution,
-  PERCEPTION_UPSTREAM, waitForBrowserActionable,
-} from '../../build/upstream.mjs';
+import { BrowserActionabilityError, waitForBrowserActionable } from './actionability.mjs';
+import { createBrowserCdpExecution } from './cdp-execution.mjs';
+import { ELEMENT_SEMANTICS } from './perception/semantics.mjs';
+import { browserRefPointExpression, BROWSER_STABLE_RECT } from './perception/target-point.mjs';
 import { bounded, pause } from '../async.mjs';
 import { fail, freshId } from './contract.mjs';
 import { DEVTOOLS_LIMITS } from './devtools.mjs';
@@ -41,9 +41,9 @@ const OWNER_STABLE = `function(){return new Promise(resolve=>{
   const first=box();let frames=0;setTimeout(()=>resolve(false),1000);
   const step=()=>{if(box().some((v,i)=>Math.abs(v-first[i])>1))return resolve(false);if(++frames>=2)return resolve(true);requestAnimationFrame(step)};
   requestAnimationFrame(step)})}`;
-// Composed once from this module and the build-time extraction of the vendored
-// role/name/state functions (walker.mjs, scripts/build.mjs).
-const WALKER_SOURCE = walkerInstallSource(PERCEPTION_UPSTREAM);
+// Composed once from the walker and its role/name/state helpers
+// (walker.mjs, semantics.mjs).
+const WALKER_SOURCE = walkerInstallSource(ELEMENT_SEMANTICS);
 const TREE_EVENTS = new Set(['Page.frameAttached', 'Page.frameNavigated', 'Page.frameDetached',
   'Runtime.executionContextsCleared', 'Target.attachedToTarget', 'Target.detachedFromTarget']);
 
@@ -117,7 +117,8 @@ export class FrameDriver {
     const release = (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased')
       || (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp');
     if (release) {
-      // Upstream's cleanup whitelist does not include held-input releases.
+      // The execution fence's cleanup whitelist (cdp-execution.mjs) does not
+      // include held-input releases.
       // Release directly, without the aborted actor or its settling barrier.
       // The owning FenceQueue operation awaits this ACTUAL promise, so neither
       // another input nor manual reveal can pass a still-pending release.
@@ -235,7 +236,7 @@ export class FrameDriver {
     const ended = new Promise((_yes, no) => { end = no; });
     const fence = Promise.race([actual, ended]);
     // Register before dispatch, independently of the current actor and the
-    // upstream execution barrier. Only an actual reply or native termination
+    // CDP execution barrier. Only an actual reply or native termination
     // ends this obligation; caller-facing timeouts never release startup early.
     this.#startupCleanup.set(fence, { sessionId: target.sessionId, end });
     const settled = () => this.#startupCleanup.delete(fence);
@@ -577,7 +578,7 @@ export class FrameDriver {
     if (result?.stale || !result?.view) fail('STALE_REF', 'Stale ref: its node was removed or its document replaced');
     return result.view;
   }
-  // Read-only actionability (vendored ref-point script) plus ancestor frame
+  // Read-only actionability (ref-point script, target-point.mjs) plus ancestor frame
   // hit tests; transient results retry for up to ACTIONABLE_MS.
   async pointFor(frame, id, documentId, signal = this.actorSignal) {
     try {
@@ -585,7 +586,7 @@ export class FrameDriver {
         const point = await this.evaluate(frame, targetPointExpression(id, browserRefPointExpression('t'), documentId));
         if (point?.error === 'moving') throw new BrowserActionabilityError('Target kept moving', 'moving');
         if (point?.error === 'covered') {
-          // Named by the walker, never by the vendored textContent label.
+          // Named by the walker, never by the ref-point script's textContent label.
           const covering = (await this.evaluate(frame, coveringExpression(id, documentId)).catch(() => null))?.covering;
           throw new BrowserActionabilityError(`Target is covered by ${covering
             ? `${covering.role}${covering.name ? ` ${quoteText(covering.name)}` : ''}` : 'another element'}`, 'covered');

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,23 +14,15 @@ const put = async (source, target = source) => {
   await mkdir(path.dirname(output), { recursive: true });
   await copyFile(path.join(root, source), output);
 };
-for (const name of ['plugin.json', 'browser-policy.json', 'README.md', 'THIRD_PARTY_NOTICES.md', 'upstream.lock.json']) await put(name);
+for (const name of ['plugin.json', 'browser-policy.json', 'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE']) await put(name);
 for (const name of ['hooks', 'skills']) await cp(path.join(root, name), path.join(destination, name), { recursive: true });
 await cp(path.join(root, 'node_modules/electron/dist'), path.join(destination, 'runtime'), { recursive: true });
 await cp(path.join(root, 'build/app'), path.join(destination, 'app'), { recursive: true });
 await cp(path.join(root, 'build/licenses'), path.join(destination, 'licenses'), { recursive: true });
 await put('build/bridge.exe', 'bin/bridge.exe');
 await put('build/native-consent.exe', 'bin/native-consent.exe');
-// Exactly the locked upstream artifacts, each verified against its locked git
-// blob id now; a file dropped from the lock is never shipped from a stale
-// vendor directory, and a modified one stops the package.
-for (const [name, expected] of Object.entries(JSON.parse(await readFile(path.join(root, 'upstream.lock.json'), 'utf8')).files)) {
-  const bytes = await readFile(path.join(root, 'vendor/mixdog', name));
-  const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-  if (actual !== expected) throw new Error(`Vendored file differs from upstream.lock.json: ${name}`);
-  await put(`vendor/mixdog/${name}`);
-}
-await put('vendor/mixdog/LICENSE', 'LICENSE');
+// Mixdog's license and NOTICE and the fork record for the derived code.
+for (const name of ['LICENSE', 'NOTICE.md', 'provenance.json']) await put(`third_party/mixdog/${name}`, `licenses/mixdog/${name}`);
 for (const name of ['consent.cpp', 'bridge.cpp']) await put(`native/${name}`, `sources/native/${name}`);
 
 // The compiler's actual import graph, not package.json's entire dependency

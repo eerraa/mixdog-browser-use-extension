@@ -33,7 +33,7 @@ dependency order, the contracts to keep, tests, and docs to update. Structure:
 - What the walker sees (roles, names, text, sensitivity and handoff privatization, label proxies, occlusion, quiet, ids, the dispatch guard, the trusted-input listeners): `src/browser/perception/walker.mjs`. Frame composition: `model.mjs`. Ref lifetime: `refs.mjs` and `host.mjs #perceive`, `#liveRef`. Text, budgets, diff and find: `render.mjs`. Settle bounds: `settle.mjs SETTLE_BOUNDS`. Signals: `signals.mjs` and `host.mjs #signal`, `#drainSignals`.
 - CDP side: `frames.mjs` (walker installation and `FRAME_CAP`, `#rebuild` per-frame degradation, `snapshot`, `quiet`, `describe`, `resolveObject`, `inView`, `prepare`, `pointFor` with `#ownersStable`, `toRoot`, `hitChain`, `armGuard`, `sensitivePresent`, `privatize`, `inputReady`, `presented`, target and worker attach, `INPUT_BINDING`); `host.mjs` (`#read`, `#perceive`, `#present`, `#screenshot`, `#validate`, `#validatePoint`, `#perform`, `#dispatchInput`, `#assertNoSensitive`, `#signal`, `#beginPrivate`); `contract.mjs` (`keys`, target fields, `find` words-only rule).
 - Live proof for security-relevant behavior (handoff privacy, frame races, sensitive fields, points, escape paths, bounds): `tests/live/security-harness.mjs`.
-- Upstream behavior: adapt in `scripts/build.mjs` with an exact-once guard; never edit `vendor/`. Extracted walker functions: `walker.mjs extractUpstreamSources` (each guard must match once).
+- Derived from Mixdog (R13): role, name and state helpers `perception/semantics.mjs`; target point and stable rect `perception/target-point.mjs`; `find` ranking `perception/match.mjs`; CDP execution fence `cdp-execution.mjs`; preflight retry `actionability.mjs`.
 - Keep: `contracts.md` Observation and input (privacy exclusions, ref lifetime, pipeline order, disposition, live regions in diffs) and D13–D19.
 - Test: `tests/browser/perception.test.mjs` (pure modules), `frames.test.mjs`, `contract.test.mjs`, `host.test.mjs`; live `perception` (real Chromium walker), `review-regressions` (geometry, shadow), `observation`, `workers`, `scenarios.mjs`; package nested-frame test.
 - Measure: when the projection changes, re-measure tokens on a large page with `estimateTokens` and report the numbers.
@@ -91,10 +91,11 @@ Avoid: it breaks existing registrations. Change together: `plugin.json` (`name`,
 - Re-check D9 (occlusion) and D10 (`window.prompt`).
 - Test: every suite, including live and package.
 
-## R13 Upstream Mixdog upgrade
+## R13 Code derived from Mixdog
 
-- Edit in order: `upstream.lock.json` (commit, version, git-blob sha1 per file; the package ships exactly these files) → `npm run vendor` → `src/upstream-entry.mjs` exports → `scripts/build.mjs` adapters and banner commit → `walker.mjs extractUpstreamSources` guards when `snapshot-scripts.ts` changed → attribution comment in `src/core/queue.mjs` → `THIRD_PARTY_NOTICES.md` (version, commit, files). Finder: `grep -rn 968ee089`.
-- Test: `test:browser` (frames, perception extraction), live suites, package suite.
+- Files: `third_party/mixdog/provenance.json` `derived[].files`. The fork is not tracked: never fetch or merge newer Mixdog code (D23).
+- Edit the file in place; in the same change update its `Changed:` header notice, its row in `THIRD_PARTY_NOTICES.md`, and `provenance.json` `derived[].files` when a derived file moves, splits or is added. Finder: `grep -rn 968ee089`.
+- Test: the tests of the area the file belongs to (R4); `tests/package/layout.test.mjs` checks the shipped fork record and Mixdog notices.
 
 ## R14 MCP SDK upgrade
 
