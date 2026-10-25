@@ -17,7 +17,7 @@ section changes.
 | esbuild | 0.28.2 | `package.json` |
 | MCP SDK (bundled, patched) | 1.32.1 | `package.json`; `scripts/sdk-adapter.mjs` |
 | Mixdog fork point (not tracked) | 1.3.4 at `968ee08965e75c3fa1999ab8d18d20e45229fc89` | `third_party/mixdog/provenance.json` |
-| Native compiler | MinGW-w64 `g++` on PATH, not pinned, so rebuilds are not byte-identical; v0.1.0 used i686-posix-sjlj 8.1.0 | package `licenses/native/provenance.json` |
+| Native compiler | MinGW-w64 `g++` on PATH, not pinned, so rebuilds are not byte-identical | package `licenses/native/provenance.json` |
 
 Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 
@@ -61,12 +61,7 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
 5. Commit exactly that tree, tag `v<ver>`, push, then create the GitHub release on `eerraa/mixdog-browser-use-extension` with both assets. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler. Check that the uploaded asset digest equals the local sha256.
 6. Users register the new folder themselves; existing registrations are never replaced automatically.
 
-| Release | Commit | Assets |
-| --- | --- | --- |
-| v0.1.0 | `f9ed383`, before the history reset; not an ancestor of `main` | `win-browser-v0.1.0-windows-x64.zip` (sha256 `78aa171135fb61cec9e700c7039d0e41eb98db5173eba4a7eb6464724cff414b`) and its `.sha256` |
-| v0.2.0 | tag `v0.2.0` on `main` | `win-browser-v0.2.0-windows-x64.zip` (sha256 `7c270649a7ac1463c51a2428a037520a7249349fe3b4ae648593a8fc4445da80`) and its `.sha256` |
-| v0.3.0 | tag `v0.3.0` on `main` | `win-browser-v0.3.0-windows-x64.zip` (sha256 `4120dfb2846936072b04ab555fceb1acba5789eaf64dbc1aabe585e248a4b831`) and its `.sha256` |
-| v0.3.1 | tag `v0.3.1` on `main` | `win-browser-v0.3.1-windows-x64.zip` (sha256 `e9e7ae9ba1f50cca4eb566534949baa084dfc0d110b68f1f2eb9ce22580bcd5c`) and its `.sha256` |
+Published releases are the `v<ver>` git tags and their GitHub releases.
 
 ## Licensing
 

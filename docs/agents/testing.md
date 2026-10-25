@@ -17,7 +17,7 @@ changes.
 | `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Baseline: `npm test` 21, `test:browser` 193, `test:live` 10, `test:package` 11, `test:native` 1 passing (the 214 unit tests of v0.3.1, regrouped by folder; v0.3.1: 27, 187, 10, 11, 1; v0.3.0 after the runner review fixes, D22: 27, 187, 10, 11, 1; script runner R18 and Phase B review fixes: 27, 174, 10, 11, 1; text-result perception D13–D19: 27, 157, 8, 9, 1; DevTools round: 27, 134, 7, 9, 1; v0.2.0: 27, 111, 6, 8, 1). A lower count means skipped or lost tests.
+- Expected counts: `npm test` 21, `test:browser` 193, `test:live` 10, `test:package` 11, `test:native` 1 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
