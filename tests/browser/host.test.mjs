@@ -1949,7 +1949,7 @@ test('a fully acknowledged key is executed even when it moves focus, navigates o
   callOn = async (_frame, _objectId, declaration) => declaration.includes('activeElement') ? focused
     : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
   // The key's own effect: focus leaves the field once the key is down.
-  send = async (method, params) => { sent.push(params?.type ?? method); if (params?.type === 'rawKeyDown') focused = false; return {}; };
+  send = async (method, params) => { sent.push(params?.type ?? method); if (['rawKeyDown', 'keyDown'].includes(params?.type)) focused = false; return {}; };
   try {
     const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'textbox "Field"');
     for (const key of ['Tab', 'Enter', 'Escape']) {
@@ -1967,6 +1967,34 @@ test('a fully acknowledged key is executed even when it moves focus, navigates o
     assert.deepEqual([partial.disposition, partial.code], ['uncertain', 'TARGET_CHANGED']);
     assert.ok(!sent.includes('Input.insertText'));
   } finally {
+    send = async () => ({}); page.nodes = [];
+    callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
+    await host.close();
+  }
+});
+
+test('Enter goes down with its character, as a keyboard sends it, and takes the key credit; other keys stay raw', async () => {
+  page.nodes = [{ ...button(1, 'Field'), r: 'textbox' }];
+  const { host, call, tabId } = await setup();
+  const sent = [];
+  const credits = [];
+  const expectInput = FrameDriver.prototype.expectInput;
+  FrameDriver.prototype.expectInput = function (kind) { credits.push(kind); return expectInput.call(this, kind); };
+  callOn = async (_frame, _objectId, declaration) => declaration.includes('activeElement') ? true
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'text', multiple: false, editable: false };
+  send = async (method, params) => { if (method === 'Input.dispatchKeyEvent') sent.push(params); return {}; };
+  try {
+    const ref = refIn(rendered(await call({ action: 'observe', tabId })), 'textbox "Field"');
+    for (const key of ['Enter', 'Tab']) assert.equal((await call({ action: 'press', tabId, ref, key })).disposition, 'executed', key);
+    assert.deepEqual(sent, [
+      { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' },
+      { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 },
+      { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+      { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+    ]);
+    assert.deepEqual(credits, ['keydown', 'keydown'], 'each key, Enter included, takes one keydown credit');
+  } finally {
+    FrameDriver.prototype.expectInput = expectInput;
     send = async () => ({}); page.nodes = [];
     callOn = async () => ({ connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'submit', multiple: false, editable: false });
     await host.close();

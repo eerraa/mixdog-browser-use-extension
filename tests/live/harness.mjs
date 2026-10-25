@@ -95,6 +95,17 @@ function serve() {
     if (req.url === '/permissions') return res.end(`<!doctype html><h1>Local native permission admission fixture</h1>
       <button onclick="navigator.hid.requestDevice({filters:[]}).catch(()=>{})">Request HID</button>
       <button onclick="navigator.usb.requestDevice({filters:[]}).catch(()=>{})">Request USB</button>`);
+    if (req.url === '/enter') return res.end(`<!doctype html><title>Enter fixture</title>
+      <form action="/enter-submitted"><label>Query <input name="q"></label><button>Search</button></form>
+      <form action="/enter-handled"><label>Handled <input name="h"></label><output>0</output></form>
+      <label>Notes <textarea></textarea></label>
+      <script>document.querySelector('[name=h]').addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        const count = document.querySelector('output');
+        count.textContent = String(Number(count.textContent) + 1);
+      });</script>`);
+    if (req.url.startsWith('/enter-submitted')) return res.end('<!doctype html><title>Enter submitted</title><h1>Submitted</h1>');
     res.end(req.url.split('?')[0] === '/frame' ? '<button onclick="this.textContent=\'Frame clicked\'">Frame button</button>'
       : req.url === '/popup' ? '<h1>Owned popup</h1>' + popupPaint
         + '<button onclick="window.open(\'/popup-nested\')">Nested child popup</button>'
@@ -235,6 +246,29 @@ try {
     assert.match(rendered(observation), /textbox "Name"[^\n]*="Local Alice typed"/, rendered(observation));
     observation = await call({ action: 'select', tabId, target: { name: 'Choice', exact: true }, values: ['b'] });
     assert.match(rendered(observation), /"Choice"[^\n]*="b"/, rendered(observation));
+  });
+  await check('Enter submits a form once as a keyboard does, breaks a textarea line, and sends nothing native after a cancelled keydown', async () => {
+    const opened = await call({ action: 'open', url: `http://127.0.0.1:${port}/enter` });
+    const enter = opened.tabId;
+    const notes = { role: 'textbox', name: 'Notes', exact: true };
+    await call({ action: 'fill', tabId: enter, target: notes, text: 'one' });
+    assert.equal((await call({ action: 'press', tabId: enter, target: notes, key: 'Enter' })).disposition, 'executed');
+    await call({ action: 'type', tabId: enter, target: notes, text: 'two' });
+    assert.equal((await call({ action: 'evaluate', tabId: enter, expression: 'document.querySelector("textarea").value' })).value, 'one\ntwo');
+    const handled = { role: 'textbox', name: 'Handled', exact: true };
+    await call({ action: 'fill', tabId: enter, target: handled, text: 'kept' });
+    const cancelled = await call({ action: 'press', tabId: enter, target: handled, key: 'Enter' });
+    assert.match(rendered(cancelled), /status ="1"/, 'the page saw its keydown and cancelled it');
+    const query = { role: 'textbox', name: 'Query', exact: true };
+    await call({ action: 'fill', tabId: enter, target: query, text: 'enter-test' });
+    assert.equal((await call({ action: 'press', tabId: enter, target: query, key: 'Enter' })).disposition, 'executed');
+    const submitted = await call({ action: 'observe', tabId: enter, wait: { url: '/enter-submitted' } });
+    assert.match(rendered(submitted), /page "Enter submitted" [^\n]*\/enter-submitted\?q=enter-test/, rendered(submitted));
+    assert.equal(requestHeaders.get('/enter-submitted?q=enter-test')?.count, 1, 'exactly one submission');
+    assert.ok(![...requestHeaders.keys()].some(url => url.startsWith('/enter-handled')), 'a cancelled keydown submits nothing');
+    const tab = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === enter);
+    assert.ok(tab.mode === 'automation' && !tab.paused, `each Enter claimed its own keydown credit: ${JSON.stringify(tab)}`);
+    await call({ action: 'close_tab', tabId: enter });
   });
   await check('ambiguous targets fail with candidates and ownership/late caller rejected', async () => {
     await assert.rejects(call({ action: 'click', tabId, target: { name: 'Duplicate', exact: true } }), e => e.code === 'AMBIGUOUS_TARGET' && e.candidates.length === 2);

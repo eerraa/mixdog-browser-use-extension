@@ -1467,7 +1467,7 @@ export class BrowserHost {
     // key also takes the one credit its trusted event may claim (M5).
     const dispatch = async (method, params, sessionId, onDispatch = () => {}) => {
       const expected = method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed' ? 'pointerdown'
-        : method === 'Input.dispatchKeyEvent' && params.type === 'rawKeyDown' ? 'keydown' : null;
+        : method === 'Input.dispatchKeyEvent' && ['rawKeyDown', 'keyDown'].includes(params.type) ? 'keydown' : null;
       let credit = null;
       try {
         return await p.driver.send(method, params, sessionId, undefined, () => {
@@ -1593,11 +1593,16 @@ export class BrowserHost {
         // Each step is guarded in the same turn: a keydown or beforeinput that
         // is not on the validated element is cancelled before it acts, and
         // nothing after it is sent. Returns whether the step landed.
-        const key = async data => {
+        // A key with a character (Enter) goes down as keyDown, so Chromium
+        // also sends that character as a real keyboard does: forms submit and
+        // a textarea breaks the line, and a keydown the page cancels
+        // suppresses it. Every other key is a rawKeyDown.
+        const key = async ({ text, ...data }) => {
           await ensureEditable();
           let pressed = false;
+          const down = text ? { type: 'keyDown', ...data, text, unmodifiedText: text } : { type: 'rawKeyDown', ...data };
           try {
-            const outcome = await guarded('keydown', () => dispatch('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...data },
+            const outcome = await guarded('keydown', () => dispatch('Input.dispatchKeyEvent', down,
               undefined, () => { pressed = true; }));
             if (missed(outcome)) state.code = 'TARGET_MISMATCH';
           } finally {

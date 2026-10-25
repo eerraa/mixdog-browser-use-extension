@@ -42,7 +42,7 @@ export const devtoolsActions = new Set(['console', 'network', 'inspect', 'perfor
 export const actions = Object.freeze(Object.keys(fields));
 export const inputActions = new Set(['navigate', 'click', 'fill', 'type', 'press', 'select', 'scroll', 'evaluate', 'upload', 'handle_dialog', 'respond']);
 export const keys = Object.freeze({
-  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 },
+  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
   Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
   Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
   Backspace: { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
