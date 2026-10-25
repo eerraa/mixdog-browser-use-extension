@@ -5,7 +5,7 @@
 // element inspection and a performance snapshot. Outputs are compact rows:
 // they never carry observations or screenshots and never invalidate refs.
 // Nothing produced while the person controls the page is recorded or exposed.
-import { fail } from './contract.mjs';
+import { fail } from '../shared/contract.mjs';
 
 export const DEVTOOLS_LIMITS = Object.freeze({
   console: 500, network: 1000, rows: 30, maxRows: 100, chars: 8192, maxChars: 65536,

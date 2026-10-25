@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { runnerApi } from '../../src/browser/runner/api.mjs';
 import { RUNNER_FLOOD, RunnerBridge, validateOp } from '../../src/browser/runner/bridge.mjs';
 import { RUN_LIMITS, runScript, syntaxError } from '../../src/browser/runner/run.mjs';
-import { validateArgs } from '../../src/browser/contract.mjs';
+import { validateArgs } from '../../src/shared/contract.mjs';
 
 const caller = () => {
   const controller = new AbortController();

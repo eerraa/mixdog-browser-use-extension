@@ -20,11 +20,11 @@ Mixdog host
 ## Call path
 
 1. The agent calls `browse` with `_channel` (schema const = connection UUID).
-2. `PreToolUse` → `src/hook.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure.
-3. `src/mcp.mjs` → `gateway.execute` → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
-4. `src/companion-main.mjs` → `authority.consume(_lease, args)` → caller `{sessionId, callId, signal, assertLive}` → `BrowserHost.execute`.
+2. `PreToolUse` → `src/hook/main.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure.
+3. `src/mcp/main.mjs` → `gateway.execute` → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
+4. `src/companion/main.mjs` → `authority.consume(_lease, args)` → caller `{sessionId, callId, signal, assertLive}` → `BrowserHost.execute`.
 5. `BrowserHost.execute` → `validateArgs` → immediate actions (including DevTools buffer reads), or `#run` (per-tab `FenceQueue` lane, 25 s): input → `#validate` (after `FrameDriver.inputReady`) → `#perform` (dispatch guard) → `settle` → `#perceive` → `#present`; observe/read → `#read` → `#perceive` → `#present`. `run` → `#runScript` → `runner/run.mjs runScript`: a sandbox renderer (`runner/sandbox.mjs`) whose bridge ops (`runner/bridge.mjs`) each call `BrowserHost.execute` under the run's caller (`keepSignals`), then one final `#run` observe-after per touched tab.
-6. `toolResult` (`src/tool-schema.mjs`) renders page results as text (`statusLine` + body), adds the screenshot as image content only on request, keeps `JSON_ACTIONS` as JSON, and sets `isError` (`contracts.md` Result vocabulary).
+6. `toolResult` (`src/mcp/tool.mjs`) renders page results as text (`statusLine` + body), adds the screenshot as image content only on request, keeps `JSON_ACTIONS` as JSON, and sets `isError` (`contracts.md` Result vocabulary).
 
 - Lifecycle: `SessionStart`, `UserPromptSubmit`, `SubagentStart` send `begin`; `Stop`, `StopFailure`, `SessionEnd`, `SubagentStop` send `end` to every `connections/*` channel (150 ms each).
 - Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json is removed, profiles stay.
@@ -34,17 +34,18 @@ Mixdog host
 
 | Path | Role | Key symbols |
 | --- | --- | --- |
-| `src/mcp.mjs` | MCP stdio server; single tool; error envelope; EOF shutdown | `main` |
-| `src/tool-schema.mjs` | tool schema (action enum from contract); result shaping | `browserTool`, `toolResult` |
-| `src/gateway.mjs` | spawn and own the companion, endpoint.json, reconnect for new calls only, revoke confirmation | `createGateway` |
-| `src/hook.mjs` | lease injection for this tool only; lifecycle fan-out | `main`, `deliver` |
-| `src/companion-main.mjs` | Electron main per connection; pipe server; role and method auth; termination | `terminate`, `sameKey` |
-| `src/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
-| `src/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
-| `src/paths.mjs` | plugin data root, connection directory, pipe name | `pluginData`, `connectionPaths`, `validChannel` |
-| `src/async.mjs` | abortable pause; timeout + signal bound | `pause`, `bounded` |
-| `src/core/queue.mjs` | per-key FIFO lane; abort settles the caller, the actual operation keeps fencing | `FenceQueue` |
-| `src/core/permissions.mjs` | connection permission ledger: shared prompts, exact-scope reuse, terminal deny, revoke | `PermissionBroker` |
+| `src/mcp/main.mjs` | MCP stdio server; single tool; error envelope; EOF shutdown | `main` |
+| `src/mcp/tool.mjs` | tool schema (action enum from contract); result shaping and the status line | `browserTool`, `toolResult`, `errorResult`, `statusLine` |
+| `src/mcp/gateway.mjs` | spawn and own the companion, endpoint.json, reconnect for new calls only, revoke confirmation | `createGateway` |
+| `src/hook/main.mjs` | lease injection for this tool only; lifecycle fan-out | `main`, `deliver` |
+| `src/companion/main.mjs` | Electron main per connection; pipe server; role and method auth; termination | `terminate`, `sameKey` |
+| `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
+| `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
+| `src/shared/paths.mjs` | plugin data root, connection directory, pipe name | `pluginData`, `connectionPaths`, `validChannel` |
+| `src/shared/async.mjs` | abortable pause; timeout + signal bound | `pause`, `bounded` |
+| `src/shared/contract.mjs` | action table, argument validation, keys, URL rules, error type | `actions`, `inputActions`, `keys`, `validateArgs`, `pageURL`, `addressURL`, `fail`, `BrowserHostError` |
+| `src/browser/queue.mjs` | per-key FIFO lane; abort settles the caller, the actual operation keeps fencing | `FenceQueue` |
+| `src/browser/permission-broker.mjs` | connection permission ledger: shared prompts, exact-scope reuse, terminal deny, revoke | `PermissionBroker` |
 | `src/browser/host.mjs` | pages, ownership, action dispatch, perception and text results, validation/perform/settle, refs, signals, handoff and resume, popups, downloads, dialog and file-picker requests, revoke | `BrowserHost`: `execute`, `status`, `#run`, `#read`, `#perceive`, `#present`, `#screenshot`, `#captureImage`, `#validate`, `#validatePoint`, `#perform`, `#liveRef`, `#drainSignals`, `#dialogFirst`, `#pause`, `#handoff`, `#resume`, `#registerPage`, `#createPage`, `#profile`, `#nativeDialog`, `#humanDialog`, `#nativeFilePicker`, `#revoke` |
 | `src/browser/perception/walker.mjs` | isolated-world walker source: iterative synchronous per-frame snapshot with checkpoint, persistent element ids, rendered text (`renderedText`), embedded-content names for image-only controls (`embeddedName`), sticky sensitivity and handoff privatization, label proxies for hidden inputs, occlusion, quiet; `describe`/`target`/`resolve`/`inView`/`hitAt` helpers; the dispatch guard; the trusted-input binding listeners; composes the role/name/state helpers of `semantics.mjs` | `walkerInstallSource`, `describeExpression`, `targetPointExpression`, `resolveExpression`, `armGuardExpression`, `sensitivePresentExpression`, `privatizeExpression`, `hitExpression` |
 | `src/browser/perception/semantics.mjs` | role, accessible-name and state helper sources the walker composes (derived from Mixdog, R13) | `ELEMENT_SEMANTICS` |
@@ -52,7 +53,7 @@ Mixdog host
 | `src/browser/perception/match.mjs` | `find` ranking (derived, R13) | `rankBrowserSemanticMatch` |
 | `src/browser/perception/model.mjs` | compose frame snapshots into one root-coordinate model; degrade hidden or unavailable frames | `composeModel`, `subtree` |
 | `src/browser/perception/refs.mjs` | connection-wide `e<n>` registry; retire on removal, rename, document or generation change | `RefRegistry`, `REF_PATTERN` |
-| `src/browser/perception/render.mjs` | text projection: snapshot, diff, find, text, header, status line; token budgets | `renderSnapshot`, `renderDiff`, `renderFind`, `renderText`, `renderHeader`, `statusLine`, `BUDGETS` |
+| `src/browser/perception/render.mjs` | text projection: snapshot, diff, find, text, header; token budgets | `renderSnapshot`, `renderDiff`, `renderFind`, `renderText`, `renderHeader`, `BUDGETS` |
 | `src/browser/settle.mjs` | bounded post-dispatch settle and navigation arming | `armNavigation`, `settle`, `SETTLE_BOUNDS` |
 | `src/browser/runner/run.mjs` | one script run: sandbox, bridge, deadline, Stop/handoff watch, report (Electron-free; sandbox injected) | `runScript`, `runnerSource`, `RUN_LIMITS` |
 | `src/browser/runner/bridge.mjs` | main-process op allowlist and argument shapes; one `execute` call per op; seal on uncertain; auto-wait | `RunnerBridge`, `validateOp`, `RUNNER_OPS`, `pauseStatus` |
@@ -66,7 +67,6 @@ Mixdog host
 | `src/browser/cdp-execution.mjs` | CDP command fence: after a cancelled or timed-out command, later commands wait until the actual dispatch and any termination settle (derived, R13) | `createBrowserCdpExecution` |
 | `src/browser/actionability.mjs` | retries read-only preflight failures until a deadline (derived, R13) | `waitForBrowserActionable`, `BrowserActionabilityError` |
 | `src/browser/devtools.mjs` | agent DevTools: per-page bounded console/exception/log/network records with page and profile privacy windows and bounded linear redaction; page-world best-effort side-effect-free reads; element inspection; performance snapshot | `DevToolsRecorder` (`attach`, `detach`, `boundary`, `record`), `PrivacyWindows`, `redactURL`, `redactText`, `redactHeaders`, `redactBody`, `DEVTOOLS_LIMITS`, `pageRead`, `responseBody`, `performanceSnapshot`, `selectElement`, `inspectNode`, `INSPECT_ELEMENT` |
-| `src/browser/contract.mjs` | action table, argument validation, keys, URL rules, error type | `actions`, `inputActions`, `keys`, `validateArgs`, `pageURL`, `addressURL`, `fail`, `BrowserHostError` |
 | `src/browser/requests.mjs` | native request registry: requestRef/optionRef, 120 s TTL, withdraw | `BrowserRequests` |
 | `src/browser/permissions.mjs` | Chromium permission and device handlers → broker, requests, consent; policy gating | `BrowserPermissions` |
 | `src/browser/policy.mjs` | `browser-policy.json` loader and validator | `BrowserPolicy` |
@@ -76,7 +76,7 @@ Mixdog host
 | `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; Job object | `wmain` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
 
-Import direction: entry points → `browser/host.mjs` → other `browser/*` → `core/*`, `contract.mjs`, `async.mjs`. `perception/*` modules are pure. Nothing under `src/` imports `build/`.
+Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` → `shared/`; `hook/` → `shared/`. `shared/` imports no other layer and no Electron, and `mcp/` and `hook/` never import `browser/`, so the MCP and hook bundles carry no engine code. Inside `browser/`, `host.mjs` imports the other modules and `perception/*` modules are pure. Nothing under `src/` imports `build/`.
 
 ## Electron hooks
 

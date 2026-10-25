@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { FrameDriver, INPUT_BINDING } from '../../src/browser/frames.mjs';
 import { DEVTOOLS_LIMITS, DevToolsRecorder } from '../../src/browser/devtools.mjs';
-import { bounded } from '../../src/async.mjs';
+import { bounded } from '../../src/shared/async.mjs';
 import { BROWSER_STABLE_RECT } from '../../src/browser/perception/target-point.mjs';
 
 test('page code checks every same-origin frame for a filled secret; a same-origin frame that cannot be checked counts', async () => {

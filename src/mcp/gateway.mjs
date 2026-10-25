@@ -3,9 +3,9 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
-import { RpcPeer } from './rpc.mjs';
-import { bounded } from './async.mjs';
-import { connectionPaths } from './paths.mjs';
+import { RpcPeer } from '../shared/rpc.mjs';
+import { bounded } from '../shared/async.mjs';
+import { connectionPaths } from '../shared/paths.mjs';
 
 async function connect(pipe, hello) {
   const socket = net.createConnection(pipe);

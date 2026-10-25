@@ -1,5 +1,5 @@
 import { app, BrowserWindow, nativeTheme, WebContentsView } from 'electron';
-import { addressURL, fail, freshId } from './contract.mjs';
+import { addressURL, fail, freshId } from '../shared/contract.mjs';
 
 // Owned pages must keep producing frames while their window is covered.
 // Windows occlusion tracking stops frames for a window that is occluded before

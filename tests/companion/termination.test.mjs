@@ -5,15 +5,15 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { bounded } from '../src/async.mjs';
-import { app, state } from './companion-fixture.mjs';
+import { bounded } from '../../src/shared/async.mjs';
+import { app, state } from './fixture.mjs';
 
-const companion = new URL('../src/companion-main.mjs', import.meta.url);
-const fixture = new URL('./companion-fixture.mjs', import.meta.url).href;
+const companion = new URL('../../src/companion/main.mjs', import.meta.url);
+const fixture = new URL('./fixture.mjs', import.meta.url).href;
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL === companion.href
-      && ['electron', 'node:net', './browser/host.mjs', './rpc.mjs'].includes(specifier)) {
+      && ['electron', 'node:net', '../browser/host.mjs', '../shared/rpc.mjs'].includes(specifier)) {
       return { url: fixture, shortCircuit: true };
     }
     return nextResolve(specifier, context);

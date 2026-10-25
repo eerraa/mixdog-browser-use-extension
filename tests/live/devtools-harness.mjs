@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { BrowserHost } from '../../src/browser/host.mjs';
-import { bounded, pause } from '../../src/async.mjs';
+import { bounded, pause } from '../../src/shared/async.mjs';
 import { assertShielded, frameOf, menu, pageContents, presentationOf, refOf, toolbarPreloadPath } from './presentation.mjs';
 
 const directory = process.argv[2];

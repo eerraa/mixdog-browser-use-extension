@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 test('Windows consent availability returns an enum without displaying a verification prompt', async () => {
   const { stdout } = await promisify(execFile)(
-    fileURLToPath(new URL('../build/native-consent.exe', import.meta.url)),
+    fileURLToPath(new URL('../../build/native-consent.exe', import.meta.url)),
     ['--availability'], { timeout: 15_000, windowsHide: true },
   );
   const result = JSON.parse(stdout);

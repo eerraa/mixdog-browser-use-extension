@@ -7,10 +7,11 @@ import path from 'node:path';
 const directory = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-check-'));
 const selected = process.argv.slice(2);
 const child = spawn(process.execPath, ['--test', ...(selected.length ? selected : [
-  'tests/browser/contract.test.mjs', 'tests/browser/frames.test.mjs', 'tests/browser/host.test.mjs',
+  'tests/browser/frames.test.mjs', 'tests/browser/host.test.mjs',
   'tests/browser/policy.test.mjs', 'tests/browser/requests.test.mjs',
   'tests/browser/dialogs.test.mjs', 'tests/browser/user-agent.test.mjs', 'tests/browser/devtools.test.mjs',
-  'tests/browser/perception.test.mjs', 'tests/browser/runner.test.mjs'])], {
+  'tests/browser/perception.test.mjs', 'tests/browser/runner.test.mjs',
+  'tests/browser/queue.test.mjs', 'tests/browser/permission-broker.test.mjs'])], {
   cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
 });
 let stdout = '', stderr = '';

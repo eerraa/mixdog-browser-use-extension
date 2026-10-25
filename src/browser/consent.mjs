@@ -1,7 +1,7 @@
 import { BrowserWindow, Menu } from 'electron';
 import { showManualMessageBox } from './dialogs.mjs';
 import { spawn } from 'node:child_process';
-import { bounded } from '../async.mjs';
+import { bounded } from '../shared/async.mjs';
 
 // Trusted native surface: deliberately has no page ID, debugger, preload or IPC.
 // Web input and a native-dialog click are NOT approval evidence. Windows-owned

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CallerAuthority, BROWSER_TOOL } from '../src/authority.mjs';
+import { CallerAuthority, BROWSER_TOOL } from '../../src/shared/authority.mjs';
 
 test('a delivered end event fences even a previously unknown caller', () => {
   const authority = new CallerAuthority();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FenceQueue } from '../../src/core/queue.mjs';
+import { FenceQueue } from '../../src/browser/queue.mjs';
 
 const deferred = () => {
   let resolve, reject;

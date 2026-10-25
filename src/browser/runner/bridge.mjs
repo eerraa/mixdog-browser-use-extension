@@ -8,8 +8,8 @@
 // - executed with a code: the step ran and reported a failure (catchable).
 // - uncertain: the bridge seals (every later op refused) and the run ends.
 // - Stop, handoff, cancellation and the deadline end the run.
-import { pause } from '../../async.mjs';
-import { validateArgs } from '../contract.mjs';
+import { pause } from '../../shared/async.mjs';
+import { validateArgs } from '../../shared/contract.mjs';
 
 const TAB = /^t[1-9]\d{0,9}$/;
 const REF = /^e[1-9]\d{0,9}$/;

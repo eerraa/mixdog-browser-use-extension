@@ -1,4 +1,4 @@
-import { BrowserHostError, fail, freshId, validateNativeResponse } from './contract.mjs';
+import { BrowserHostError, fail, freshId, validateNativeResponse } from '../shared/contract.mjs';
 
 // Reference/lifecycle registry only. Each adapter supplies its own native-state,
 // policy and typed-response validation; option refs are not approval tokens.

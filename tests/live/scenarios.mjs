@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { BrowserWindow, screen } from 'electron';
-import { bounded, pause } from '../../src/async.mjs';
+import { bounded, pause } from '../../src/shared/async.mjs';
 import { TOOLBAR_HEIGHT } from '../../src/browser/presentation.mjs';
 import {
   assertNative, assertShielded, clickToolbar, menu, pageContents, pixelAt, presentationOf, pressToolbar, refOf, rendered, toolbarState,

@@ -45,7 +45,7 @@ Mixdog runs a registered package in place and keys its data by the folder path (
 
 ## Versioning
 
-Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `plugin.json` `version`, server `version` in `src/mcp.mjs`.
+Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `plugin.json` `version`, server `version` in `src/mcp/main.mjs`.
 
 ## Release (explicit user request only)
 

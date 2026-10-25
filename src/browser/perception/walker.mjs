@@ -542,7 +542,7 @@ function pageInstall(U) {
   // Exposes one validated element to the ref-point expression (target-point.mjs).
   state.target = id => {
     const el = state.actionTarget(id);
-    window.__mixdogAgentSnapshot = el ? { id: 'independent-target', refs: new Map([['t', { element: el, frames: [] }]]) } : undefined;
+    window.__independentTargetSnapshot = el ? { id: 'independent-target', refs: new Map([['t', { element: el, frames: [] }]]) } : undefined;
     return !!el;
   };
   // One-shot capture guard around a dispatch: did the trusted pointerdown,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CallerAuthority } from '../src/authority.mjs';
+import { CallerAuthority } from '../../src/shared/authority.mjs';
 
 const make = () => new CallerAuthority({ now: () => 1_000 });
 const call = (authority, sessionId = 'session-a', callId = 'call-1', args = { action: 'observe' }) =>

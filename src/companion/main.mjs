@@ -3,12 +3,12 @@ import net from 'node:net';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
-import { CallerAuthority, withoutLease } from './authority.mjs';
-import { BrowserHost } from './browser/host.mjs';
-import { BrowserPolicy } from './browser/policy.mjs';
-import { configureBrowserIdentity } from './browser/user-agent.mjs';
-import { RpcPeer } from './rpc.mjs';
-import { connectionPaths, pluginData } from './paths.mjs';
+import { CallerAuthority, withoutLease } from '../shared/authority.mjs';
+import { BrowserHost } from '../browser/host.mjs';
+import { BrowserPolicy } from '../browser/policy.mjs';
+import { configureBrowserIdentity } from '../browser/user-agent.mjs';
+import { RpcPeer } from '../shared/rpc.mjs';
+import { connectionPaths, pluginData } from '../shared/paths.mjs';
 
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;

@@ -6,7 +6,7 @@
 // helper instead of `./settle`.
 
 /** Retry only read-only preflight failures, never an input or its verification. */
-import { pause } from '../async.mjs';
+import { pause } from '../shared/async.mjs';
 
 export class BrowserActionabilityError extends Error {
   constructor(message, reason) {

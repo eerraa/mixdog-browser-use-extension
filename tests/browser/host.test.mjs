@@ -14,7 +14,7 @@ registerHooks({
 });
 const { deliverFocus, FixtureContents, ownedViews, ownedWindows, profiles, dialog } = await import('./electron-fixture.mjs');
 const { BrowserHost } = await import('../../src/browser/host.mjs');
-const { BrowserHostError } = await import('../../src/browser/contract.mjs');
+const { BrowserHostError } = await import('../../src/shared/contract.mjs');
 const { FrameDriver, INPUT_BINDING } = await import('../../src/browser/frames.mjs');
 const { BrowserPolicy } = await import('../../src/browser/policy.mjs');
 
@@ -93,7 +93,7 @@ FrameDriver.prototype.send = async function(method, params, _sessionId, _signal,
   return send(method, params);
 };
 // The status line and text of a page result, as the MCP layer renders it.
-const { toolResult } = await import('../../src/tool-schema.mjs');
+const { toolResult } = await import('../../src/mcp/tool.mjs');
 const rendered = (result, action = result.action) => toolResult(result, action).content[0].text;
 const caller = owner => {
   const controller = new AbortController();
@@ -1709,7 +1709,7 @@ test('results are text: open shows the page, actions show their diff, refs survi
     page.removed.add(1);
     const removed = await call({ action: 'click', tabId, ref: a }).catch(error => error);
     assert.deepEqual([removed.code, removed.requestedInputDispatched, removed.preparation], ['STALE_REF', false, 'none']);
-    const { errorResult } = await import('../../src/tool-schema.mjs');
+    const { errorResult } = await import('../../src/mcp/tool.mjs');
     assert.match(errorResult(removed, { action: 'click', tabId, ref: a }).content[0].text,
       new RegExp(`^not-executed click ${a} tab=t\\d+ code=STALE_REF dispatched=false\\nreason ${a} button "Delete A" was removed`));
     assert.equal(presses.length, 4);

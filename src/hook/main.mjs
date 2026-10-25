@@ -1,9 +1,9 @@
 import net from 'node:net';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { BROWSER_TOOL, withoutLease } from './authority.mjs';
-import { RpcPeer } from './rpc.mjs';
-import { connectionPaths, pluginData, validChannel } from './paths.mjs';
+import { BROWSER_TOOL, withoutLease } from '../shared/authority.mjs';
+import { RpcPeer } from '../shared/rpc.mjs';
+import { connectionPaths, pluginData, validChannel } from '../shared/paths.mjs';
 
 const activation = new Set(['SessionStart', 'UserPromptSubmit', 'SubagentStart']);
 const ending = new Set(['Stop', 'StopFailure', 'SessionEnd', 'SubagentStop']);

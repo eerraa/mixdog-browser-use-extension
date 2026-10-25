@@ -5,7 +5,7 @@ import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { FrameDriver } from '../../src/browser/frames.mjs';
 import { TOOLBAR_HEIGHT } from '../../src/browser/presentation.mjs';
-import { bounded } from '../../src/async.mjs';
+import { bounded } from '../../src/shared/async.mjs';
 import { WORKER_PROBE_EXPRESSION } from '../fixtures/worker-probe.mjs';
 
 const directory = process.argv[2];

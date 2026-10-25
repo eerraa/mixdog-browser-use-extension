@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { BrowserHost } from '../../src/browser/host.mjs';
 import { BrowserPolicy } from '../../src/browser/policy.mjs';
-import { pause } from '../../src/async.mjs';
+import { pause } from '../../src/shared/async.mjs';
 import { assertNative, assertShielded, pageContents, presentationOf, rendered, toolbarPreloadPath } from './presentation.mjs';
 
 const data = process.argv[2];

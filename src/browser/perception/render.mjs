@@ -1,5 +1,6 @@
 // Agent-facing text projection of the page model (decision D13): snapshot,
-// diff, find, text and the result status line. Grammar: docs/agents/contracts.md.
+// diff, find and text; the MCP layer adds the status line (src/mcp/tool.mjs).
+// Grammar: docs/agents/contracts.md.
 import { subtree } from './model.mjs';
 import { redactURL } from '../devtools.mjs';
 
@@ -355,19 +356,4 @@ export function renderText(model, { limit = BUDGETS.text } = {}) {
   const out = parts.slice(0, kept);
   if (kept < parts.length) out.push(`+${parts.length - kept} more lines (over budget; use find or scope)`);
   return out.join('\n');
-}
-
-/** First line of every result: `<disposition> <action>[ <ref>] tab=<t> …`. */
-export function statusLine(result) {
-  const fields = [result.disposition, result.action];
-  if (result.ref) fields.push(result.ref);
-  if (result.tabId) fields.push(`tab=${result.tabId}`);
-  if (result.snapshotId) fields.push(`snap=${result.snapshotId}`);
-  if (result.code) fields.push(`code=${result.code}`);
-  if (result.observed === false) fields.push('observed=false');
-  if (result.cause) fields.push(`cause=${result.cause}`);
-  if (result.requestedInputDispatched === false) fields.push('dispatched=false');
-  if (result.preparation && result.preparation !== 'none') fields.push(`preparation=${result.preparation}`);
-  if (result.replaySafe === false) fields.push('replaySafe=false');
-  return fields.join(' ');
 }

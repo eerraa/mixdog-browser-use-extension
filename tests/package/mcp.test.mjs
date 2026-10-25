@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
-import { BROWSER_TOOL } from '../../src/authority.mjs';
+import { BROWSER_TOOL } from '../../src/shared/authority.mjs';
 import { WORKER_PROBE_EXPRESSION } from '../fixtures/worker-probe.mjs';
 
 const artifact = process.env.WB_PACKAGE_DIR;

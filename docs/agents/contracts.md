@@ -55,7 +55,7 @@ Perception: `src/browser/perception/` (walker, model, refs, render), `src/browse
 - Signals (`SignalQueue`, per caller session): only `state` and `closed` signals leave a tab that is not in `automation`. A download started outside `automation` is private for its whole life: never listed in `downloads`, never signalled, including when it ends. A tab's queued page-content signals are purged when a handoff or fail-closed drain begins. Script steps drain nothing; the run's final views do. A session's queue is dropped when the caller session ends.
 - URLs in the header, `navigated`, `popup` and `loading` signals and link hrefs go through `redactURL` (user info, sensitive query and fragment parameters such as `code`, `state`, tokens).
 
-Text grammar (`render.mjs`; MCP envelope in `tool-schema.mjs` `toolResult`):
+Text grammar (`render.mjs`; status line and MCP envelope in `src/mcp/tool.mjs` `statusLine`, `toolResult`):
 
 | Line | Form |
 | --- | --- |
@@ -131,7 +131,7 @@ Action `run` (`src/browser/runner/`; rationale D20): `{script, tabId?, timeoutMs
 - Deadline: default 60 s, 1–100 s, inside the 120 s gateway call limit; an op still in flight after the end gets 3 s to settle and is then `unknown` (uncertain) if it was input.
 - Report (text): status line (`executed`/`uncertain`/`not-executed`/`observed` `run`), then `run <status> N steps T ms[: message]`, one line per step for the first 60 (`<n> <outcome> <op> <target> [code=…] <ms>ms`, then `+N more steps`; typed text and files shown only as counts), `return <json>` up to 4000 characters (`…(+N)` says how much was cut), `console:` lines (300 characters each, 2000 together), and `-- <tab>` with each touched tab's final diff against the agent's last view (steps never move it). Final views: at most 4 tabs, 6000 characters each and 12 000 together, cut at line boundaries, all within one budget of `min(10 s, 115 s − elapsed)`; tabs over a cap or the budget print `-- <tab> not shown: observe <tab>`, and a tab parked behind a dialog prints the dialog. The whole report is cut at 24 000 characters. `replaySafe:false` when anything executed or is uncertain.
 - Everything from the script's world is data: the wrapper captures the builtins it needs before the script runs, and main believes only a plain `{status, …}` object of strings, then clips and escapes every field (line breaks, C0/C1 controls, U+2028/2029 and bidi controls) like the console lines. A malformed answer is `error` with the steps and `replaySafe` kept.
-- The lease digest covers the script like every argument (`authority.mjs`), so a ticket never authorizes a different script.
+- The lease digest covers the script like every argument (`src/shared/authority.mjs`), so a ticket never authorizes a different script.
 
 ## Human DevTools
 
@@ -184,7 +184,7 @@ for the trusted return check). Every transition increments `generation`.
 ## Result vocabulary
 
 - `disposition`: `observed`, `executed`, `uncertain` (with `replaySafe:false`), `not-executed`, `connection-terminated`.
-- Text actions (all except `JSON_ACTIONS` in `tool-schema.mjs`): status line plus body text, and an image block only with `screenshot:true`. JSON actions: `status`, `list_tabs`, `requests`, `respond`, `permissions`, `downloads`, `revoke`, `console`, `network`, `inspect`, `performance`.
+- Text actions (all except `JSON_ACTIONS` in `src/mcp/tool.mjs`): status line plus body text, and an image block only with `screenshot:true`. JSON actions: `status`, `list_tabs`, `requests`, `respond`, `permissions`, `downloads`, `revoke`, `console`, `network`, `inspect`, `performance`.
 - `isError`: true for `not-executed`, `uncertain`, `failed` and `failed-or-unknown`, and for a text result carrying a `code` (page-script error, failed navigation, `WAIT_TIMEOUT`). `executed` with `observed:false` is not an error.
 - Errors: `BrowserHostError(code)` from `contract.fail()`. Text actions answer `failed <action> … code=<C>` (or `not-executed … dispatched=false`) plus `reason …` and candidates. JSON actions answer `{disposition, code, reason, replaySafe:false}` with disposition `failed-or-unknown` or `not-executed`. Code inventory: `grep "fail('" src` (not mirrored here).
 - Runtime capability report: `BrowserHost.status().capabilities`.

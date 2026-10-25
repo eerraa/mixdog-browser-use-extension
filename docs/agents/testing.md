@@ -6,13 +6,13 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 
 | Command | Scope | Needs | Real windows | `%TEMP%` dirs left |
 | --- | --- | --- | --- | --- |
-| `npm test` | `tests/core/*.test.mjs`, `tests/authority*.test.mjs`, `tests/rpc.test.mjs`, `tests/sdk-adapter.test.mjs`, `tests/companion-termination.test.mjs` | `node_modules` | no | `companion-termination-*` |
-| `npm run test:browser` | `tests/browser/run.mjs` → contract, frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
-| `npm run test:native` | `tests/native-consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
+| `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
+| `npm run test:browser` | `tests/browser/run.mjs` → frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner, queue, permission-broker in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
+| `npm run test:native` | `tests/native/consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
 | `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Baseline at v0.3.1 (image-only control names): `npm test` 27, `test:browser` 187, `test:live` 10, `test:package` 11, `test:native` 1 passing (v0.3.0 after the runner review fixes, D22: 27, 187, 10, 11, 1; script runner R18 and Phase B review fixes: 27, 174, 10, 11, 1; text-result perception D13–D19: 27, 157, 8, 9, 1; DevTools round: 27, 134, 7, 9, 1; v0.2.0: 27, 111, 6, 8, 1). A lower count means skipped or lost tests.
+- Baseline: `npm test` 21, `test:browser` 193, `test:live` 10, `test:package` 11, `test:native` 1 passing (the 214 unit tests of v0.3.1, regrouped by folder; v0.3.1: 27, 187, 10, 11, 1; v0.3.0 after the runner review fixes, D22: 27, 187, 10, 11, 1; script runner R18 and Phase B review fixes: 27, 174, 10, 11, 1; text-result perception D13–D19: 27, 157, 8, 9, 1; DevTools round: 27, 134, 7, 9, 1; v0.2.0: 27, 111, 6, 8, 1). A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
@@ -20,7 +20,7 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 
 - `tests/browser/*.test.mjs` map `electron` to `tests/browser/electron-fixture.mjs` with `node:module` `registerHooks`. The fixture models windows, views, focus, IPC, debugger and sessions; it proves no Chromium or OS behavior.
 - A new Electron API in `src/browser/*` needs a fixture extension first.
-- `tests/companion-termination.test.mjs` maps `electron`, `node:net`, `./browser/host.mjs` and `./rpc.mjs` to `tests/companion-fixture.mjs`.
+- `tests/companion/termination.test.mjs` maps `electron`, `node:net`, `../browser/host.mjs` and `../shared/rpc.mjs` to `tests/companion/fixture.mjs`.
 
 ## Live harnesses
 
@@ -46,7 +46,7 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 
 | Behavior | File |
 | --- | --- |
-| argument shapes, URL rules, target matching, checkpoints | `tests/browser/contract.test.mjs` |
+| argument shapes, URL rules, target matching, checkpoints | `tests/shared/contract.test.mjs` |
 | CDP, frames, workers, geometry, `presented()`, `inputReady()` | `tests/browser/frames.test.mjs` |
 | walker composition, model, refs, text projection, diff, find, settle, signals (pure) | `tests/browser/perception.test.mjs` |
 | walker in real Chromium | `tests/live/perception-harness.mjs` |
@@ -59,11 +59,11 @@ Owns: how to verify. Build steps: `build-release.md`. What must hold: `contracts
 | policy parsing | `tests/browser/policy.test.mjs` |
 | user agent | `tests/browser/user-agent.test.mjs` |
 | DevTools records, formats, redaction (including 64 KiB adversarial timing), redirects, privacy windows, page reads | `tests/browser/devtools.test.mjs` |
-| tickets and generations | `tests/authority*.test.mjs` |
-| queue, permission ledger | `tests/core/*.test.mjs` |
-| RPC | `tests/rpc.test.mjs` |
-| SDK patch | `tests/sdk-adapter.test.mjs` |
-| companion shutdown | `tests/companion-termination.test.mjs` |
+| tickets and generations | `tests/shared/authority*.test.mjs` |
+| queue, permission ledger | `tests/browser/queue.test.mjs`, `tests/browser/permission-broker.test.mjs` |
+| RPC | `tests/shared/rpc.test.mjs` |
+| SDK patch | `tests/scripts/sdk-adapter.test.mjs` |
+| companion shutdown | `tests/companion/termination.test.mjs` |
 | real Electron behavior | `tests/live/scenarios.mjs` |
 | packaged folder, MCP end to end | `tests/package/*.test.mjs` |
 

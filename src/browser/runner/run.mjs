@@ -2,7 +2,7 @@
 // deadline, a watch for Stop and handoff on touched tabs, and a compact
 // report. Electron-free: the sandbox factory is injected (sandbox.mjs).
 import vm from 'node:vm';
-import { RUN_BOUNDS } from '../contract.mjs';
+import { RUN_BOUNDS } from '../../shared/contract.mjs';
 import { RUNNER_API_SOURCE } from './api.mjs';
 import { pauseStatus, RunnerBridge } from './bridge.mjs';
 

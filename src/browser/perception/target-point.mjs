@@ -6,7 +6,9 @@
 // (third_party/mixdog/provenance.json).
 // Changed: the measurement no longer scrolls the target or its frames into
 // view, because the host prepares the exact target and ancestor viewports
-// first (frames.mjs `prepare`); TypeScript types removed.
+// first (frames.mjs `prepare`); the resolver reads the validated element from
+// the isolated-world global `__independentTargetSnapshot` (renamed); TypeScript
+// types removed.
 
 /** Two layout samples a frame apart fence movement; measuring never mutates
  *  scroll. */
@@ -32,12 +34,12 @@ export const BROWSER_STABLE_RECT = `async function(target, frames = []) {
   return rect;
 }`;
 
-/** Page-context resolver that turns one ref of `window.__mixdogAgentSnapshot`
+/** Page-context resolver that turns one ref of `window.__independentTargetSnapshot`
  *  into a safe click coordinate (walker.mjs `targetPointExpression` exposes
  *  the validated element under ref `t`). */
 export function browserRefPointExpression(ref) {
   return `(async () => {
-    const snapshot = window.__mixdogAgentSnapshot;
+    const snapshot = window.__independentTargetSnapshot;
     const record = snapshot?.refs?.get(${JSON.stringify(ref)});
     const el = record?.element || record;
     const frames = Array.isArray(record?.frames) ? record.frames : [];

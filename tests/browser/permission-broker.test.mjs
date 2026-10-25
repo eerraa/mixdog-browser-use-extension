@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PermissionBroker } from '../../src/core/permissions.mjs';
+import { PermissionBroker } from '../../src/browser/permission-broker.mjs';
 
 const request = (requesterId = 'a', scope = { deviceId: 'device-1', access: ['read'] }) => ({
   requesterId, documentId: `document-${requesterId}`, origin: 'https://site.test',

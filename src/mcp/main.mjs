@@ -3,8 +3,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createGateway } from './gateway.mjs';
-import { pluginData } from './paths.mjs';
-import { browserTool, errorResult, toolResult } from './tool-schema.mjs';
+import { pluginData } from '../shared/paths.mjs';
+import { browserTool, errorResult, toolResult } from './tool.mjs';
 
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');

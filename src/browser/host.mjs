@@ -2,8 +2,8 @@ import { session, WebContentsView } from 'electron';
 import { createHash } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { FenceQueue } from '../core/queue.mjs';
-import { bounded, pause } from '../async.mjs';
+import { FenceQueue } from './queue.mjs';
+import { bounded, pause } from '../shared/async.mjs';
 import { FrameDriver } from './frames.mjs';
 import { BrowserPermissions } from './permissions.mjs';
 import { BrowserPolicy } from './policy.mjs';
@@ -24,7 +24,7 @@ import { runScript } from './runner/run.mjs';
 import { createRunnerSandbox } from './runner/sandbox.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
-} from './contract.mjs';
+} from '../shared/contract.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
@@ -664,7 +664,7 @@ export class BrowserHost {
    * globals, Node, private refs or host binding); world:'page' opts into the
    * page main world. It is always treated as a mutation, never a retryable read.
    * caller={sessionId,callId,signal,assertLive()}: trusted IPC authority ONLY.
-   * Page results are objects that tool-schema.mjs renders as text: a status
+   * Page results are objects that src/mcp/tool.mjs renders as text: a status
    * line (action, disposition, ref, tabId, snapshotId, code, observed/cause,
    * replaySafe) and `text` (signals, page header, snapshot, find or diff).
    * Dispositions: observed; executed (observed:false + cause when the result

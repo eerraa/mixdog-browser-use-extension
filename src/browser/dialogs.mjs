@@ -1,5 +1,5 @@
 import { dialog } from 'electron';
-import { fail } from './contract.mjs';
+import { fail } from '../shared/contract.mjs';
 
 const adapters = new Set();
 let installation;

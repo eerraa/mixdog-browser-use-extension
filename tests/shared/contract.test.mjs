@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateArgs, pageURL, addressURL, matchesTarget } from '../../src/browser/contract.mjs';
+import { validateArgs, pageURL, addressURL, matchesTarget } from '../../src/shared/contract.mjs';
 
 test('strict action shapes exclude model authority and tool approval/resume aliases', () => {
   for (const action of ['approve', 'resume', 'stop', 'new_tab', '__proto__']) {
@@ -115,7 +115,7 @@ test('semantic filtering is explicit, frame-scoped, and does not resolve ambigui
 });
 
 test('text results carry the status line and isError follows the disposition; JSON actions stay JSON', async () => {
-  const { toolResult, errorResult } = await import('../../src/tool-schema.mjs');
+  const { toolResult, errorResult } = await import('../../src/mcp/tool.mjs');
   const page = toolResult({ action: 'click', disposition: 'executed', tabId: 't1', ref: 'e7', snapshotId: 's3', text: 'diff s2→s3 +0 ~1 -0\n~ e7 button "Saved"' }, 'click');
   assert.deepEqual(page, { isError: false, content: [{ type: 'text', text: 'executed click e7 tab=t1 snap=s3\ndiff s2→s3 +0 ~1 -0\n~ e7 button "Saved"' }] });
   assert.equal(toolResult({ action: 'click', disposition: 'executed', tabId: 't1', observed: false, cause: 'ROOT_UNAVAILABLE', replaySafe: false }, 'click').isError, false);

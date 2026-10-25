@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { adaptSdkCancellation } from '../scripts/sdk-adapter.mjs';
+import { adaptSdkCancellation } from '../../scripts/sdk-adapter.mjs';
 
 test('pinned SDK adaptation admits zero without changing its other cancellation handling', async () => {
-  const sourcePath = new URL('../node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js', import.meta.url);
+  const sourcePath = new URL('../../node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js', import.meta.url);
   const source = await readFile(sourcePath, 'utf8');
   const adapted = adaptSdkCancellation(source, '1.32.1');
   const compile = text => {

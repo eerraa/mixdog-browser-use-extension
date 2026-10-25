@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { BrowserWindow, nativeImage, webContents } from 'electron';
 import { fileURLToPath } from 'node:url';
-import { toolResult } from '../../src/tool-schema.mjs';
+import { toolResult } from '../../src/mcp/tool.mjs';
 
 // The agent-visible text of a host result, exactly as the MCP layer renders it.
 export const rendered = result => toolResult(result, result.action).content[0].text;

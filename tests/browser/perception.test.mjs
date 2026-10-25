@@ -5,7 +5,8 @@ import { ELEMENT_SEMANTICS } from '../../src/browser/perception/semantics.mjs';
 import { rankBrowserSemanticMatch } from '../../src/browser/perception/match.mjs';
 import { composeModel } from '../../src/browser/perception/model.mjs';
 import { RefRegistry, REF_PATTERN } from '../../src/browser/perception/refs.mjs';
-import { estimateTokens, renderDiff, renderFind, renderHeader, renderSnapshot, renderText, statusLine } from '../../src/browser/perception/render.mjs';
+import { estimateTokens, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from '../../src/browser/perception/render.mjs';
+import { statusLine } from '../../src/mcp/tool.mjs';
 import { armNavigation, settle } from '../../src/browser/settle.mjs';
 import { formatSignals, SignalQueue } from '../../src/browser/signals.mjs';
 

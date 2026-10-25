@@ -1,8 +1,8 @@
 import { webContents } from 'electron';
 import { isDeepStrictEqual } from 'node:util';
-import { PermissionBroker } from '../core/permissions.mjs';
+import { PermissionBroker } from './permission-broker.mjs';
 import { ConsentSurface } from './consent.mjs';
-import { fail, freshId } from './contract.mjs';
+import { fail, freshId } from '../shared/contract.mjs';
 import { showManualMessageBox } from './dialogs.mjs';
 
 const descriptorKey = value => JSON.stringify({

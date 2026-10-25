@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { RpcPeer } from '../src/rpc.mjs';
+import { RpcPeer } from '../../src/shared/rpc.mjs';
 
 async function pair(t, handler, options) {
   const address = `\\\\.\\pipe\\independent-browser-test-${randomUUID()}`;

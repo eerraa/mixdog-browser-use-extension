@@ -2,8 +2,8 @@ import { BrowserActionabilityError, waitForBrowserActionable } from './actionabi
 import { createBrowserCdpExecution } from './cdp-execution.mjs';
 import { ELEMENT_SEMANTICS } from './perception/semantics.mjs';
 import { browserRefPointExpression, BROWSER_STABLE_RECT } from './perception/target-point.mjs';
-import { bounded, pause } from '../async.mjs';
-import { fail, freshId } from './contract.mjs';
+import { bounded, pause } from '../shared/async.mjs';
+import { fail, freshId } from '../shared/contract.mjs';
 import { DEVTOOLS_LIMITS } from './devtools.mjs';
 import { quote as quoteText } from './perception/render.mjs';
 import {

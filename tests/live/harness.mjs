@@ -8,7 +8,7 @@ import { BrowserPolicy } from '../../src/browser/policy.mjs';
 import { configureBrowserIdentity } from '../../src/browser/user-agent.mjs';
 import { runAdditionalScenarios } from './scenarios.mjs';
 import { assertShielded, pageContents, pixelAt, presentationOf, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';
-import { bounded, pause } from '../../src/async.mjs';
+import { bounded, pause } from '../../src/shared/async.mjs';
 
 const dataDir = process.argv[2];
 const identityBaselineMode = process.argv[3] === 'baseline';
@@ -266,7 +266,7 @@ try {
   });
   await check('model evaluate has no Node and cannot reach the private walker world', async () => {
     const result = await call({ action: 'evaluate', tabId,
-      expression: '({node:typeof process,walker:typeof globalThis.__independentState,refs:typeof globalThis.__mixdogAgentSnapshot})' });
+      expression: '({node:typeof process,walker:typeof globalThis.__independentState,refs:typeof globalThis.__independentTargetSnapshot})' });
     assert.deepEqual(result.value, { node: 'undefined', walker: 'undefined', refs: 'undefined' });
   });
   await check('upload restricted to explicit file input and download uses plugin-owned path', async () => {

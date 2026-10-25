@@ -11,9 +11,9 @@
   "scripts": {
     "build:native": "node scripts/build-native.mjs",
     "build": "node scripts/build.mjs",
-    "test": "node --test tests/core/*.test.mjs tests/authority*.test.mjs tests/rpc.test.mjs tests/sdk-adapter.test.mjs tests/companion-termination.test.mjs",
+    "test": "node --test tests/shared/*.test.mjs tests/companion/*.test.mjs tests/scripts/*.test.mjs",
     "test:browser": "node tests/browser/run.mjs",
-    "test:native": "node --test tests/native-consent.test.mjs",
+    "test:native": "node --test tests/native/*.test.mjs",
     "test:live": "node --test tests/live/*.test.mjs",
     "test:package": "node --test tests/package/*.test.mjs",
     "package": "node scripts/package.mjs"

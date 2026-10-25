@@ -1,5 +1,4 @@
-import { actions, keys } from './browser/contract.mjs';
-import { statusLine } from './browser/perception/render.mjs';
+import { actions, keys } from '../shared/contract.mjs';
 
 // These results stay compact JSON; every other action returns text (D13).
 export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
@@ -82,6 +81,21 @@ export function browserTool(channel) {
 // or a completed step that reports a failure code (a page script error, a
 // failed navigation). executed with observed:false + cause is not an error.
 const failed = result => ['not-executed', 'uncertain', 'failed', 'failed-or-unknown'].includes(result?.disposition);
+
+/** First line of every result: `<disposition> <action>[ <ref>] tab=<t> …`. */
+export function statusLine(result) {
+  const fields = [result.disposition, result.action];
+  if (result.ref) fields.push(result.ref);
+  if (result.tabId) fields.push(`tab=${result.tabId}`);
+  if (result.snapshotId) fields.push(`snap=${result.snapshotId}`);
+  if (result.code) fields.push(`code=${result.code}`);
+  if (result.observed === false) fields.push('observed=false');
+  if (result.cause) fields.push(`cause=${result.cause}`);
+  if (result.requestedInputDispatched === false) fields.push('dispatched=false');
+  if (result.preparation && result.preparation !== 'none') fields.push(`preparation=${result.preparation}`);
+  if (result.replaySafe === false) fields.push('replaySafe=false');
+  return fields.join(' ');
+}
 
 export function toolResult(result, action) {
   if (JSON_ACTIONS.has(action)) return { isError: failed(result), content: [{ type: 'text', text: JSON.stringify(result) }] };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CallerAuthority, BROWSER_TOOL } from '../src/authority.mjs';
+import { CallerAuthority, BROWSER_TOOL } from '../../src/shared/authority.mjs';
 
 test('a trusted new user turn replaces the generation even if the preceding end notification was lost', () => {
   const authority = new CallerAuthority();

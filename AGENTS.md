@@ -56,7 +56,7 @@ Doc rules:
 
 | Path | Contents | Details |
 | --- | --- | --- |
-| `src/` | MCP server, hook, gateway, companion, browser host | `architecture.md` |
+| `src/` | `mcp/` MCP server and gateway, `hook/` host hooks, `companion/` Electron main, `browser/` browser engine, `shared/` modules used by more than one process | `architecture.md` |
 | `native/` | `bridge.cpp` launcher with Job object; `consent.cpp` Windows consent helper | `architecture.md` |
 | `scripts/` | build, build-native, package, SDK adapter | `build-release.md` |
 | `tests/` | unit, live Electron, packaged MCP | `testing.md` |
