@@ -8,7 +8,7 @@ const deferred = () => {
 export const state = { peers: [], listening: deferred(), exited: deferred() };
 export const app = {
   userAgentFallback: 'Mozilla/5.0 IndependentWindowsBrowser/44.9.1 Chrome/152.0.7977.167 Electron/44.9.1 Safari/537.36',
-  setPath() {}, setName() {}, whenReady: async () => {},
+  setPath() {}, setName() {}, whenReady: async () => {}, on() {},
   exit(code) { state.exitCode = code; state.exited.resolve(code); },
 };
 export class BrowserHost {

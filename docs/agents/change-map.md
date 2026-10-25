@@ -47,8 +47,8 @@ rule to keep.
 
 ## R7 Profiles, data directories, connection lifetime
 
-- Edit: `host.mjs #profile`, `src/shared/paths.mjs`, `src/companion/main.mjs` (userData), `src/mcp/gateway.mjs close` (keeps profiles).
-- Keep: `requirements.md` C4; profiles per connection and session.
+- Edit: `host.mjs #profile`, `src/shared/paths.mjs`, `src/companion/main.mjs` (userData, `window-all-closed`), `src/mcp/gateway.mjs close` (keeps profiles).
+- Keep: `requirements.md` C4 and AC18; profiles per connection and session; the companion outlives its last page window.
 
 ## R8 MCP transport, timeouts, process lifecycle
 

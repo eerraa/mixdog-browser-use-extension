@@ -56,5 +56,6 @@ Real-device checks). `verified` = checked on a package built from the current tr
 | AC15 | C7 | Native picker and dropdown windows (`showPicker`, date and color pickers) used by a person during automation fail closed with `unexpected-page-input` | live `security`, `runner` (synthetic trusted input) | not verified |
 | AC16 | C8 | Tabs are owned per caller session, input is serialized per tab, ended callers' late calls are rejected, and hooks act only on this tool | unit `authority`, `authority-turns`, `authority-lifecycle`, `queue`, `host`; package `mcp` (hook admission) | — |
 | AC17 | C9 | Only the forked Mixdog browser code is used, and its fork record and Mixdog's notices ship unmodified | package `layout` | — |
+| AC18 | C3, C7 | Closing every tab keeps the connection: the same channel opens new pages; only MCP EOF and revocation end the companion | package `mcp` (last tab, teardown) | not verified |
 
 C10 governs every verification report (`testing.md` Rules) and has no criterion of its own.

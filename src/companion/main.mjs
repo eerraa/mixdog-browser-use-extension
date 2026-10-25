@@ -20,6 +20,10 @@ mkdirSync(userData, { recursive: true });
 app.setPath('userData', userData);
 app.setName('Independent Windows Browser');
 configureBrowserIdentity(app);
+// The companion lives as long as its MCP connection. Without this listener
+// Electron quits when the last page window closes, which would end the
+// connection for every later call; gateway shutdown and revocation end it.
+app.on('window-all-closed', () => {});
 
 const authority = new CallerAuthority();
 const peers = new Set();

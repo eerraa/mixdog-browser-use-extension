@@ -432,6 +432,22 @@ test('packaged run executes a multi-step form flow in one call with exactly one 
   assert.equal(page.state.count, 1);
 });
 
+test('closing the last tab keeps the packaged connection: the same channel opens a new page', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  const page = await fixture(t);
+  const connection = await sdk(t, context);
+  const owner = 'last-tab-owner';
+  const opened = await connection.call(owner, { action: 'open', url: page.url });
+  assert.equal(opened.isError, false, await diagnostic(connection, owner, opened));
+  const closed = await connection.call(owner, { action: 'close_tab', tabId: tabOf(opened) });
+  assert.equal(closed.isError, false, textOf(closed));
+  // Electron would quit an app whose last window closed within this pause.
+  await delay(1500);
+  assert.equal((await connection.status()).state, 'connected');
+  const again = await connection.call(owner, { action: 'open', url: page.url });
+  assert.equal(again.isError, false, await diagnostic(connection, owner, again));
+});
+
 async function raw(t, context) {
   const child = spawn(executable, ['--mcp'], {
     env: context.env, cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],

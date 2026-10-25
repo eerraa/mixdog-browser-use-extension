@@ -17,7 +17,7 @@ changes.
 | `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 21, `test:browser` 194, `test:live` 10, `test:package` 11, `test:native` 1 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 21, `test:browser` 194, `test:live` 10, `test:package` 12, `test:native` 1 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
@@ -42,6 +42,7 @@ changes.
 | `devtools.test.mjs` | `devtools-harness.mjs` | load-time console, exception, worker and cross-origin frame entries; URL redaction in console text; 200/404 network rows, header, request and response body redaction, response body; a real 302 chain (hop `redirected`, no hop body, redacted `Location`); console cursor; isolated `evaluate` output not recorded; two windows of one profile with a service worker (worker activity during the other window's handoff withheld, recording resumes after); page-world read, side-effect refusal, `for(;;){}` read terminated as `SCRIPT_TIMEOUT` near 2 s with the next read succeeding, `world:'page'` evaluate; one row per out-of-process frame document at load and on re-navigation; inspect by ref (ref stays valid) and by selector for hidden elements; performance; handoff entries withheld and in-flight request incomplete; human DevTools only in handoff, closed on return; agent CDP session after DevTools; prints `SAMPLE` outputs and `DEVTOOLS_SIZES` |
 
 - Each test spawns `node_modules/electron/dist/electron.exe <harness> <dataDir>` without `ELECTRON_RUN_AS_NODE`. The harness serves local HTTP fixtures on 127.0.0.1 and must print its marker.
+- Harnesses are their own Electron main and register `app.on('window-all-closed', () => {})` themselves, so the companion's own lifetime (`src/companion/main.mjs`) is checked only by the package suite.
 - Add real-window checks as `await check('<behavior>', async () => …)` in `tests/live/scenarios.mjs`; shared probes live in `tests/live/presentation.mjs`.
 - Windows open without taking focus (`showInactive`); leave the desktop alone during the run.
 - `review-harness.mjs` clicks immediately after `open` on a page without contentful paint in its root, which exercises the paint-holding wait (`FrameDriver.inputReady`); a dropped click there shows as `effect 0`.

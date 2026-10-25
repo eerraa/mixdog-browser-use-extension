@@ -32,7 +32,7 @@ Mixdog host
 6. `toolResult` (`src/mcp/tool.mjs`) renders page results as text (`statusLine` + body), adds the screenshot as image content only on request, keeps `JSON_ACTIONS` as JSON, and sets `isError` (`contracts.md` Result vocabulary).
 
 - Lifecycle: `SessionStart`, `UserPromptSubmit`, `SubagentStart` send `begin`; `Stop`, `StopFailure`, `SessionEnd`, `SubagentStop` send `end` to every `connections/*` channel (150 ms each).
-- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json is removed, profiles stay.
+- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json is removed, profiles stay. Closing the last page window never ends the companion (`window-all-closed` is handled in `src/companion/main.mjs`).
 - Revoke: companion `terminate` → gateway waits up to 8 s for exit and reports `processTeardownConfirmed`.
 
 ## Module map
