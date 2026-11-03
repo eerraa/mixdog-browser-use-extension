@@ -52,7 +52,7 @@ Doc rules:
 5. User-only steps: plugin registration and activation, disabling built-in Browser Use, app restart, OS consent prompts.
 6. Commit, push, tag, release and remote changes only on explicit user request.
 7. Code derived from Mixdog is an independent fork of 1.3.4 (`968ee089`), recorded in `third_party/mixdog/provenance.json`; Mixdog is not tracked or re-synced. Edit derived files in place and, in the same change, keep their change notice, the provenance record and `THIRD_PARTY_NOTICES.md` current (R13).
-8. Report verification per layer (unit, live Electron, packaged MCP, real device). Unverified is not done.
+8. Report verification per layer (unit, live Electron, packaged MCP, real device).
 9. `build/`, `dist/`, `node_modules/` and `%TEMP%` test directories are generated. Never commit them. Mixdog runs a registered package in place, so never delete a `dist/` package without asking.
 
 ## Repo map
@@ -126,9 +126,13 @@ and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 | R18 | Script runner (`run`): script API, ops, sandbox, run report | `src/browser/runner/*`, `src/browser/host.mjs`, `src/companion/main.mjs`, `scripts/build.mjs`; arguments as R1 | `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), run test in `host.test.mjs`, `tests/shared/contract.test.mjs`; `runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); run test in `mcp.test.mjs` | `contracts.md` Script runner, `SKILL.md` Scripts section, `README.md` action table |
 | — | Not listed | the module's row in `architecture.md` Module map, then the nearest row above | as that row | as that row; add a row here |
 
-## Done when
+## Done criteria
 
-- Code, the docs in its Edit table row, and `README.md` or `SKILL.md` when user- or agent-visible behavior changed.
-- Real-device status in `requirements.md` goes back to `not verified` for criteria on a changed path.
-- Suites for the touched area pass (`testing.md`); shipped-surface changes also pass `test:package` on a fresh package.
-- No generated files committed; `%TEMP%` test directories removed when cleaning up (prefixes in `testing.md`).
+This list is complete; no other check is required. Intermediate steps run only the touched part's checks; the full set runs once, on the final candidate. A measured criterion the user sets for a task is that task's done criterion. Checks outside this list run only on user request and are reported as unverified, never as passed.
+
+| Change | Done checks | Not a done criterion |
+| --- | --- | --- |
+| Code, tests, scripts, config or native sources (its Edit table row, or Not listed) | The tests in the row's Tests column pass (commands and expected counts: `testing.md` Suites); when they include `tests/package/` files, `test:package` passes on a fresh package (`build-release.md` Clean package build). The docs in the row's Docs column, plus `README.md` or `SKILL.md` when user- or agent-visible behavior changed. Real-device status in `requirements.md` back to `not verified` for criteria on a changed path | Suites outside the row; real-device checks (`testing.md` Real-device checks); live sites; hardware this PC lacks |
+| Docs only (Markdown text; no shipped file added, moved or renamed) | `git diff --check` | Builds, packages, suites, live runs, real-device checks |
+
+Every change: no generated files committed (Hard rule 9); `%TEMP%` test directories a run left are removed (prefixes in `testing.md` Suites).
