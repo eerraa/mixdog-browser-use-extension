@@ -67,7 +67,7 @@ Doc rules:
 | `src/browser/runner/` | `run`: sandbox window, op bridge, script API |
 | `src/shared/` | modules of more than one process, without Electron: browse contract, authority, RPC, paths, async |
 | `native/` | `bridge.cpp` launcher (Job object), `consent.cpp` Windows consent helper |
-| `scripts/` | `build.mjs` bundles, `build-native.mjs`, `package.mjs`, `sdk-adapter.mjs` SDK patch |
+| `scripts/` | `build.mjs` bundles, `build-native.mjs`, `package.mjs`, `clean-package.mjs` clean package build and release folder, `sdk-adapter.mjs` SDK patch |
 | `tests/shared/`, `tests/companion/`, `tests/scripts/` | core unit tests (`npm test`) |
 | `tests/browser/` | engine unit tests on an Electron fixture (`test:browser`) |
 | `tests/native/` | native helper test (`test:native`) |
@@ -92,8 +92,10 @@ Modules, entry points and import direction: `architecture.md`.
 | Native helpers | `npm run build:native -- "<MinGW licenses dir>"` | MinGW-w64 `g++` |
 | Native test | `npm run test:native` | native helpers |
 | Package | `npm run package` | build, native helpers |
+| Clean package | `npm run package:clean -- "<abs MinGW licenses dir>"` (working tree → `dist/win-browser-XXXXXX/win-browser`) | node_modules, MinGW-w64 `g++` |
+| Release folder (explicit user request) | `npm run package:clean -- "<abs MinGW licenses dir>" --release` (HEAD → `dist/releases/v<ver>/`) | clean committed tree, MinGW-w64 `g++` |
 | Package tests | `$env:WB_PACKAGE_DIR="<abs>\win-browser"; npm run test:package` | package |
-| Claude Code registration (user step) | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <abs>\win-browser\bin\bridge.exe --mcp`; undo `claude mcp remove --scope user win-browser` | package |
+| Claude Code registration (user step) | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <abs>\win-browser\bin\bridge.exe --mcp`; undo `claude mcp remove --scope user win-browser` | package (`build-release.md` Release) |
 | Real-device check | procedure in `testing.md` Real-device checks; criteria in `requirements.md` | fresh package, user registration, PC not in use |
 
 Prerequisites and caveats: `testing.md`, `build-release.md`.
@@ -101,8 +103,8 @@ Prerequisites and caveats: `testing.md`, `build-release.md`.
 ## Edit table
 
 Where a request lands: files to edit, tests to update or run, docs to update.
-Symbol-level steps and the rules to keep: `change-map.md` under the same ID (R11, R15
-and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
+Symbol-level steps and the rules to keep: `change-map.md` under the same ID (R11, R15,
+R16 and R20 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 `layout.test.mjs` are in `tests/package/`.
 
 | ID | Request | Edit | Tests | Docs |
@@ -125,7 +127,8 @@ and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 | R16 | Browser identity (user agent) | `src/browser/user-agent.mjs` | `tests/browser/user-agent.test.mjs`, `tests/companion/fixture.mjs`; identity baseline run in `tests/live/browser-host.test.mjs` | `README.md` 권한과 안전 경계 |
 | R17 | DevTools reads (console, network, inspect, performance), page-world evaluate, human DevTools | `src/browser/devtools.mjs`, `src/browser/host.mjs`, `src/browser/frames.mjs`, `src/browser/consent.mjs`; arguments as R1 | `tests/browser/devtools.test.mjs`, `frames.test.mjs` (recording order, worker fence, replays, discard, flush, page worlds), `host.test.mjs` (gates, lane independence, Stop, profile-shared workers, human DevTools exits), `tests/shared/contract.test.mjs`; `devtools-harness.mjs`; DevTools test in `mcp.test.mjs` | `contracts.md` DevTools reads and Human DevTools, `SKILL.md` DevTools section, `README.md` action table and 개발자 도구 paragraph, `architecture.md` CDP rows |
 | R18 | Script runner (`run`): script API, ops, sandbox, run report | `src/browser/runner/*`, `src/browser/host.mjs`, `src/companion/main.mjs`, `scripts/build.mjs`; arguments as R1 | `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), run test in `host.test.mjs`, `tests/shared/contract.test.mjs`; `runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); run test in `mcp.test.mjs` | `contracts.md` Script runner, `SKILL.md` Scripts section, `README.md` action table |
-| R19 | Claude Code registration and guidance: server instructions, schema without `_lease` | `src/mcp/tool.mjs` (`CONNECTION_INSTRUCTIONS`, `browserTool`), `src/mcp/main.mjs` | `tests/shared/contract.test.mjs` (schema, instruction length); connection-authority tests in `mcp.test.mjs` | `README.md` Claude Code 등록, `SKILL.md` (same guidance) |
+| R19 | Claude Code registration and guidance: server instructions, schema without `_lease` | `src/mcp/tool.mjs` (`CONNECTION_INSTRUCTIONS`, `browserTool`), `src/mcp/main.mjs` | `tests/shared/contract.test.mjs` (schema, instruction length); connection-authority tests in `mcp.test.mjs` | `README.md` Claude Code 등록, `build-release.md` Release, `SKILL.md` (same guidance) |
+| R20 | Clean package build, release folder | `scripts/clean-package.mjs`, `package.json` `scripts` | `test:package` on its package; for `--release`, also on the extracted ZIP | `build-release.md` Clean package build and Release |
 | — | Not listed | the module's row in `architecture.md` Module map, then the nearest row above | as that row | as that row; add a row here |
 
 ## Done criteria
