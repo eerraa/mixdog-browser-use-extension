@@ -66,9 +66,21 @@ let result;
 try {
   if (release) {
     const archive = path.join(temp, 'source.tar');
-    run('git', ['archive', '--format=tar', '-o', archive, commit, '--', ...SOURCES], root);
+    // The committed bytes: core.autocrlf would rewrite text files on export, and
+    // the shipped Mixdog notices must match their recorded blob ids.
+    run('git', ['-c', 'core.autocrlf=false', 'archive', '--format=tar', '-o', archive, commit, '--', ...SOURCES], root);
     run(tar, ['-x', '-f', archive, '-C', temp], temp);
     await rm(archive);
+    // Every exported file must hash to its blob in the commit.
+    for (const entry of run('git', ['ls-tree', '-r', '-z', commit, '--', ...SOURCES], root).split('\0').filter(Boolean)) {
+      const [meta, file] = entry.split('\t');
+      const [, type, blob] = meta.split(' ');
+      if (type !== 'blob') throw new Error(`Unexpected ${type} in the release sources: ${file}`);
+      const bytes = await readFile(path.join(temp, file));
+      if (createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') !== blob) {
+        throw new Error(`Exported ${file} differs from its blob in ${commit}`);
+      }
+    }
   } else {
     for (const name of SOURCES) await cp(path.join(root, name), path.join(temp, name), { recursive: true });
   }

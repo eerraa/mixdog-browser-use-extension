@@ -57,7 +57,7 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
 ## Release (explicit user request only)
 
 1. Bump the version (Versioning) and commit. All suites pass on that tree.
-2. `npm run package:clean -- "<abs licenses dir>" --release` refuses uncommitted tracked changes, a version that differs between `package.json`, `plugin.json` and `src/mcp/main.mjs`, and an existing `dist/releases/v<ver>`. It runs the clean package build on `git archive` of `HEAD` and writes `dist/releases/v<ver>/`:
+2. `npm run package:clean -- "<abs licenses dir>" --release` refuses uncommitted tracked changes, a version that differs between `package.json`, `plugin.json` and `src/mcp/main.mjs`, and an existing `dist/releases/v<ver>`. It runs the clean package build on `git archive` of `HEAD` with `core.autocrlf=false`, after checking every exported file against its blob id in the commit, and writes `dist/releases/v<ver>/`:
    - `win-browser/`: the package. This path has no random part and matches the ZIP content.
    - `win-browser-v<ver>-windows-x64.zip`: `tar -a -c -f` (Windows `tar.exe`) of `win-browser`, the folder at the archive root with `/` separators; `<zip>.sha256` holds `<sha256>  <zip name>` (two spaces, LF).
    - `win-browser-v<ver>-files.sha256`: one `<sha256>  win-browser/<path>` line per packaged file; `release.json`: version, source commit, ZIP name and digest.
