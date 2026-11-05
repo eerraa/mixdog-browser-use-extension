@@ -50,7 +50,7 @@ Doc rules:
 3. Never copy external browser profiles, cookies or accounts. Never use real accounts for login, posting, payment or deletion during verification.
 4. Do not modify installed Mixdog, account, auth or server settings, `D:\Engineering\mixdog-computer-use-extension`, or `D:\Engineering\antigravity-aistudio-bridge`.
 5. User-only steps: plugin registration and activation, disabling built-in Browser Use, app restart, OS consent prompts.
-6. Commit, push, tag, release and remote changes only on explicit user request.
+6. An implementation request is standing approval to prepare a dedicated development branch/managed worktree and stage/commit verified logical units without waiting for the whole task to end. Reuse the same task's development branch; never implement directly on main or switch another active task's branch. Include only owned or explicitly approved changes. Main integration, push, merge, history rewriting, tags, releases and remote changes require separate explicit user requests.
 7. Code derived from Mixdog is an independent fork of 1.3.4 (`968ee089`), recorded in `third_party/mixdog/provenance.json`; Mixdog is not tracked or re-synced. Edit derived files in place and, in the same change, keep their change notice, the provenance record and `THIRD_PARTY_NOTICES.md` current (R13).
 8. Report verification per layer (unit, live Electron, packaged MCP, real device).
 9. `build/`, `dist/`, `node_modules/` and `%TEMP%` test directories are generated. Never commit them. Mixdog runs a registered package in place, so never delete a `dist/` package without asking.
