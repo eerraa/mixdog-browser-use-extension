@@ -5,7 +5,12 @@ import path from 'node:path';
 import net from 'node:net';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { bounded } from '../shared/async.mjs';
+import { BROWSER_TOOL } from '../shared/authority.mjs';
+import { fail } from '../shared/contract.mjs';
 import { connectionPaths } from '../shared/paths.mjs';
+
+// Under connection authority the MCP connection is the only caller.
+export const CONNECTION_CALLER = 'mcp-connection';
 
 async function connect(pipe, hello) {
   const socket = net.createConnection(pipe);
@@ -18,7 +23,8 @@ async function connect(pipe, hello) {
   catch (error) { peer.close(); throw error; }
 }
 
-export async function createGateway(root, data) {
+export async function createGateway(root, data, { authority = 'hook' } = {}) {
+  if (authority !== 'hook' && authority !== 'connection') throw new Error('Unknown caller authority');
   const channel = randomUUID();
   const paths = connectionPaths(data, channel);
   await mkdir(path.dirname(paths.directory), { recursive: true });
@@ -57,8 +63,25 @@ export async function createGateway(root, data) {
       if (event === 'terminating') terminationReason = params?.reason;
     });
     watch(peer);
-    await writeFile(`${paths.endpoint}.tmp`, JSON.stringify({ channel, key, pipe: paths.pipe, protocol: 1 }), { mode: 0o600, flag: 'wx' });
-    await rename(`${paths.endpoint}.tmp`, paths.endpoint);
+    // Host hooks find the pipe and key through endpoint.json. Connection
+    // authority has no hooks, so its key never touches the disk.
+    if (authority === 'hook') {
+      await writeFile(`${paths.endpoint}.tmp`, JSON.stringify({ channel, key, pipe: paths.pipe, protocol: 1 }), { mode: 0o600, flag: 'wx' });
+      await rename(`${paths.endpoint}.tmp`, paths.endpoint);
+    }
+    // Connection authority: this process issues each call's single-use ticket
+    // over its own hook-role connection, so the companion admits every call
+    // through CallerAuthority.consume exactly as under host hooks.
+    const issuerHello = { channel, key, role: 'hook' };
+    let issuer = authority === 'connection' ? connect(paths.pipe, issuerHello) : null;
+    if (issuer) await issuer;
+    const ticket = args => {
+      // Chained so concurrent calls share one reconnect after a lost transport.
+      issuer = issuer.catch(() => null).then(current => (current && !current.closed ? current : connect(paths.pipe, issuerHello)));
+      return issuer.then(current => current.request('issue', {
+        sessionId: CONNECTION_CALLER, callId: randomUUID(), toolName: BROWSER_TOOL, args,
+      }, { timeoutMs: 2000 })).then(response => response.ticket);
+    };
     const livePeer = async () => {
       if (terminated || closing || terminationReason) throw new Error('Browser connection ended; reconnect the plugin explicitly');
       if (peer.closed) {
@@ -70,15 +93,28 @@ export async function createGateway(root, data) {
     };
     return {
       channel,
+      authority,
       async status() {
         if (terminated || terminationReason) return { channel, state: 'connection-ended', terminationReason, process: terminated };
         return { channel, ...await (await livePeer()).request('status', {}) };
       },
       async execute(args, signal) {
         if (args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
+        if (authority === 'connection' && Object.hasOwn(args, '_lease')) {
+          fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
+            { requestedInputDispatched: false });
+        }
         const current = await livePeer();
+        let call = args;
+        if (authority === 'connection') {
+          try { call = { ...args, _lease: await ticket(args) }; }
+          catch (error) {
+            // No call was sent: the companion admits nothing without a ticket.
+            throw Object.assign(error, { code: error.code ?? 'UNAUTHENTICATED_CALLER', requestedInputDispatched: false });
+          }
+        }
         try {
-          const result = await current.request('call', { args }, { signal, timeoutMs: 120000 });
+          const result = await current.request('call', { args: call }, { signal, timeoutMs: 120000 });
           if (args.action === 'revoke' && result?.closesConnection) {
             const process = await bounded(exit, 8000, 'Companion teardown');
             return {
@@ -103,8 +139,9 @@ export async function createGateway(root, data) {
           catch { child.kill(); }
         }
         peer.close();
+        if (issuer) (await issuer.catch(() => null))?.close();
         // Only the endpoint created by THIS gateway is removed. Profiles stay.
-        await unlink(paths.endpoint);
+        if (authority === 'hook') await unlink(paths.endpoint);
       },
     };
   } catch (error) {

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -63,6 +64,30 @@ async function environment(t) {
     console.log(`Packaged MCP logs: ${directory}`);
   });
   return { directory, env, errors };
+}
+// A plain MCP registration (Claude Code `claude mcp add`): no host hooks, no
+// Mixdog variables; the registration sets connection authority and the data root.
+async function connectionEnvironment(t) {
+  const context = await environment(t);
+  delete context.env.MIXDOG_PLUGIN_DATA;
+  delete context.env.MIXDOG_PLUGIN_ROOT;
+  context.env.WB_AUTHORITY = 'connection';
+  context.env.WB_DATA_DIR = context.directory;
+  return context;
+}
+async function plainClient(t, context) {
+  const client = new Client({ name: 'plain-registration-check', version: '1.0.0' }, { capabilities: {} });
+  const transport = new StdioClientTransport({
+    command: executable, args: ['--mcp'], cwd: os.tmpdir(), env: context.env, stderr: 'pipe',
+  });
+  transport.stderr.on('data', bytes => context.errors.push(bytes.toString('utf8')));
+  await client.connect(transport);
+  t.after(() => client.close());
+  const descriptor = (await client.listTools()).tools.find(tool => tool.name === 'browse');
+  assert.ok(descriptor);
+  const channel = descriptor.inputSchema.properties._channel.enum[0];
+  const call = args => client.callTool({ name: 'browse', arguments: { ...args, _channel: channel } });
+  return { client, descriptor, channel, call };
 }
 async function hook(env, payload) {
   const child = spawn(executable, ['--hook'], {
@@ -531,4 +556,85 @@ for (const requestId of [0, 17]) test(`JSON-RPC cancellation id ${requestId} abo
   assert.equal(delayedResponse, undefined, 'The SDK must suppress a response to a cancelled request');
   assert.equal(delayedError, undefined);
   assert.equal(page.state.started, 1, 'Cancellation must not replay the dispatched browser evaluation');
+});
+
+test('connection authority (plain MCP registration): no hooks or key on disk, own tickets, the same refusals, one caller per connection', { timeout: 90000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const page = await fixture(t);
+  const first = await plainClient(t, context);
+  const instructions = first.client.getInstructions();
+  assert.ok(instructions && instructions.length <= 4096 && instructions.includes('_channel'), instructions);
+  assert.equal(Object.hasOwn(first.descriptor.inputSchema.properties, '_lease'), false);
+  const status = dataOf(await first.call({ action: 'status' }));
+  assert.equal(status.tabCount, 0);
+  assert.equal(status.capabilities.delegation.mode, 'delegated');
+  const directory = path.join(context.directory, 'connections', first.channel);
+  await assert.rejects(stat(path.join(directory, 'endpoint.json')), { code: 'ENOENT' }, 'no hooks, so the key stays in memory');
+
+  const opened = await first.call({ action: 'open', url: page.url });
+  assert.equal(opened.isError, false, textOf(opened));
+  assert.ok(!textOf(opened).includes('DO_NOT_EXPORT_PASSWORD'));
+  const tabId = tabOf(opened);
+  const count = refOf(opened, 'button', 'Count');
+  const forged = await first.call({ action: 'click', tabId, ref: count, _lease: 'model-supplied' });
+  assert.equal(forged.isError, true);
+  assert.match(textOf(forged), /^not-executed click e\d+ tab=t\d+ code=INVALID_ARGUMENT dispatched=false\n/);
+  const replaced = await first.client.callTool({ name: 'browse', arguments: { action: 'click', tabId, ref: count, _channel: randomUUID() } });
+  assert.equal(replaced.isError, true, 'a call for another channel is refused');
+  const clicked = await first.call({ action: 'click', tabId, ref: count });
+  assert.equal(clicked.isError, false, textOf(clicked));
+  await until(() => page.state.count === 1, 'exactly one local HTTP side effect from one click');
+  // Concurrent calls each take their own ticket.
+  const [observed, listed] = await Promise.all([first.call({ action: 'observe', tabId }), first.call({ action: 'list_tabs' })]);
+  assert.equal(observed.isError, false, textOf(observed));
+  assert.deepEqual(dataOf(listed).tabs.map(tab => tab.tabId), [tabId]);
+  assert.equal((await readdir(path.join(directory, 'profiles'))).length, 1, 'one caller: one profile per connection');
+
+  // Another registration session is another connection: its own companion, tabs and profile.
+  const second = await plainClient(t, context);
+  assert.notEqual(second.channel, first.channel);
+  assert.deepEqual(dataOf(await second.call({ action: 'list_tabs' })).tabs, []);
+  const foreign = await second.call({ action: 'click', tabId, ref: count });
+  assert.equal(foreign.isError, true, textOf(foreign));
+  assert.equal(page.state.count, 1, 'nothing reached the first connection\'s page');
+  const closed = await first.call({ action: 'close_tab', tabId });
+  assert.equal(closed.isError, false, textOf(closed));
+});
+
+test('connection authority: stdio EOF exits the owned launcher gracefully', { timeout: 40000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const connection = await raw(t, context);
+  const tools = await connection.request('tools', 'tools/list', {});
+  assert.equal(Object.hasOwn(tools.result.tools[0].inputSchema.properties, '_lease'), false);
+  connection.child.stdin.end();
+  const result = await Promise.race([connection.exit, delay(5000).then(() => null)]);
+  assert.ok(result, 'MCP stdin EOF must close its companion and exit');
+  assert.equal(result.code, 0, JSON.stringify(result));
+});
+
+test('a server without a valid authority and data root refuses to start and spawns no companion', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  const base = { ...context.env };
+  delete base.MIXDOG_PLUGIN_DATA;
+  delete base.MIXDOG_PLUGIN_ROOT;
+  const data = path.join(context.directory, 'refused');
+  for (const [env, pattern] of [
+    [base, /MIXDOG_PLUGIN_DATA is required/],
+    [{ ...base, WB_AUTHORITY: 'connection' }, /WB_DATA_DIR must be an absolute directory/],
+    [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: 'relative-data' }, /WB_DATA_DIR must be an absolute directory/],
+    [{ ...base, WB_AUTHORITY: 'hooks', WB_DATA_DIR: data, MIXDOG_PLUGIN_DATA: data }, /WB_AUTHORITY must be hook or connection/],
+  ]) {
+    const child = spawn(executable, ['--mcp'], { env, cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', bytes => { stderr += bytes; });
+    child.stdin.end();
+    const code = await Promise.race([
+      new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); }),
+      delay(20000).then(() => { child.kill(); return 'timeout'; }),
+    ]);
+    assert.notEqual(code, 0, stderr);
+    assert.notEqual(code, 'timeout', stderr);
+    assert.match(stderr, pattern);
+  }
+  await assert.rejects(stat(path.join(data, 'connections')), { code: 'ENOENT' }, 'no connection was allocated');
 });

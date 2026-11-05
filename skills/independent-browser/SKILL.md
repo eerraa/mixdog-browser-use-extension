@@ -31,8 +31,11 @@ Stop or denial, or replaying an uncertain action.
 ## Prerequisites
 
 The folder plugin and MCP server must already be enabled. Use the current
-schema and its exact `_channel`; the host hook supplies `_lease`. Never invent
-caller identity, run the hook, edit endpoint files or impersonate the host.
+schema and its exact `_channel`; the host hook supplies `_lease`. Under a plain
+MCP registration (Claude Code, `mcp__win-browser__browse`) the schema has no
+`_lease` and none is sent; the server instructions carry this guidance there.
+Never invent caller identity, run the hook, edit endpoint files or impersonate
+the host.
 Inspect capabilities when a protected interaction is needed. Registration of
 the default package delegates new HID/USB and notifications/geolocation choices
 to live authenticated owners of their pages. A missing/disabled policy is a

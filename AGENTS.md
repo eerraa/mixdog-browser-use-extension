@@ -10,8 +10,8 @@ Read order for a task: this file (Edit table) → the `change-map.md` steps → 
 
 | Key | Value |
 | --- | --- |
-| Product | Independent Windows Browser, a folder-registered Mixdog plugin named `win-browser` |
-| Agent surface | MCP tool `mcp__plugin-win-browser__browse` (29 actions, including DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs), skill `independent-browser`, host hooks (auth and lifecycle only) |
+| Product | Independent Windows Browser (`win-browser`): one packaged folder, registered as a Mixdog folder plugin or as a plain MCP stdio server in Claude Code (`claude mcp add`) |
+| Agent surface | MCP tool `browse` (29 actions, including DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs). Mixdog: `mcp__plugin-win-browser__browse`, skill `independent-browser`, host hooks (auth and lifecycle only). Claude Code: `mcp__win-browser__browse` under connection authority, server instructions instead of the skill, no hooks |
 | Runtime | Own Electron 44.9.1 companion per MCP connection; one window per page (toolbar + live page + input shield) |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
@@ -32,9 +32,9 @@ with Owns, Not here and Update when.
 | `docs/agents/change-map.md` | symbol-level edit steps, rules to keep and extra steps per Edit table ID | which files, tests and docs | implementing a request |
 | `docs/agents/testing.md` | suites, prerequisites, expected counts, Electron substitute, live harnesses, where to add tests, real-device check procedure, test rules | criteria and their status, build steps | verifying a change |
 | `docs/agents/build-release.md` | pins, build and package pipeline, clean package build, versioning, release, licensing upkeep | notice texts, verification | building, packaging, upgrading, releasing |
-| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D24) | the rules themselves | proposing a design change; "why not X?" |
+| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D25) | the rules themselves | proposing a design change; "why not X?" |
 | `README.md` | end-user install, usage, safety (Korean, shipped) | maintainer detail | user-visible behavior changes |
-| `skills/independent-browser/SKILL.md` | how agents use the tool (shipped) | implementation | tool behavior or usage changes |
+| `skills/independent-browser/SKILL.md` | how agents use the tool (shipped); its essentials also travel as `CONNECTION_INSTRUCTIONS` in `src/mcp/tool.mjs` | implementation | tool behavior or usage changes |
 | `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | when to update it (`build-release.md` Licensing) | pins, derived Mixdog files or patches change |
 
 Doc rules:
@@ -45,11 +45,11 @@ Doc rules:
 
 ## Hard rules
 
-1. Official Mixdog plugin contract only: skills, MCP servers, hooks. Never patch installed Mixdog, its ASAR or runtime, call its private bridge, depend on built-in Browser Use, or assume an undocumented extension API.
+1. Official host contracts only: Mixdog's plugin contract (skills, MCP servers, hooks) and Claude Code's documented MCP server registration. Never patch installed Mixdog or Claude Code, Mixdog's ASAR or runtime, call a private bridge, depend on built-in Browser Use, or assume an undocumented extension API.
 2. `requirements.md` and `contracts.md` are binding. Never weaken them to pass a test, auto-resume Stop, handoff or denial, or replay executed or uncertain input.
 3. Never copy external browser profiles, cookies or accounts. Never use real accounts for login, posting, payment or deletion during verification.
 4. Do not modify installed Mixdog, account, auth or server settings, `D:\Engineering\mixdog-computer-use-extension`, or `D:\Engineering\antigravity-aistudio-bridge`.
-5. User-only steps: plugin registration and activation, disabling built-in Browser Use, app restart, OS consent prompts.
+5. User-only steps: plugin registration and activation in Mixdog or Claude Code (`claude mcp add`/`remove`, `/mcp` reconnect), disabling built-in Browser Use, app restart, OS consent prompts.
 6. An implementation or fix request covers a development branch here and verified concern-scoped local commits, not deferred to the end; reuse the same task's branch and never implement directly on `main`, and investigation or review requests grant nothing. Push, tag, release and remote changes only on explicit user request.
 7. Code derived from Mixdog is an independent fork of 1.3.4 (`968ee089`), recorded in `third_party/mixdog/provenance.json`; Mixdog is not tracked or re-synced. Edit derived files in place and, in the same change, keep their change notice, the provenance record and `THIRD_PARTY_NOTICES.md` current (R13).
 8. Report verification per layer (unit, live Electron, packaged MCP, real device).
@@ -59,7 +59,7 @@ Doc rules:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/mcp/` | MCP stdio server, `browse` schema and result text, gateway that spawns and owns the companion |
+| `src/mcp/` | MCP stdio server, `browse` schema, result text and connection-authority instructions, gateway that spawns and owns the companion and issues tickets under connection authority |
 | `src/hook/` | host hook process: lease injection, lifecycle fan-out |
 | `src/companion/` | Electron main per connection: pipe server, role and method auth, termination |
 | `src/browser/` | browser engine: pages, dispatch and handoff (`host.mjs`), CDP and frames, window presentation, permissions, dialogs, DevTools |
@@ -93,6 +93,7 @@ Modules, entry points and import direction: `architecture.md`.
 | Native test | `npm run test:native` | native helpers |
 | Package | `npm run package` | build, native helpers |
 | Package tests | `$env:WB_PACKAGE_DIR="<abs>\win-browser"; npm run test:package` | package |
+| Claude Code registration (user step) | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <abs>\win-browser\bin\bridge.exe --mcp`; undo `claude mcp remove --scope user win-browser` | package |
 | Real-device check | procedure in `testing.md` Real-device checks; criteria in `requirements.md` | fresh package, user registration, PC not in use |
 
 Prerequisites and caveats: `testing.md`, `build-release.md`.
@@ -114,7 +115,7 @@ and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 | R6 | Device or web permissions, delegation policy | `src/browser/permissions.mjs`, `permission-broker.mjs`, `policy.mjs`, `consent.mjs`, `host.mjs`; `browser-policy.json`; `native/consent.cpp` | `tests/browser/permission-broker.test.mjs`, `policy.test.mjs`, permission tests in `host.test.mjs`; `autonomous-harness.mjs`, device checks in `scenarios.mjs`; `layout.test.mjs` (shipped policy) | `README.md` 권한과 안전 경계, `SKILL.md` steps 4–5, `contracts.md` Native requests and permissions |
 | R7 | Profiles, data directories, connection lifetime | `src/browser/host.mjs`, `src/shared/paths.mjs`, `src/companion/main.mjs`, `src/mcp/gateway.mjs` | isolation test in `tests/browser/host.test.mjs`; teardown and last-tab tests in `mcp.test.mjs` | `architecture.md` Data layout and Teardown, `requirements.md` AC18, `README.md` |
 | R8 | MCP transport, timeouts, process lifecycle | `src/mcp/main.mjs`, `src/mcp/gateway.mjs`, `src/shared/rpc.mjs`, `src/companion/main.mjs`, `src/browser/host.mjs`, `plugin.json`, `native/bridge.cpp` | `tests/shared/rpc.test.mjs`, `tests/companion/termination.test.mjs`, `mcp.test.mjs` (EOF, teardown) | `architecture.md` Processes and Call path |
-| R9 | Caller identity, hooks | `src/hook/main.mjs`, `src/shared/authority.mjs`, `src/companion/main.mjs`, `hooks/hooks.json` | `tests/shared/authority*.test.mjs`; hook admission test in `mcp.test.mjs` | `contracts.md` Authority and isolation |
+| R9 | Caller identity, hooks, connection authority | `src/hook/main.mjs`, `src/shared/authority.mjs`, `src/companion/main.mjs`, `hooks/hooks.json`; connection authority: `src/shared/paths.mjs`, `src/mcp/gateway.mjs` | `tests/shared/authority*.test.mjs`, `tests/shared/paths.test.mjs`; hook admission and connection-authority tests in `mcp.test.mjs` | `contracts.md` Authority and isolation |
 | R10 | Plugin, server or tool rename (avoid) | `plugin.json`, `hooks/hooks.json`, `src/shared/authority.mjs`, `src/mcp/tool.mjs`, `src/mcp/main.mjs`, `skills/independent-browser/SKILL.md`, `scripts/package.mjs` | `layout.test.mjs` | `README.md`, Identity |
 | R11 | Version bump | the files in `build-release.md` Versioning | — | Identity |
 | R12 | Electron upgrade | `package.json`, `package-lock.json`, `src/browser/dialogs.mjs`, `src/browser/host.mjs`, `scripts/package.mjs` | version strings in `tests/browser/user-agent.test.mjs`, `tests/companion/fixture.mjs`, `autonomous-harness.mjs`, `mcp.test.mjs`; every suite, live and package included | `README.md`, `THIRD_PARTY_NOTICES.md`, `build-release.md` Pins, Identity |
@@ -124,6 +125,7 @@ and R16 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 | R16 | Browser identity (user agent) | `src/browser/user-agent.mjs` | `tests/browser/user-agent.test.mjs`, `tests/companion/fixture.mjs`; identity baseline run in `tests/live/browser-host.test.mjs` | `README.md` 권한과 안전 경계 |
 | R17 | DevTools reads (console, network, inspect, performance), page-world evaluate, human DevTools | `src/browser/devtools.mjs`, `src/browser/host.mjs`, `src/browser/frames.mjs`, `src/browser/consent.mjs`; arguments as R1 | `tests/browser/devtools.test.mjs`, `frames.test.mjs` (recording order, worker fence, replays, discard, flush, page worlds), `host.test.mjs` (gates, lane independence, Stop, profile-shared workers, human DevTools exits), `tests/shared/contract.test.mjs`; `devtools-harness.mjs`; DevTools test in `mcp.test.mjs` | `contracts.md` DevTools reads and Human DevTools, `SKILL.md` DevTools section, `README.md` action table and 개발자 도구 paragraph, `architecture.md` CDP rows |
 | R18 | Script runner (`run`): script API, ops, sandbox, run report | `src/browser/runner/*`, `src/browser/host.mjs`, `src/companion/main.mjs`, `scripts/build.mjs`; arguments as R1 | `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), run test in `host.test.mjs`, `tests/shared/contract.test.mjs`; `runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); run test in `mcp.test.mjs` | `contracts.md` Script runner, `SKILL.md` Scripts section, `README.md` action table |
+| R19 | Claude Code registration and guidance: server instructions, schema without `_lease` | `src/mcp/tool.mjs` (`CONNECTION_INSTRUCTIONS`, `browserTool`), `src/mcp/main.mjs` | `tests/shared/contract.test.mjs` (schema, instruction length); connection-authority tests in `mcp.test.mjs` | `README.md` Claude Code 등록, `SKILL.md` (same guidance) |
 | — | Not listed | the module's row in `architecture.md` Module map, then the nearest row above | as that row | as that row; add a row here |
 
 ## Done criteria
@@ -132,7 +134,7 @@ This list is complete; no other check is required. Intermediate steps run only t
 
 | Change | Done checks | Not a done criterion |
 | --- | --- | --- |
-| Code, tests, scripts, config or native sources (its Edit table row, or Not listed) | The tests in the row's Tests column pass (commands and expected counts: `testing.md` Suites); when they include `tests/package/` files, `test:package` passes on a fresh package (`build-release.md` Clean package build). The docs in the row's Docs column, plus `README.md` or `SKILL.md` when user- or agent-visible behavior changed. Real-device status in `requirements.md` back to `not verified` for criteria on a changed path | Suites outside the row; real-device checks (`testing.md` Real-device checks); live sites; hardware this PC lacks |
+| Code, tests, scripts, config or native sources (its Edit table row, or Not listed) | The tests in the row's Tests column pass (commands and expected counts: `testing.md` Suites); when they include `tests/package/` files, `test:package` passes on a fresh package (`build-release.md` Clean package build). The docs in the row's Docs column, plus `README.md`, `SKILL.md` or `CONNECTION_INSTRUCTIONS` (`src/mcp/tool.mjs`) when user- or agent-visible behavior changed. Real-device status in `requirements.md` back to `not verified` for criteria on a changed path | Suites outside the row; real-device checks (`testing.md` Real-device checks); live sites; hardware this PC lacks |
 | Docs only (Markdown text; no shipped file added, moved or renamed) | `git diff --check` | Builds, packages, suites, live runs, real-device checks |
 
 Every change: no generated files committed (Hard rule 9); `%TEMP%` test directories a run left are removed (prefixes in `testing.md` Suites).

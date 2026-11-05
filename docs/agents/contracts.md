@@ -11,9 +11,11 @@ the code.
 
 ## Authority and isolation
 
-- Arguments carry `_channel` (this connection) and `_lease` (PreToolUse ticket). A hook failure denies that call and nothing else.
+- Two caller authorities, chosen by the registration through `WB_AUTHORITY` and never inferred: `hook` (default; the Mixdog plugin) and `connection` (a plain MCP stdio registration such as Claude Code's `claude mcp add`). An unknown value, or a missing or relative data root (`MIXDOG_PLUGIN_DATA` for `hook`, `WB_DATA_DIR` for `connection`), stops the server before it allocates a connection; neither authority falls back to the other.
+- Hook authority: arguments carry `_channel` (this connection) and `_lease` (PreToolUse ticket). A hook failure denies that call and nothing else.
+- Connection authority: arguments carry `_channel` only. The MCP connection is the only caller (`CONNECTION_CALLER`): one session, one profile and one caller generation per connection, ended only with the connection (stdin EOF, process exit, `revoke`). Right before each call the gateway takes that call's ticket from the companion over its own hook-role pipe connection, with a fresh call id, so every call passes `CallerAuthority.consume` under the ticket rule below. The schema has no `_lease`; a `_lease` argument is refused `not-executed` (`INVALID_ARGUMENT`) before anything is sent. No `endpoint.json` is written, so the pipe key stays in process memory. No hook events arrive: MCP cancellation aborts its own call, and turns start no generations. Separate host sessions are separate connections with separate companions; agents inside one session share its caller. The server instructions (`CONNECTION_INSTRUCTIONS`, at most 4096 characters) carry the skill's guidance.
 - Ticket: single use, 10 s, bound to `sessionId`, `callId`, `toolName === BROWSER_TOOL` and the sha256 of the canonical arguments without `_lease`.
-- `end` aborts the session's admitted work and blocks its late calls. `UserPromptSubmit` starts a new generation even when `end` was lost.
+- Hook authority: `end` aborts the session's admitted work and blocks its late calls. `UserPromptSubmit` starts a new generation even when `end` was lost.
 - Tabs of another session fail with `FOREIGN_TAB`. Profiles are per connection and session.
 - Pipe `hello` must match the channel and the 43-character key (constant-time compare). One gateway per companion. Methods per role: gateway `status`, `call`, `shutdown`; hook `begin`, `end`, `issue`.
 - `status` is answered by the gateway without consuming a ticket.

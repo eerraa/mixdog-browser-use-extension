@@ -1,14 +1,17 @@
 # Independent Windows Browser
 
 Mixdog의 빌트인 Browser Use와 별개로 실행되는 Windows 브라우저 플러그인입니다.
+같은 배포 폴더를 Claude Code에 일반 MCP 서버로 등록해 쓸 수도 있습니다.
 배포 폴더에는 Electron 런타임과 실행기가 포함되므로 사용자는 Node.js 설치나
 수동 빌드를 하지 않습니다.
 
 ## 에이전트에게 제공되는 도구
 
-공개 MCP 도구는 `mcp__plugin-win-browser__browse` 하나이며 `action`으로 동작을 고릅니다.
-관련 웹 작업에는 `independent-browser` 스킬이 안내를 제공합니다.
-훅은 내부 인증·호출 수명 처리용이지 추가 에이전트 도구가 아닙니다.
+공개 MCP 도구는 `browse` 하나이며 `action`으로 동작을 고릅니다. 에이전트가 보는 이름은
+Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-browser__browse`입니다.
+관련 웹 작업에는 `independent-browser` 스킬이 안내를 제공하며, Claude Code에서는 MCP 서버
+지침(instructions)이 같은 안내를 전달합니다.
+훅은 Mixdog에서만 쓰는 내부 인증·호출 수명 처리용이지 추가 에이전트 도구가 아닙니다.
 
 | 범위 | action |
 | --- | --- |
@@ -90,6 +93,34 @@ Windows x64 ZIP을 받아 압축을 풉니다. 공개된 SHA256 파일로 다운
 일으킬 수 있으므로, 충돌이 있으면 사용자가 지원되는 플러그인 설정에서 확인해야 합니다.
 새 경로의 패키지를 등록하면 별도 플러그인 ID·데이터를 사용하며 기존 로그인·설정을
 자동으로 이전하지 않습니다.
+
+### Claude Code에 등록
+
+Claude Code에서는 플러그인 마켓플레이스나 훅 없이, 압축을 푼 `win-browser` 폴더의 실행기를
+일반 MCP 서버(stdio)로 등록합니다. 등록은 사용자 설정(`~/.claude.json`)을 바꾸므로 사용자가
+직접 실행합니다(PowerShell 예시).
+
+```powershell
+claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code" -- "C:\경로\win-browser\bin\bridge.exe" --mcp
+```
+
+- `WB_AUTHORITY=connection`: Claude Code는 세션마다 MCP 서버를 따로 띄우므로 그 연결 자체를
+  호출자로 인증합니다. Mixdog 훅이 넣던 `_lease`는 쓰지 않으며, 인수로 보내면 아무것도 실행하지
+  않고 거부합니다. 같은 세션의 하위 에이전트는 탭·프로필을 함께 쓰고, 다른 세션은 별도
+  브라우저 프로세스·프로필을 씁니다.
+- `WB_DATA_DIR`: 연결별 Electron 데이터·프로필·다운로드를 둘 절대 경로입니다. Mixdog 데이터와
+  섞이지 않으며 연결 키를 디스크에 쓰지 않습니다. 연결이 끝나도 프로필 폴더는 지우지 않습니다.
+- 둘 중 하나라도 없거나 잘못되면 서버가 시작하지 않으며 `claude mcp get win-browser`에 실패로
+  표시됩니다.
+- 이미 실행 중인 세션에는 `/mcp`에서 다시 연결하거나 새 세션을 열어야 도구가 나타납니다.
+  제거는 `claude mcp remove --scope user win-browser`입니다.
+- 사용법은 스킬 대신 서버 지침으로 전달됩니다. 매 호출 권한 확인을 없애려면 사용자가 Claude Code
+  권한 설정에서 `mcp__win-browser__browse`를 허용합니다.
+- 기본 `browser-policy.json`의 HID·USB·알림·위치 위임은 Claude Code 등록에도 같게 적용됩니다.
+  대화 턴 경계는 MCP 서버에 전달되지 않으므로 위임의 caller generation은 그 연결(세션)이
+  끝날 때까지 하나로 유지됩니다.
+- Claude Code는 긴 MCP 결과를 줄이거나 파일로 넘기므로 큰 페이지는 `mode:"full"`보다
+  `find`·`scope`로 읽습니다.
 
 각 페이지는 일반 브라우저처럼 주소창, 뒤로·앞으로, 새로고침(로딩 중에는 중지)과
 현재 제어 상태 표시가 있는 창 하나로 열리며, 창 제목은 페이지 제목을 따릅니다.

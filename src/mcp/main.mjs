@@ -3,14 +3,20 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createGateway } from './gateway.mjs';
-import { pluginData } from '../shared/paths.mjs';
-import { browserTool, errorResult, toolResult } from './tool.mjs';
+import { authorityMode, pluginData } from '../shared/paths.mjs';
+import { CONNECTION_INSTRUCTIONS, browserTool, errorResult, toolResult } from './tool.mjs';
 
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
-  const gateway = await createGateway(root, pluginData());
-  const server = new Server({ name: 'win-browser', version: '0.3.5' }, { capabilities: { tools: {} } });
-  const descriptor = browserTool(gateway.channel);
+  const authority = authorityMode();
+  const gateway = await createGateway(root, pluginData(), { authority });
+  // A plain MCP registration loads no skill; the server instructions carry
+  // its guidance instead. Under host hooks the shipped skill does.
+  const server = new Server({ name: 'win-browser', version: '0.3.5' }, {
+    capabilities: { tools: {} },
+    ...(authority === 'connection' ? { instructions: CONNECTION_INSTRUCTIONS } : {}),
+  });
+  const descriptor = browserTool(gateway.channel, { lease: authority === 'hook' });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [descriptor] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {

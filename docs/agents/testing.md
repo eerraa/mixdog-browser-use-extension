@@ -11,13 +11,13 @@ changes.
 
 | Command | Scope | Needs | Real windows | `%TEMP%` dirs left |
 | --- | --- | --- | --- | --- |
-| `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
+| `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract and schema, caller authority and data root), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
 | `npm run test:browser` | `tests/browser/run.mjs` → frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner, queue, permission-broker in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
 | `npm run test:native` | `tests/native/consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
 | `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
-| `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
+| `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, connection authority (a plain MCP registration as Claude Code makes it), refused configurations, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 21, `test:browser` 196, `test:live` 10, `test:package` 12, `test:native` 1 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 24, `test:browser` 196, `test:live` 10, `test:package` 15, `test:native` 1 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
@@ -66,6 +66,8 @@ changes.
 | user agent | `tests/browser/user-agent.test.mjs` |
 | DevTools records, formats, redaction (including 64 KiB adversarial timing), redirects, privacy windows, page reads | `tests/browser/devtools.test.mjs` |
 | tickets and generations | `tests/shared/authority*.test.mjs` |
+| caller authority and data root of a registration | `tests/shared/paths.test.mjs` |
+| tool schema per authority, connection instructions | `tests/shared/contract.test.mjs` |
 | queue, permission ledger | `tests/browser/queue.test.mjs`, `tests/browser/permission-broker.test.mjs` |
 | RPC | `tests/shared/rpc.test.mjs` |
 | SDK patch | `tests/scripts/sdk-adapter.test.mjs` |
@@ -76,10 +78,11 @@ changes.
 ## Real-device checks
 
 Criteria with a Real device status in `requirements.md` need the package registered
-in Mixdog on the user's PC; no suite proves them.
+on the user's PC, in Mixdog or, for Claude Code criteria, in Claude Code; no suite
+proves them.
 
 1. Build a fresh package (`build-release.md` Clean package build) and pass `test:package` on it.
-2. The user registers that `win-browser` folder in Mixdog, turns built-in Browser Use off and restarts Mixdog (user-only steps).
+2. The user registers that `win-browser` folder in Mixdog, turns built-in Browser Use off and restarts Mixdog, or registers its `bin/bridge.exe --mcp` in Claude Code (`AGENTS.md` Commands) and reconnects with `/mcp` or a new session (user-only steps).
 3. Run only while the user is not using the PC. Use local fixtures or public pages without an account; never real accounts for login, posting, payment or deletion.
 4. Set each checked criterion to `verified` in `requirements.md`, or leave it `not verified`; record no dates, logs or results elsewhere.
 

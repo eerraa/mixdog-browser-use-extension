@@ -10,43 +10,45 @@ package path is added, moved, renamed or removed.
 ## Processes
 
 ```text
-Mixdog host
+Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (connection authority)
 ├─ MCP (stdio)  bin/bridge.exe --mcp     → runtime/electron.exe app/mcp.cjs        ELECTRON_RUN_AS_NODE=1
 │    └─ gateway bin/bridge.exe --browser → runtime/electron.exe app/companion.cjs  Electron main
 │                  ⇅ named pipe, newline JSON (RpcPeer), role "gateway"
+│                  ⇅ connection authority only: same pipe, role "hook", the gateway's ticket issuer
 └─ hooks        bin/bridge.exe --hook    → runtime/electron.exe app/hook.cjs       ELECTRON_RUN_AS_NODE=1
-                   ⇅ same pipe, role "hook", one short connection per event
+   (hook authority only)  ⇅ same pipe, role "hook", one short connection per event
 ```
 
-- `native/bridge.cpp` resolves the plugin root from its own path, clears `NODE_OPTIONS` and `NODE_PATH`, and runs the child in a kill-on-close Job, so children die with the launcher.
+- Authority (`src/shared/paths.mjs authorityMode`): `WB_AUTHORITY` from the registration, `hook` by default. Mixdog runs `${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe --mcp` from `plugin.json` plus `hooks/hooks.json`; Claude Code runs the same launcher by absolute path with `WB_AUTHORITY=connection` and `WB_DATA_DIR`, and loads no manifest, hooks or skill.
+- `native/bridge.cpp` resolves the plugin root from its own path, clears `NODE_OPTIONS` and `NODE_PATH`, and runs the child in a kill-on-close Job, so children die with the launcher. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
 - One companion per MCP server process, which is one connection. Channel = fresh UUID; key = 32 random bytes (base64url); both passed as `WB_CHANNEL`/`WB_IPC_KEY`. Ready line `WB_READY <channel>` on stdout within 20 s.
-- Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`. Hooks find it through `connections/<channel>/endpoint.json`.
+- Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`. Hooks find it through `connections/<channel>/endpoint.json` (hook authority only).
 
 ## Call path
 
 1. The agent calls `browse` with `_channel` (schema const = connection UUID).
-2. `PreToolUse` → `src/hook/main.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure.
-3. `src/mcp/main.mjs` → `gateway.execute` → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
+2. Hook authority: `PreToolUse` → `src/hook/main.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure. Connection authority: no hook; step 3 refuses a `_lease` argument and takes the ticket itself.
+3. `src/mcp/main.mjs` → `gateway.execute` → (connection authority: `issue{sessionId: CONNECTION_CALLER, callId: fresh UUID}` over the gateway's hook-role connection) → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
 4. `src/companion/main.mjs` → `authority.consume(_lease, args)` → caller `{sessionId, callId, signal, assertLive}` → `BrowserHost.execute`.
 5. `BrowserHost.execute` → `validateArgs` → immediate actions (including DevTools buffer reads), or `#run` (per-tab `FenceQueue` lane, 25 s): input → `#validate` (after `FrameDriver.inputReady`) → `#perform` (dispatch guard) → `settle` → `#perceive` → `#present`; observe/read → `#read` → `#perceive` → `#present`. `run` → `#runScript` → `runner/run.mjs runScript`: a sandbox renderer (`runner/sandbox.mjs`) whose bridge ops (`runner/bridge.mjs`) each call `BrowserHost.execute` under the run's caller (`keepSignals`), then one final `#run` observe-after per touched tab.
 6. `toolResult` (`src/mcp/tool.mjs`) renders page results as text (`statusLine` + body), adds the screenshot as image content only on request, keeps `JSON_ACTIONS` as JSON, and sets `isError` (`contracts.md` Result vocabulary).
 
-- Lifecycle: `SessionStart`, `UserPromptSubmit`, `SubagentStart` send `begin`; `Stop`, `StopFailure`, `SessionEnd`, `SubagentStop` send `end` to every `connections/*` channel (150 ms each).
-- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json is removed, profiles stay. Closing the last page window never ends the companion (`window-all-closed` is handled in `src/companion/main.mjs`).
+- Lifecycle (hook authority): `SessionStart`, `UserPromptSubmit`, `SubagentStart` send `begin`; `Stop`, `StopFailure`, `SessionEnd`, `SubagentStop` send `end` to every `connections/*` channel (150 ms each). Connection authority has no lifecycle events; the connection is the caller's lifetime.
+- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json (hook authority) is removed, profiles stay. Closing the last page window never ends the companion (`window-all-closed` is handled in `src/companion/main.mjs`).
 - Revoke: companion `terminate` → gateway waits up to 8 s for exit and reports `processTeardownConfirmed`.
 
 ## Module map
 
 | Path | Role | Key symbols |
 | --- | --- | --- |
-| `src/mcp/main.mjs` | MCP stdio server; single tool; error envelope; EOF shutdown | `main` |
-| `src/mcp/tool.mjs` | tool schema (action enum from contract); result shaping and the status line | `browserTool`, `toolResult`, `errorResult`, `statusLine` |
-| `src/mcp/gateway.mjs` | spawn and own the companion, endpoint.json, reconnect for new calls only, revoke confirmation | `createGateway` |
+| `src/mcp/main.mjs` | MCP stdio server; authority from the registration; single tool; server instructions under connection authority; error envelope; EOF shutdown | `main` |
+| `src/mcp/tool.mjs` | tool schema (action enum from contract; `_lease` only under hook authority); result shaping and the status line; connection-authority server instructions | `browserTool`, `toolResult`, `errorResult`, `statusLine`, `CONNECTION_INSTRUCTIONS` |
+| `src/mcp/gateway.mjs` | spawn and own the companion, endpoint.json (hook authority), connection-authority tickets over its own hook-role connection, reconnect for new calls only, revoke confirmation | `createGateway`, `CONNECTION_CALLER` |
 | `src/hook/main.mjs` | lease injection for this tool only; lifecycle fan-out | `main`, `deliver` |
 | `src/companion/main.mjs` | Electron main per connection; pipe server; role and method auth; termination | `terminate`, `sameKey` |
 | `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
-| `src/shared/paths.mjs` | plugin data root, connection directory, pipe name | `pluginData`, `connectionPaths`, `validChannel` |
+| `src/shared/paths.mjs` | caller authority of the registration, data root per authority, connection directory, pipe name | `authorityMode`, `pluginData`, `connectionPaths`, `validChannel` |
 | `src/shared/async.mjs` | abortable pause; timeout + signal bound | `pause`, `bounded` |
 | `src/shared/contract.mjs` | action table, argument validation, keys, URL rules, error type | `actions`, `inputActions`, `keys`, `validateArgs`, `pageURL`, `addressURL`, `fail`, `BrowserHostError` |
 | `src/browser/queue.mjs` | per-key FIFO lane; abort settles the caller, the actual operation keeps fencing | `FenceQueue` |
@@ -129,11 +131,11 @@ BrowserWindow "frame"  default 1120×820; its own webContents is the toolbar (da
 
 ## Data layout
 
-Root: `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered folder; a new package path gets a new root.
+Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered folder (a new package path gets a new root); connection authority `WB_DATA_DIR`, set by the registration (`src/shared/paths.mjs pluginData`).
 
 | Path | Content | Lifetime |
 | --- | --- | --- |
-| `connections/<channel>/endpoint.json` | `{channel, key, pipe, protocol:1}` | removed on clean MCP close |
+| `connections/<channel>/endpoint.json` | `{channel, key, pipe, protocol:1}`; hook authority only | removed on clean MCP close |
 | `connections/<channel>/electron/` | Electron userData | kept |
 | `connections/<channel>/profiles/<sha256(sessionId)>/` | Chromium profile per caller session | kept; never reused by a new connection |
 | `connections/<channel>/downloads/<sha256(sessionId)>/` | `<uuid>-<sanitized name>` | kept |
@@ -143,4 +145,4 @@ Root: `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered folder; a new pack
 `npm run package` → `dist/win-browser-XXXXXX/win-browser/`:
 `plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist), `app/{mcp,hook,companion}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and the fork record `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
-Mixdog derives the registry stem from the folder basename, so it must stay `win-browser` (server `plugin-win-browser`).
+Mixdog derives the registry stem from the folder basename, so it must stay `win-browser` (server `plugin-win-browser`). Claude Code uses no file of the folder's plugin surface: it runs `bin/bridge.exe --mcp` by absolute path under the server name its registration gives (`win-browser` → `mcp__win-browser__browse`).

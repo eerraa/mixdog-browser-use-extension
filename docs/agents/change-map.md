@@ -55,10 +55,16 @@ rule to keep.
 - Edit: `src/mcp/main.mjs` (server, error envelope, EOF); `src/mcp/gateway.mjs` (startup 20 s, call 120 s, exit wait 8 s); `src/shared/rpc.mjs` (framing, limits); `src/companion/main.mjs` (roles, methods, `terminate`); `plugin.json` (`startupTimeoutMs` 30000, `timeoutMs` 120000); `host.mjs #run` (25 s); `native/bridge.cpp`.
 - Keep: transport loss reports `replaySafe:false`; a reconnect serves new calls only.
 
-## R9 Caller identity, hooks
+## R9 Caller identity, hooks, connection authority
 
 - Edit: `src/hook/main.mjs`, `src/shared/authority.mjs`, `hooks/hooks.json` (events, matcher, timeouts 5 s and 2 s), hook role in `src/companion/main.mjs`.
-- Keep: hooks act only on `BROWSER_TOOL` and deny on failure; `contracts.md` Authority and isolation.
+- Connection authority: `src/shared/paths.mjs` (`authorityMode`, `pluginData` per authority) → `src/mcp/gateway.mjs` (`CONNECTION_CALLER`, the issuer connection and `ticket`, the `_lease` refusal in `execute`, no endpoint.json) → `src/mcp/main.mjs` (`browserTool` without `_lease`, `CONNECTION_INSTRUCTIONS`).
+- Keep: hooks act only on `BROWSER_TOOL` and deny on failure; `contracts.md` Authority and isolation. The companion admits only consumed tickets under both authorities; the authority comes from `WB_AUTHORITY` alone and never falls back.
+
+## R19 Claude Code registration and guidance
+
+- Edit: `src/mcp/tool.mjs CONNECTION_INSTRUCTIONS` (at most 4096 characters, critical rules first; the same guidance as `SKILL.md`), `browserTool` (`lease` option); `src/mcp/main.mjs` (instructions only under connection authority).
+- Keep: the registration command in `README.md`, `AGENTS.md` Commands and `build-release.md` Release use one server name (`win-browser`), `WB_AUTHORITY=connection` and an absolute `WB_DATA_DIR`.
 
 ## R10 Plugin, server or tool rename
 

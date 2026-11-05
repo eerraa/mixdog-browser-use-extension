@@ -15,8 +15,8 @@ when tests pass.
 
 | ID | Requirement |
 | --- | --- |
-| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses. Users never install dev tools, build, or patch Mixdog. |
-| C2 | Natural selection: one MCP tool and the `independent-browser` skill; agents choose them for interactive web work without being told. Own names are fine; built-in names and UI are not cloned. |
+| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses, registered as a Mixdog plugin or as a plain MCP server in Claude Code. Users never install dev tools, build, or patch Mixdog or Claude Code. |
+| C2 | Natural selection: one MCP tool and the `independent-browser` skill (in Claude Code, the server instructions); agents choose them for interactive web work without being told. Own names are fine; built-in names and UI are not cloned. |
 | C3 | Real browser work: navigation, DOM and screenshot observation, exact targeting, click, typing, forms, tabs, frames, HTML uploads, downloads, dialogs and result checks, with ref freshness and validation, cancellation and uncertainty semantics. |
 | C4 | Independence: works with built-in Browser Use off; own windows and profiles; the person handles login, passwords, CAPTCHA and 2FA in the same window; no copying of profiles, cookies or accounts; no built-in handoff. |
 | C5 | Protected requests follow the trusted package policy (`contracts.md` Native requests and permissions). The agent never operates an approval UI; MCP arguments never create policy or approval. |
@@ -33,14 +33,14 @@ native `<name>` = `tests/native/<name>.test.mjs`, live `<name>` =
 `tests/live/<name>.test.mjs`, package `<name>` = `tests/package/<name>.test.mjs`
 (`testing.md` Suites).
 
-Real device: the package registered in Mixdog on the user's PC (`testing.md`
-Real-device checks). `verified` = checked on a package built from the current tree;
+Real device: the package registered in Mixdog on the user's PC, or in Claude Code
+for AC21 (`testing.md` Real-device checks). `verified` = checked on a package built from the current tree;
 `not verified`; `—` = nothing beyond the suites to check.
 
 | AC | Req | Criterion | Suites | Real device |
 | --- | --- | --- | --- | --- |
 | AC1 | C1 | The package folder holds the runtime, `app/` bundles, `bin/` helpers, policy, hooks, skill and licenses, and serves MCP through `bin/bridge.exe --mcp` with nothing else installed | package `layout`, `mcp` | — |
-| AC2 | C1, C2, C8 | Registered in Mixdog with built-in Browser Use off, the tool appears, its calls pass the host hooks, and an agent picks the tool and the skill for interactive web work unprompted | package `mcp` (hook admission) | verified |
+| AC2 | C1, C2, C8 | Registered in Mixdog with built-in Browser Use off, the tool appears, its calls pass the host hooks, and an agent picks the tool and the skill for interactive web work unprompted | package `mcp` (hook admission) | not verified |
 | AC3 | C3 | Navigation, text and screenshot observation, exact targeting, click, typing, forms, tabs, frames, uploads, downloads and dialogs, with result checks, on local pages | unit `contract`, `host`, `frames`, `perception`, `dialogs`, `requests`; live `browser-host`, `perception`, `observation`, `review-regressions`, `workers`; package `mcp` | — |
 | AC4 | C3 | Text results and agent DevTools reads stay compact on large real sites (e.g. naver main and login) through the registered tool | unit `perception`, `devtools`; live `perception`, `devtools` (local pages) | verified |
 | AC5 | C2, C3 | An agent chooses and completes `run` scripts through the registered package on real sites | unit `runner`; live `runner`; package `mcp` (local pages) | verified |
@@ -56,8 +56,9 @@ Real-device checks). `verified` = checked on a package built from the current tr
 | AC15 | C7 | Native picker and dropdown windows (`showPicker`, date and color pickers, `select` dropdowns) used by a person during automation fail closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (picker value changes, synthetic trusted input), `runner` (synthetic trusted input) | verified |
 | AC16 | C8 | Tabs are owned per caller session, input is serialized per tab, ended callers' late calls are rejected, and hooks act only on this tool | unit `authority`, `authority-turns`, `authority-lifecycle`, `queue`, `host`; package `mcp` (hook admission) | — |
 | AC17 | C9 | Only the forked Mixdog browser code is used, and its fork record and Mixdog's notices ship unmodified | package `layout` | — |
-| AC18 | C3, C7 | Closing every tab keeps the connection: the same channel opens new pages; only MCP EOF and revocation end the companion | package `mcp` (last tab, teardown) | verified |
+| AC18 | C3, C7 | Closing every tab keeps the connection: the same channel opens new pages; only MCP EOF and revocation end the companion | package `mcp` (last tab, teardown) | not verified |
 | AC19 | C5 | Real USB devices can be selected and used under the shipped policy | unit `host`; live `browser-host` (device permission checks) | not verified |
 | AC20 | C7 | A choice a person makes in a `datalist` suggestion window during automation fails closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (inserted text) | not verified |
+| AC21 | C1, C2, C8 | Registered in Claude Code as a plain MCP server under connection authority, the tool appears as `mcp__win-browser__browse` with the server instructions, its calls are admitted without hooks, a `_lease` argument is refused, separate sessions get separate companions, and an agent picks the tool for interactive web work unprompted | unit `paths`, `contract`; package `mcp` (connection authority) | not verified |
 
 C10 governs every verification report (`testing.md` Rules) and has no criterion of its own.
