@@ -12,7 +12,7 @@ async function main() {
   const gateway = await createGateway(root, pluginData(), { authority });
   // A plain MCP registration loads no skill; the server instructions carry
   // its guidance instead. Under host hooks the shipped skill does.
-  const server = new Server({ name: 'win-browser', version: '0.4.0' }, {
+  const server = new Server({ name: 'win-browser', version: '0.4.1' }, {
     capabilities: { tools: {} },
     ...(authority === 'connection' ? { instructions: CONNECTION_INSTRUCTIONS } : {}),
   });
