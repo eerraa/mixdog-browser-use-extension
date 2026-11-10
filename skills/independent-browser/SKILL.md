@@ -32,8 +32,9 @@ Stop or denial, or replaying an uncertain action.
 
 The folder plugin and MCP server must already be enabled. Use the current
 schema and its exact `_channel`; the host hook supplies `_lease`. Under a plain
-MCP registration (Claude Code, `mcp__win-browser__browse`) the schema has no
-`_lease` and none is sent; the server instructions carry this guidance there.
+MCP registration (Claude Code, `mcp__win-browser__browse`) the schema has
+neither and neither is sent; a restarted server is a new browser without the
+earlier tabs. The server instructions carry this guidance there.
 Never invent caller identity, run the hook, edit endpoint files or impersonate
 the host.
 Inspect capabilities when a protected interaction is needed. Registration of

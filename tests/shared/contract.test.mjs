@@ -114,21 +114,23 @@ test('semantic filtering is explicit, frame-scoped, and does not resolve ambigui
   assert.equal(entries.filter(e => matchesTarget(e, { name: 'save changes', exact: true })).length, 0);
 });
 
-test('the schema offers _lease only to host hooks; connection instructions fit the host cut and never ask for a lease', async () => {
+test('only the hook schema carries _channel and _lease; the connection schema and instructions name no connection', async () => {
   const { browserTool, CONNECTION_INSTRUCTIONS } = await import('../../src/mcp/tool.mjs');
   const channel = '0f8fad5b-d9cb-469f-a165-70867728950e';
   const hooked = browserTool(channel);
-  const connection = browserTool(channel, { lease: false });
+  const connection = browserTool();
   assert.equal(hooked.inputSchema.properties._lease.type, 'string');
-  assert.equal(Object.hasOwn(connection.inputSchema.properties, '_lease'), false);
-  assert.deepEqual(connection.inputSchema.required, ['action', '_channel']);
-  assert.deepEqual(connection.inputSchema.properties._channel.enum, [channel]);
+  assert.deepEqual(hooked.inputSchema.required, ['action', '_channel']);
+  assert.deepEqual(hooked.inputSchema.properties._channel.enum, [channel]);
+  // A host keeps a tool schema for the whole session, across server restarts.
+  assert.deepEqual(connection.inputSchema.required, ['action']);
   assert.equal(connection.inputSchema.additionalProperties, false);
-  const { _lease, ...shared } = hooked.inputSchema.properties;
-  assert.deepEqual(connection.inputSchema.properties, shared, 'the two schemas differ only in _lease');
+  const { _channel, _lease, ...shared } = hooked.inputSchema.properties;
+  assert.deepEqual(connection.inputSchema.properties, shared, 'the two schemas differ only in _channel and _lease');
   // Claude Code cuts server instructions after 4096 characters.
   assert.ok(CONNECTION_INSTRUCTIONS.length <= 4096, `${CONNECTION_INSTRUCTIONS.length} characters`);
-  assert.match(CONNECTION_INSTRUCTIONS, /_channel copied exactly/);
+  assert.doesNotMatch(CONNECTION_INSTRUCTIONS, /_channel/);
+  assert.match(CONNECTION_INSTRUCTIONS, /restarted or reconnected server/);
   assert.match(CONNECTION_INSTRUCTIONS, /never send _lease/);
   assert.match(CONNECTION_INSTRUCTIONS, /never choose by list order/);
 });

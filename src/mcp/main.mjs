@@ -16,13 +16,17 @@ async function main() {
     capabilities: { tools: {} },
     ...(authority === 'connection' ? { instructions: CONNECTION_INSTRUCTIONS } : {}),
   });
-  const descriptor = browserTool(gateway.channel, { lease: authority === 'hook' });
+  const hooked = authority === 'hook';
+  const descriptor = browserTool(hooked ? gateway.channel : null);
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [descriptor] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       if (request.params.name !== 'browse') throw new Error('Unknown plugin tool');
       const args = request.params.arguments;
-      if (args?._channel !== gateway.channel) throw new Error('Missing, foreign or replaced browser channel');
+      // Host hooks address this connection by _channel. Under connection authority
+      // the stdio connection is the caller and the argument is not part of a call.
+      if (hooked && args?._channel !== gateway.channel) throw new Error('Missing, foreign or replaced browser channel');
+      if (!args || typeof args !== 'object') throw new Error('Browse arguments must be an object');
       const result = args.action === 'status' ? await gateway.status() : await gateway.execute(args, extra.signal);
       return toolResult(result, args.action);
     } catch (error) {

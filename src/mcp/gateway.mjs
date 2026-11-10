@@ -99,7 +99,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         return { channel, ...await (await livePeer()).request('status', {}) };
       },
       async execute(args, signal) {
-        if (args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
+        if (authority === 'hook' && args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
         if (authority === 'connection' && Object.hasOwn(args, '_lease')) {
           fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
             { requestedInputDispatched: false });
@@ -107,7 +107,10 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         const current = await livePeer();
         let call = args;
         if (authority === 'connection') {
-          try { call = { ...args, _lease: await ticket(args) }; }
+          // This process owns exactly one companion, so it addresses the call itself.
+          // A host that kept an earlier process's schema still sends that _channel.
+          const own = { ...args, _channel: channel };
+          try { call = { ...own, _lease: await ticket(own) }; }
           catch (error) {
             // No call was sent: the companion admits nothing without a ticket.
             throw Object.assign(error, { code: error.code ?? 'UNAUTHENTICATED_CALLER', requestedInputDispatched: false });

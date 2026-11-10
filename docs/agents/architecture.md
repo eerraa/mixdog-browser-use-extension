@@ -26,7 +26,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 
 ## Call path
 
-1. The agent calls `browse` with `_channel` (schema const = connection UUID).
+1. The agent calls `browse`. Hook authority: with `_channel` (schema const = connection UUID). Connection authority: the schema has no `_channel`; step 3 stamps the gateway's own.
 2. Hook authority: `PreToolUse` → `src/hook/main.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure. Connection authority: no hook; step 3 refuses a `_lease` argument and takes the ticket itself.
 3. `src/mcp/main.mjs` → `gateway.execute` → (connection authority: `issue{sessionId: CONNECTION_CALLER, callId: fresh UUID}` over the gateway's hook-role connection) → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
 4. `src/companion/main.mjs` → `authority.consume(_lease, args)` → caller `{sessionId, callId, signal, assertLive}` → `BrowserHost.execute`.

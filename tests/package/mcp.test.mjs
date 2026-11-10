@@ -85,8 +85,8 @@ async function plainClient(t, context) {
   t.after(() => client.close());
   const descriptor = (await client.listTools()).tools.find(tool => tool.name === 'browse');
   assert.ok(descriptor);
-  const channel = descriptor.inputSchema.properties._channel.enum[0];
-  const call = args => client.callTool({ name: 'browse', arguments: { ...args, _channel: channel } });
+  const call = args => client.callTool({ name: 'browse', arguments: args });
+  const channel = dataOf(await call({ action: 'status' })).channel;
   return { client, descriptor, channel, call };
 }
 async function hook(env, payload) {
@@ -563,8 +563,9 @@ test('connection authority (plain MCP registration): no hooks or key on disk, ow
   const page = await fixture(t);
   const first = await plainClient(t, context);
   const instructions = first.client.getInstructions();
-  assert.ok(instructions && instructions.length <= 4096 && instructions.includes('_channel'), instructions);
+  assert.ok(instructions && instructions.length <= 4096 && !instructions.includes('_channel'), instructions);
   assert.equal(Object.hasOwn(first.descriptor.inputSchema.properties, '_lease'), false);
+  assert.equal(Object.hasOwn(first.descriptor.inputSchema.properties, '_channel'), false);
   const status = dataOf(await first.call({ action: 'status' }));
   assert.equal(status.tabCount, 0);
   assert.equal(status.capabilities.delegation.mode, 'delegated');
@@ -579,8 +580,9 @@ test('connection authority (plain MCP registration): no hooks or key on disk, ow
   const forged = await first.call({ action: 'click', tabId, ref: count, _lease: 'model-supplied' });
   assert.equal(forged.isError, true);
   assert.match(textOf(forged), /^not-executed click e\d+ tab=t\d+ code=INVALID_ARGUMENT dispatched=false\n/);
-  const replaced = await first.client.callTool({ name: 'browse', arguments: { action: 'click', tabId, ref: count, _channel: randomUUID() } });
-  assert.equal(replaced.isError, true, 'a call for another channel is refused');
+  // A host that kept the schema of an earlier server process still sends that process's _channel.
+  const kept = await first.call({ action: 'list_tabs', _channel: randomUUID() });
+  assert.deepEqual(dataOf(kept).tabs.map(tab => tab.tabId), [tabId], 'the connection is the caller, whatever _channel arrives');
   const clicked = await first.call({ action: 'click', tabId, ref: count });
   assert.equal(clicked.isError, false, textOf(clicked));
   await until(() => page.state.count === 1, 'exactly one local HTTP side effect from one click');
@@ -593,6 +595,8 @@ test('connection authority (plain MCP registration): no hooks or key on disk, ow
   // Another registration session is another connection: its own companion, tabs and profile.
   const second = await plainClient(t, context);
   assert.notEqual(second.channel, first.channel);
+  assert.deepEqual(second.descriptor, first.descriptor, 'the schema names no connection: a host may keep it across a server restart');
+  assert.equal(second.client.getInstructions(), instructions);
   assert.deepEqual(dataOf(await second.call({ action: 'list_tabs' })).tabs, []);
   const foreign = await second.call({ action: 'click', tabId, ref: count });
   assert.equal(foreign.isError, true, textOf(foreign));
