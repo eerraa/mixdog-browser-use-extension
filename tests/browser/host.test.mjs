@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -211,6 +212,169 @@ test('owned windows/profiles, foreign/late calls and closed IDs are isolated', a
   } finally { await host.close(); }
 });
 
+test('named browser sessions select storage without changing caller ownership or the default', async () => {
+  const { host, call, tabId, tab } = await setup();
+  try {
+    const created = await call({ action: 'create_session', name: ' 참조 계정 ' });
+    assert.deepEqual([created.sessionId, created.name, created.temporary, created.tabCount], ['ctx2', '참조 계정', true, 0]);
+    const first = await call({ action: 'open', sessionId: created.sessionId, url: 'http://127.0.0.1:8000/isolated' });
+    const temporary = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/isolated').webContents);
+    const second = await call({ action: 'open', sessionId: created.sessionId, url: 'http://127.0.0.1:8000/shared' });
+    const shared = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/shared').webContents);
+    const fallback = await call({ action: 'open', url: 'http://127.0.0.1:8000/default' });
+    assert.notEqual(temporary.profile, tab.profile);
+    assert.equal(temporary.profile, shared.profile);
+    assert.match(temporary.profile.partition, /^independent-session-/);
+    assert.equal(temporary.profile.directory, '');
+    assert.equal(fallback.sessionId, 'ctx1');
+    assert.deepEqual([first.sessionId, second.sessionId, first.sessionName], ['ctx2', 'ctx2', '참조 계정']);
+    temporary.toolbarAction('ready');
+    assert.deepEqual(temporary.toolbarState().browserSession, { id: 'ctx2', name: '참조 계정', temporary: true });
+    assert.match(temporary.frame.title, /참조 계정 \(ctx2\)/);
+    assert.match(rendered(first), /session=ctx2 name="참조 계정"/);
+    const list = await call({ action: 'list_sessions' });
+    assert.deepEqual(list.sessions.map(p => [p.sessionId, p.name, p.tabCount]), [['ctx1', 'Default', 2], ['ctx2', '참조 계정', 2]]);
+    const tabs = (await call({ action: 'list_tabs' })).tabs;
+    assert.deepEqual(tabs.map(p => p.sessionId), ['ctx1', 'ctx2', 'ctx2', 'ctx1']);
+    assert.equal(tabs.find(p => p.tabId === tabId).sessionName, 'Default');
+    const stranger = caller('two');
+    await assert.rejects(host.execute({ action: 'open', sessionId: 'ctx2', url: 'http://127.0.0.1:8000/' }, stranger), { code: 'FOREIGN_SESSION' });
+    await assert.rejects(host.execute({ action: 'close_session', sessionId: 'ctx2' }, stranger), { code: 'FOREIGN_SESSION' });
+    await assert.rejects(host.execute({ action: 'observe', tabId: first.tabId }, stranger), { code: 'FOREIGN_TAB' });
+    assert.ok(!(await host.execute({ action: 'list_sessions' }, stranger)).sessions.some(p => p.sessionId === 'ctx2'));
+    await assert.rejects(call({ action: 'close_session', sessionId: 'ctx1' }), { code: 'DEFAULT_SESSION' });
+    await call({ action: 'close_tab', tabId: first.tabId });
+    await call({ action: 'close_tab', tabId: second.tabId });
+    assert.equal((await call({ action: 'list_sessions' })).sessions.find(p => p.sessionId === 'ctx2').tabCount, 0);
+  } finally { await host.close(); }
+});
+
+test('closing a temporary session clears only its storage, windows and pending downloads', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const item = () => Object.assign(new EventEmitter(), {
+    cancelled: 0, getFilename: () => 'fixture.txt', setSavePath() {}, getTotalBytes: () => 10,
+    getReceivedBytes: () => 0, cancel() { this.cancelled++; },
+  });
+  try {
+    const session = await call({ action: 'create_session' });
+    const opened = await call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/temporary' });
+    const temporary = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/temporary').webContents);
+    const ownDownload = item(), defaultDownload = item();
+    temporary.profile.emit('will-download', { preventDefault() {} }, ownDownload, temporary.contents);
+    tab.profile.emit('will-download', { preventDefault() {} }, defaultDownload, tab.contents);
+    const closed = await call({ action: 'close_session', sessionId: session.sessionId });
+    assert.deepEqual([closed.state, closed.cleanupComplete, closed.closedTabIds], ['closed', true, [opened.tabId]]);
+    assert.equal(ownDownload.cancelled, 1);
+    assert.equal(defaultDownload.cancelled, 0);
+    assert.equal(temporary.contents.isDestroyed(), true);
+    assert.equal(tab.contents.isDestroyed(), false);
+    assert.deepEqual(temporary.profile.cleanup, ['clearData', 'clearAuthCache', 'clearCodeCaches', 'clearHostResolverCache', 'closeAllConnections']);
+    assert.deepEqual(tab.profile.cleanup, []);
+    assert.deepEqual(await call({ action: 'close_session', sessionId: session.sessionId }), closed, 'ending is idempotent, never replays cleanup');
+    assert.equal(ownDownload.cancelled, 1);
+    await assert.rejects(call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/' }), { code: 'CLOSED_SESSION' });
+    assert.equal((await call({ action: 'observe', tabId })).sessionId, 'ctx1');
+  } finally { await host.close(); }
+});
+
+test('temporary session creation and opening cannot bypass Stop or handoff; closing cannot erase a pause', async () => {
+  const { host, call, tabId, tab } = await setup();
+  try {
+    const session = await call({ action: 'create_session' });
+    const opened = await call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/manual' });
+    const temporary = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/manual').webContents);
+    tab.frame.menu.items.find(item => item.label === 'Stop automation').click();
+    for (const args of [{ action: 'create_session' }, { action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/' }]) {
+      await assert.rejects(call(args), { code: 'AUTOMATION_PAUSED', requestedInputDispatched: false });
+    }
+    assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === tabId).paused, 'explicit-stop');
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await call({ action: 'handoff', tabId: opened.tabId });
+    await assert.rejects(call({ action: 'create_session' }), { code: 'AUTOMATION_PAUSED' });
+    await assert.rejects(call({ action: 'close_session', sessionId: session.sessionId }), { code: 'AUTOMATION_PAUSED' });
+    await assert.rejects(call({ action: 'observe', tabId: opened.tabId }), { code: 'PRIVATE_HANDOFF' });
+    await temporary.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await call({ action: 'observe', tabId: opened.tabId })).sessionId, session.sessionId);
+    assert.equal((await call({ action: 'close_session', sessionId: session.sessionId })).cleanupComplete, true);
+  } finally { await host.close(); }
+});
+
+test('permission denial remains terminal after creating and closing a browser session', async () => {
+  const { host, call, tabId, tab } = await setup({ policy: delegatedPolicy() });
+  const responses = [];
+  const request = current => current.profile.permissionRequest(current.contents, 'geolocation', value => responses.push(value),
+    { isMainFrame: true, requestingUrl: current.contents.mainFrame.url });
+  try {
+    request(tab);
+    const [pending] = (await call({ action: 'requests', tabId })).pending;
+    await call({ action: 'respond', tabId, requestRef: pending.requestRef, response: { cancel: true } });
+    await tick();
+    assert.deepEqual(responses, [false]);
+    const session = await call({ action: 'create_session' });
+    const opened = await call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/denied' });
+    const temporary = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/denied').webContents);
+    request(temporary);
+    await tick();
+    assert.deepEqual(responses, [false, false]);
+    assert.deepEqual((await call({ action: 'requests', tabId: opened.tabId })).pending, []);
+    await call({ action: 'close_session', sessionId: session.sessionId });
+    request(tab);
+    await tick();
+    assert.deepEqual(responses, [false, false, false]);
+  } finally { await host.close(); }
+});
+
+test('session close fences pending page startup and new opens without touching the default', async () => {
+  const { host, call, tab } = await setup();
+  const started = deferred(), gate = deferred(), start = FrameDriver.prototype.start;
+  let result;
+  try {
+    const session = await call({ action: 'create_session' });
+    FrameDriver.prototype.start = async function() { await start.call(this); started.resolve(this.page); await gate.promise; };
+    result = call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/never-navigate' });
+    const refused = assert.rejects(result, error => ['CLOSED_TAB', 'CLOSED_SESSION'].includes(error.code));
+    const page = await started.promise;
+    const close = await call({ action: 'close_session', sessionId: session.sessionId });
+    assert.equal(close.cleanupComplete, true);
+    assert.equal(page.contents.isDestroyed(), true);
+    assert.equal(page.contents.getURL(), 'about:blank');
+    assert.equal(tab.contents.isDestroyed(), false);
+    gate.resolve();
+    await refused;
+    await assert.rejects(call({ action: 'open', sessionId: session.sessionId, url: 'http://127.0.0.1:8000/' }), { code: 'CLOSED_SESSION' });
+  } finally { gate.resolve(); FrameDriver.prototype.start = start; await result?.catch(() => {}); await host.close(); }
+});
+
+test('session cleanup reports failures, runs remaining stages and never reuses a closed partition', async () => {
+  const { host, call, tab } = await setup();
+  try {
+    const created = await call({ action: 'create_session', name: 'Repeated name' });
+    const profile = profiles.at(-1);
+    profile.clearData = async () => { throw new Error('fixture cleanup failure'); };
+    const closed = await call({ action: 'close_session', sessionId: created.sessionId });
+    assert.deepEqual([closed.disposition, closed.cleanupComplete, closed.code, closed.state], ['failed', false, 'SESSION_CLEANUP_FAILED', 'cleanup-failed']);
+    assert.deepEqual(closed.failures.map(f => f.stage), ['data']);
+    assert.ok(profile.cleanup.includes('closeAllConnections'));
+    assert.ok((await call({ action: 'list_sessions' })).sessions.some(p => p.sessionId === created.sessionId && p.state === 'cleanup-failed'));
+    await assert.rejects(call({ action: 'open', sessionId: created.sessionId, url: 'http://127.0.0.1:8000/' }), { code: 'CLOSED_SESSION' });
+    const next = await call({ action: 'create_session', name: 'Repeated name' });
+    assert.notEqual(next.sessionId, created.sessionId);
+    assert.notEqual(profiles.at(-1).partition, profile.partition);
+    assert.deepEqual(tab.profile.cleanup, []);
+  } finally { await host.close(); }
+});
+
+test('temporary partition allocation stays bounded over the connection lifetime', async () => {
+  const { host, call } = await setup();
+  try {
+    for (let n = 0; n < 16; n++) {
+      const session = await call({ action: 'create_session' });
+      await call({ action: 'close_session', sessionId: session.sessionId });
+    }
+    await assert.rejects(call({ action: 'create_session' }), { code: 'SESSION_LIMIT', requestedInputDispatched: false });
+  } finally { await host.close(); }
+});
+
 test('request cancellation settles promptly but the next actual dispatch remains fenced exactly once', async () => {
   const { host, call, authority, tabId } = await setup();
   const started = deferred(), release = deferred();
@@ -227,7 +391,7 @@ test('request cancellation settles promptly but the next actual dispatch remains
     abort.abort(new Error('unit cancel'));
     const cancelled = await first;
     assert.deepEqual([cancelled.tabId, cancelled.disposition, cancelled.replaySafe, cancelled.code], [tabId, 'uncertain', false, 'ABORTED']);
-    assert.equal(rendered(cancelled), 'uncertain evaluate tab=t1 code=ABORTED replaySafe=false\n'
+    assert.equal(rendered(cancelled), 'uncertain evaluate tab=t1 code=ABORTED replaySafe=false session=ctx1 name="Default"\n'
       + 'note the input may have been delivered in part or in full; never repeat it; observe first');
     assert.equal(toolResult(cancelled, 'evaluate').isError, true);
     const second = call({ action: 'evaluate', tabId, expression: 'second' });
@@ -778,7 +942,7 @@ test('an acknowledged dispatch whose observation fails is executed observed:fals
     assert.deepEqual([result.disposition, result.observed, result.cause, result.replaySafe], ['executed', false, 'ROOT_UNAVAILABLE', false]);
     assert.equal(snapshots, 2, 'one read-only re-take');
     const text = rendered(result);
-    assert.match(text, /^executed navigate tab=t\d+ observed=false cause=ROOT_UNAVAILABLE replaySafe=false\n/);
+    assert.match(text, /^executed navigate tab=t\d+ observed=false cause=ROOT_UNAVAILABLE replaySafe=false session=ctx1 name="Default"\n/);
     assert.match(text, /never repeat it/);
     assert.equal(toolResult(result, 'navigate').isError, false);
     assert.equal(JSON.stringify(result).includes('DO_NOT_EXPORT_PRIVATE_ERROR_DETAILS'), false);
@@ -1086,7 +1250,7 @@ test('toolbar controls drive only the person-controlled live page and resume onl
   const state = async () => (await call({ action: 'list_tabs' })).tabs[0];
   const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
   try {
-    assert.equal(tab.frame.title, 'Unit fixture - Independent Browser');
+    assert.equal(tab.frame.title, 'Unit fixture - Independent Browser [Default (ctx1)]');
     tab.toolbarAction('ready');
     let shown = tab.toolbarState();
     assert.equal(shown.url, 'http://127.0.0.1:8000/');
@@ -1514,9 +1678,9 @@ test('DevTools reads are compact, gated like observe and answer while an action 
     await tick();
     assert.equal((await call({ action: 'list_tabs' })).tabs[0].busy, true);
     const consoleRows = await call({ action: 'console', tabId });
-    assert.deepEqual(consoleRows, { tabId, rows: [{ i: 1, lv: 'error', msg: 'load failure' }], next: 1 });
+    assert.deepEqual(consoleRows, { tabId, sessionId: 'ctx1', sessionName: 'Default', rows: [{ i: 1, lv: 'error', msg: 'load failure' }], next: 1 });
     const network = await call({ action: 'network', tabId });
-    assert.deepEqual(network, { tabId, rows: [{ id: 'n1', u: 'http://127.0.0.1:8000/api', ty: 'fetch', st: 'run' }], next: 1 });
+    assert.deepEqual(network, { tabId, sessionId: 'ctx1', sessionName: 'Default', rows: [{ id: 'n1', u: 'http://127.0.0.1:8000/api', ty: 'fetch', st: 'run' }], next: 1 });
     const detail = await call({ action: 'network', tabId, id: 'n1' });
     assert.equal(detail.reqHeaders.Cookie, '[redacted]');
     for (const result of [consoleRows, network, detail]) {
@@ -1583,7 +1747,7 @@ test('human DevTools open only in native handoff, close before the trusted retur
     assert.equal(tab.contents.isDevToolsOpened(), false);
     assert.deepEqual(openAtCapture, [false], 'DevTools closed before the trusted return observation');
     assert.equal(item().enabled, false);
-    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0, withheld: 1 });
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, sessionId: 'ctx1', sessionName: 'Default', next: 0, withheld: 1 });
     assert.deepEqual((await call({ action: 'network', tabId })).rows, [{ id: 'n1', u: 'http://127.0.0.1:8000/slow', ty: 'fetch', st: 'incomplete' }]);
     await assert.rejects(call({ action: 'network', tabId, id: 'n1', body: true }), error => error.code === 'BODY_UNAVAILABLE');
     // DevTools appearing outside native handoff is human input past the shield.
@@ -1645,7 +1809,7 @@ test('page-world reads are refused during an explicit Stop; buffer reads still a
   try {
     tab.frame.menu.items.find(entry => entry.label === 'Stop automation').click();
     await assert.rejects(call({ action: 'console', tabId, expression: '1' }), error => error.code === 'AUTOMATION_PAUSED');
-    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0 });
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, sessionId: 'ctx1', sessionName: 'Default', next: 0 });
   } finally {
     await host.close();
   }
@@ -1696,13 +1860,13 @@ test('results are text: open shows the page, actions show their diff, refs survi
   send = async (method, params) => { if (method === 'Input.dispatchMouseEvent') presses.push(params.type); return {}; };
   try {
     const observed = rendered(await call({ action: 'observe', tabId }));
-    assert.match(observed, /^observed observe tab=t\d+ snap=s\d+\npage "Unit fixture" http:\/\/127\.0\.0\.1:8000\/\nview 100x80 scroll 0\/80\n/);
+    assert.match(observed, /^observed observe tab=t\d+ snap=s\d+ session=ctx1 name="Default"\npage "Unit fixture" http:\/\/127\.0\.0\.1:8000\/\nview 100x80 scroll 0\/80\n/);
     const a = refIn(observed, 'button "Delete A"'), b = refIn(observed, 'button "Delete B"');
     assert.match(observed, /\ntext "Unit fixture"/);
     page.nodes.push(button(3, 'Unrelated'));
     const clicked = await call({ action: 'click', tabId, ref: b });
     const text = rendered(clicked);
-    assert.match(text, new RegExp(`^executed click ${b} tab=t\\d+ snap=s\\d+\\ndiff s\\d+→s\\d+ \\+1 ~0 -0\\n\\+ e\\d+ button "Unrelated"$`));
+    assert.match(text, new RegExp(`^executed click ${b} tab=t\\d+ snap=s\\d+ session=ctx1 name="Default"\\ndiff s\\d+→s\\d+ \\+1 ~0 -0\\n\\+ e\\d+ button "Unrelated"$`));
     assert.deepEqual(presses, ['mousePressed', 'mouseReleased']);
     assert.equal(rendered(await call({ action: 'click', tabId, ref: b })).split('\n')[1], `no change since ${clicked.snapshotId}`);
     // A removed node's ref fails before any input; no fallback to the other "Delete".
@@ -1851,7 +2015,7 @@ test('body and performance reads behind a modal dialog are refused first, like t
       assert.equal(toolResult(result, args.action).isError, true);
       assert.equal(JSON.parse(toolResult(result, args.action).content[0].text).dialog.type, 'alert');
     }
-    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, next: 0 }, 'buffer reads still answer');
+    assert.deepEqual(await call({ action: 'console', tabId }), { tabId, sessionId: 'ctx1', sessionName: 'Default', next: 0 }, 'buffer reads still answer');
   } finally { native.close(); await host.close(); }
 });
 
@@ -2217,7 +2381,7 @@ test('run executes a script through the same pipeline; steps keep the agent view
     assert.deepEqual([report.status, report.disposition, report.replaySafe], ['ok', 'executed', false], report.text);
     assert.deepEqual(presses, ['mousePressed', 'mouseReleased']);
     const text = toolResult(report, 'run').content[0].text;
-    assert.match(text, /^executed run tab=t\d+ replaySafe=false\nrun ok 2 steps \d+ ms\n1 observed find t\d+ "Save" \d+ms\n2 executed click t\d+ button "Save" \d+ms\nreturn 2\n-- t\d+\n/);
+    assert.match(text, /^executed run tab=t\d+ replaySafe=false session=ctx1 name="Default"\nrun ok 2 steps \d+ ms\n1 observed find t\d+ "Save" \d+ms\n2 executed click t\d+ button "Save" \d+ms\nreturn 2\n-- t\d+\n/);
     assert.match(text, new RegExp(`\\ndiff ${seen.snapshotId}→s\\d+ \\+1 ~0 -0\\n\\+ e\\d+ button "Saved"`), 'the final diff covers the whole run');
     await assert.rejects(call({ action: 'run', script: ' ' }), error => error.code === 'INVALID_ARGUMENT');
   } finally { send = async () => ({}); page.nodes = []; await host.close(); }

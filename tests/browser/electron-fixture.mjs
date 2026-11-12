@@ -146,6 +146,11 @@ export const ipcMain = { handle() {}, removeHandler() {} };
 export const dialog = { showMessageBox: async () => { throw new Error('Human prompts must not run in unit tests'); } };
 export const webContents = { fromFrame: frame => frame.owner };
 export const session = {
+  fromPartition(partition) {
+    const s = session.fromPath('');
+    s.partition = partition;
+    return s;
+  },
   fromPath(directory) {
     const s = new EventEmitter();
     s.directory = directory;
@@ -153,6 +158,10 @@ export const session = {
     s.setPermissionRequestHandler = handler => { s.permissionRequest = handler; };
     s.setDevicePermissionHandler = handler => { s.devicePermission = handler; };
     s.setDisplayMediaRequestHandler = handler => { s.displayMedia = handler; };
+    s.cleanup = [];
+    for (const method of ['clearData', 'clearAuthCache', 'clearCodeCaches', 'clearHostResolverCache', 'closeAllConnections']) {
+      s[method] = async () => { s.cleanup.push(method); };
+    }
     profiles.push(s);
     return s;
   },

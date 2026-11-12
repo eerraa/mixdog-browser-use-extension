@@ -89,7 +89,8 @@ Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` →
 
 | Concern | Hook | File |
 | --- | --- | --- |
-| Page creation | `WebContentsView` with `session.fromPath(profiles/<hash>)` | `host.mjs #createPage`, `#profile` |
+| Page creation | `WebContentsView` with the caller's default `session.fromPath(profiles/<hash>)` or an owned temporary `session.fromPartition` | `host.mjs #createPage`, `#profile`, `#newProfile` |
+| Temporary session cleanup | `clearData`, `clearAuthCache`, `clearCodeCaches`, `clearHostResolverCache`, `closeAllConnections` after its contents are destroyed | `host.mjs #disposeSession` |
 | Popups | `setWindowOpenHandler` → `createWindow` adopts Chromium's contents | `host.mjs #registerPage` |
 | Navigation guard | page `will-frame-navigate` → `pageURL`; chrome documents block all navigation | `host.mjs`, `presentation.mjs` |
 | Downloads | `will-download` → `downloads/<hash>/<uuid>-<name>` | `host.mjs #profile` |
@@ -109,6 +110,7 @@ Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` →
 `{ id (t<n>), owner (sessionId), profile, view, contents, presentation, frame, driver, devtools (DevToolsRecorder), devtoolsMenuItem, devtoolsOpening, devtoolsShown, paused (reason or null), actorGeneration (the presentation generation an admitted lane operation runs under; input admission checks it), privateSince (start of a handoff, for privatize at return), model (latest composed model), base (the agent's last view: lines, refs, snapshotId, root document, generation, scroll; the next diff base), shot (latest screenshot-bearing snapshot for points), cursor (DevTools signal cursor), dialog, downloads[], connected, visible, ready, manualFlight, returnController, settleInterrupt, onTrustedInput }`
 
 - Connection-wide: `#refs` (`RefRegistry`), `#signals` (`SignalQueue`), `t<n>` and `s<n>` sequences.
+- Browser sessions: `#profiles` caches each caller's default initialization; `#sessions` maps connection-local `ctx<n>` ids to `{id, owner, name, temporary, state, ready, browserSession, downloadDir, downloads, devtoolsPrivacy, closeFlight}`. `owner` is authenticated caller identity; it is independent of the public browser session id. `#newProfile` allocates once; `#selectedSession` checks ownership; `#disposeSession` retires the profile before cleanup. Limits and behavior: `contracts.md` Browser sessions.
 - Script runs: one sandbox window per run (below); `RunnerBridge` per run; steps carry `keepSignals` so they neither drain signals nor move `base`.
 - `#invalidate(p, reason)` on every page change; it also runs `#devtoolsMode`. Refs retire by evidence (walker `gone`/`renamed`, document replacement, `generation`), not by invalidation. That updates privacy windows (`boundary()` on every page of the profile; `profile.devtoolsPrivacy` covers service and shared workers), syncs the DevTools menu item with the mode, and closes human DevTools outside `native-handoff`. `#handoff` (after `enterNative`) and `#resume` (after `finishReturn`) call it too.
 - DevTools reads: `execute` → `#devtoolsRead` (console, network, performance; outside the lane) or `#run` → `#inspect` (lane).
@@ -128,6 +130,7 @@ BrowserWindow "frame"  default 1120×820; its own webContents is the toolbar (da
 - Toolbar actions: `ready`, `back`, `forward`, `reload`, `stop-loading`, `navigate`, `take-control`, `resume`, `stop-automation`.
 - Native menu (`consent.mjs installPageMenu`): Stop automation, Resume automation, Human handoff, Accept and Dismiss pending page dialog, Open DevTools (while you have control), Revoke permissions and close connection.
 - Locale: `app.getLocale()` starting with `ko` selects `STRINGS.ko`, otherwise `STRINGS.en`.
+- Session identity: the host passes `{id, name, temporary}` as `browserSession`; toolbar state/preload render `name (ctx<n>)` through `textContent`, and the window title appends the same label. Page code cannot change that trusted session label.
 
 ## Data layout
 
@@ -137,8 +140,10 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 | --- | --- | --- |
 | `connections/<channel>/endpoint.json` | `{channel, key, pipe, protocol:1}`; hook authority only | removed on clean MCP close |
 | `connections/<channel>/electron/` | Electron userData | kept |
-| `connections/<channel>/profiles/<sha256(sessionId)>/` | Chromium profile per caller session | kept; never reused by a new connection |
-| `connections/<channel>/downloads/<sha256(sessionId)>/` | `<uuid>-<sanitized name>` | kept |
+| `connections/<channel>/profiles/<sha256(callerId)>/` | Default Chromium profile per authenticated caller | kept; never reused by a new connection |
+| memory-only `independent-session-<uuid>` partition | Temporary browser session's Chromium storage | cleared on session close/connection end; partition object lives until companion exit |
+| `connections/<channel>/downloads/<sha256(callerId)>/` | Default session's `<uuid>-<sanitized name>` | kept |
+| `connections/<channel>/downloads/<sha256(callerId + NUL + ctxId)>/` | Temporary session's downloaded files | kept; pending downloads cancelled on session close |
 
 ## Package layout
 

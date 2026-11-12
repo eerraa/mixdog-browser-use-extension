@@ -16,6 +16,7 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 | 범위 | action |
 | --- | --- |
 | 페이지·탭 | `open`, `navigate`, `list_tabs`, `close_tab` |
+| 로그인 상태가 분리된 세션 | `create_session`, `list_sessions`, `close_session` |
 | 관측·읽기 | `observe`, `read`, `evaluate` |
 | 개발자 도구(디버깅) | `console`, `network`, `inspect`, `performance` |
 | 입력·폼 | `click`, `fill`, `type`, `press`, `select`, `scroll` |
@@ -35,7 +36,7 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 네트워크에 닿지 못하며, 한 실행이 끝나면 그 창의 저장 데이터는 지워집니다. 스크립트의 한
 단계가 연 대화상자나 파일 선택 요청은 실행이 끝난 뒤에도 남아 에이전트가 이어서 답할 수 있습니다.
 
-페이지 결과는 짧은 텍스트입니다. 첫 줄은 처리 결과(`executed click e7 tab=t1 snap=s8`),
+페이지 결과는 짧은 텍스트입니다. 첫 줄은 처리 결과(`executed click e7 tab=t1 snap=s8 session=ctx1 name="Default"`),
 그 다음은 새 알림(이동·팝업·다운로드·대화상자·대기 중 요청·콘솔 오류 수 등), 그리고 화면에
 보이는 요소 목록입니다. 요소마다 `e<n>` 참조가 붙고, 참조는 그 요소가 바뀌지 않는 한 계속
 쓸 수 있습니다. 클릭·입력 같은 동작은 화면 전체 대신 바뀐 내용만 돌려주며, 알림·상태 메시지·
@@ -48,7 +49,7 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 그 서버로 전송될 수 있어 파일에 접근하기 전에 거부합니다. 화면 이미지는 `screenshot:true`로
 요청할 때만 붙습니다.
 탭은 `t<n>`, iframe은 그 iframe 요소의 참조로 가리킵니다.
-`status`·`list_tabs`·`requests`·`respond`·`permissions`·`downloads`·`revoke`와
+`status`·`list_tabs`·`create_session`·`list_sessions`·`close_session`·`requests`·`respond`·`permissions`·`downloads`·`revoke`와
 개발자 도구 action은 짧은 JSON으로 답합니다.
 
 개발자 도구 action은 Chrome 개발자 도구 화면을 조작하지 않고 페이지의 콘솔 메시지·오류,
@@ -60,7 +61,7 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 어려운 이름의 비밀 값이나 HTML 본문은 그대로 보일 수 있습니다. 쿠키·저장소 값을 읽는 API는
 쓰지 않습니다. 기록은 페이지당 정해진 개수(콘솔 500개, 네트워크 1000개)까지만 유지합니다.
 사용자가 직접 조작하는 동안 생긴 콘솔·네트워크 기록은 저장하지도 에이전트에게 보여주지도
-않습니다. 같은 연결의 창 하나라도 직접 조작 중이면, 여러 창이 함께 쓰는 서비스 워커의
+않습니다. 같은 브라우저 세션의 창 하나라도 직접 조작 중이면, 여러 창이 함께 쓰는 서비스 워커의
 기록도 모든 창에서 제외합니다.
 `console`의 `expression`은 페이지 자체 JavaScript 전역 값을 읽는 기능입니다. 값을 바꾸는
 코드는 거부하려고 하지만 완전한 보호 장치는 아니며, 결과는 페이지가 알려 주는 값입니다.
@@ -125,8 +126,33 @@ claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_D
 - Claude Code는 긴 MCP 결과를 줄이거나 파일로 넘기므로 큰 페이지는 `mode:"full"`보다
   `find`·`scope`로 읽습니다.
 
+`create_session`으로 기존 계정의 로그인 상태를 유지하면서 쿠키가 비어 있는 임시 세션을
+만들 수 있습니다. `sessionId`는 브라우저 저장소 선택용이며 호출자 인증 정보를 바꾸지 않습니다.
+
+```javascript
+browse({ action: "create_session", name: "참조 계정" }); // 반환 sessionId를 사용
+browse({ action: "open", sessionId: "ctx2", url: "https://account.apple.com/" });
+browse({ action: "handoff", tabId: "t2" }); // 반환된 실제 tabId 사용; 로그인은 사람이 처리
+browse({ action: "list_sessions" });
+browse({ action: "list_tabs" });
+// 사람이 제어권을 돌려준 뒤 필요한 비교를 마치고 종료
+browse({ action: "close_session", sessionId: "ctx2" });
+```
+
+`open`에서 `sessionId`를 생략하면 기존 기본 세션을 씁니다. 같은 세션의 탭들은 로그인을
+공유하고, 서로 다른 세션의 쿠키·localStorage·IndexedDB·서비스 워커·Cache Storage·HTTP 캐시는
+분리됩니다. 창 제목과 툴바, 탭 목록과 각 탭의 결과에 세션 이름과 ID가 표시됩니다.
+임시 세션은 마지막 탭을 닫아도 연결 안에 남으며, `close_session`이나 연결 종료 시 저장소와
+인증·캐시·연결을 정리합니다. 기본 세션은 `close_session`으로 종료할 수 없습니다. 내려받은
+파일은 남고, 종료하는 세션의 진행 중인 다운로드만 취소됩니다. 정리 실패는
+`cleanupComplete:false`와 `SESSION_CLEANUP_FAILED`로 알려 주며 그 세션은 다시 열 수 없습니다.
+한 호출자가 연결 하나에서 만들 수 있는 임시 세션은 종료한 것을 포함해 16개이고, 열린 탭은
+모든 세션을 합쳐 32개까지입니다. 사람이 중지하거나 직접 조작 중인 탭이 있으면 임시 세션
+생성·새 탭 열기를 거부합니다. 해당 세션 안에 그런 탭이 있으면 종료도 거부하므로 먼저
+사람이 창에서 재개·제어권 반환을 해야 합니다. 권한 거부 기록은 세션을 새로 만들어도 유지됩니다.
+
 각 페이지는 일반 브라우저처럼 주소창, 뒤로·앞으로, 새로고침(로딩 중에는 중지)과
-현재 제어 상태 표시가 있는 창 하나로 열리며, 창 제목은 페이지 제목을 따릅니다.
+현재 제어 상태 표시가 있는 창 하나로 열리며, 창 제목에는 페이지 제목과 세션 이름·ID가 표시됩니다.
 에이전트가 창을 열거나 조작해도 창이 포커스를 가져가지 않으므로, 다른 앱에서 치던 키가
 브라우저 창으로 새지 않습니다. 에이전트가 사람에게 넘길 때(`handoff`)는 작업 표시줄에서
 창이 깜박이기만 하며, 사용자가 창을 클릭해 이어서 조작합니다.

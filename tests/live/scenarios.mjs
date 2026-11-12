@@ -391,7 +391,8 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       let current = await ui(s => s.tone === 'agent' && s.address === first);
       assert.deepEqual(current, { address: first, readOnly: true, back: true, forward: true, reload: true,
         tone: 'agent', primary: 'take-control', secondary: 'stop-automation' });
-      assert.equal(toolbarFrame.getTitle(), 'Toolbar fixture A - Independent Browser');
+      assert.equal(toolbarFrame.getTitle(), `Toolbar fixture A - Independent Browser [${opened.sessionName} (${opened.sessionId})]`);
+      assert.equal(await toolbar.executeJavaScript("document.getElementById('session').textContent"), `${opened.sessionName} (${opened.sessionId})`);
       assertShielded(page, 'toolbar fixture page');
       // 2. Take control from the toolbar: native handoff on the same page.
       toolbarFrame.focus();

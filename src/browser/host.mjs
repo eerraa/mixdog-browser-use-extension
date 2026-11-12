@@ -39,17 +39,21 @@ const NATIVE_REQUEST_ACK_GRACE_MS = 300;
 const MIN_POINT_OPACITY = 0.1;
 // Open tabs per session at which `open` is refused (pages' own popups still open).
 const MAX_SESSION_TABS = 32;
+// Electron retains partition objects until process exit; bound lifetime allocation.
+const MAX_TEMPORARY_SESSIONS = 16;
 const clipText = (value, max) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
 /**
  * Electron-main only. Construct AFTER app.ready, one host per MCP companion
- * connection. No model-supplied session IDs are accepted in the action object.
+ * connection. Browser session ids select owned profiles, never caller authority.
  * onRevokeConnection({connectionId, disposition, confirmed:false}) must request
  * companion termination; ONLY its parent gateway can confirm exit/revocation.
  */
 export class BrowserHost {
   #pages = new Map();
   #profiles = new Map();
+  #sessions = new Map();
+  #sessionSequence = 0;
   #queue = new FenceQueue();
   #closed = false;
   #revoking = false;
@@ -94,6 +98,7 @@ export class BrowserHost {
       connectionId: this.connectionId, tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
       capabilities: {
+        sessions: { temporary: true, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
         nativeRequests: ['javascript-dialog', 'file-picker', 'hid', 'usb', 'notifications', 'geolocation'],
         javascriptDialogs: {
           supported: ['alert', 'confirm'],
@@ -125,6 +130,7 @@ export class BrowserHost {
     const p = this.#pages.get(tabId);
     if (!p || p.closed || p.contents.isDestroyed()) fail('CLOSED_TAB', 'Unknown or closed tab');
     if (p.owner !== caller.sessionId) fail('FOREIGN_TAB', 'Tab is owned by another session');
+    if (p.profile.state !== 'open') fail('CLOSED_SESSION', 'Browser session is closing or closed');
     if (input && p.paused) fail('AUTOMATION_PAUSED', `Automation paused: ${p.paused}; only the person can resume it from the browser window`, { paused: p.paused });
     if (input && !p.visible) fail('PAGE_HIDDEN', 'Page is hidden; show and observe before input');
     if (input && !p.connected && !allowDisconnected) fail('DEBUGGER_DISCONNECTED', 'Browser disconnected; observe or explicitly navigate before new input');
@@ -432,21 +438,56 @@ export class BrowserHost {
     return real;
   }
 
-  async #profile(owner) {
-    const key = hash(owner);
-    if (this.#profiles.has(key)) return this.#profiles.get(key);
-    const pending = (async () => {
-      const directory = path.join(this.dataDir, 'profiles', key);
+  #sessionInfo(profile) {
+    return { sessionId: profile.id, name: profile.name, temporary: profile.temporary,
+      isolated: true, isDefault: !profile.temporary, state: profile.state,
+      tabCount: this.#profilePages({ profile }).length };
+  }
+  #assertSessionCreation(caller, signal) {
+    this.#assertCaller(caller, signal);
+    const blocked = [...this.#pages.values()].find(p => !p.closed && p.owner === caller.sessionId
+      && (p.paused || p.presentation.mode !== 'automation'));
+    if (blocked) fail('AUTOMATION_PAUSED', 'A tab is paused or under human control; only the person can resume it before creating or opening a temporary session',
+      { tabId: blocked.id, paused: blocked.paused });
+  }
+  #selectedSession(owner, id) {
+    const profile = this.#sessions.get(id);
+    if (!profile) fail('CLOSED_SESSION', 'Unknown browser session');
+    if (profile.owner !== owner) fail('FOREIGN_SESSION', 'Browser session is owned by another caller');
+    return profile;
+  }
+  async #profile(owner, id) {
+    if (id !== undefined) {
+      const profile = this.#selectedSession(owner, id);
+      if (!['opening', 'open'].includes(profile.state)) fail('CLOSED_SESSION', 'Browser session is closing or closed');
+      await profile.ready;
+      if (profile.state !== 'open') fail('CLOSED_SESSION', 'Browser session closed during initialization');
+      return profile;
+    }
+    if (!this.#profiles.has(owner)) this.#profiles.set(owner, this.#newProfile(owner, false).ready);
+    return this.#profiles.get(owner);
+  }
+  #newProfile(owner, temporary, name) {
+    const id = `ctx${++this.#sessionSequence}`;
+    const key = temporary ? hash(`${owner}\0${id}`) : hash(owner);
+    const profile = { id, owner, name: name?.trim() ?? (temporary ? `Session ${id}` : 'Default'), temporary,
+      state: 'opening', downloads: new Set() };
+    this.#sessions.set(id, profile);
+    profile.ready = (async () => {
       const downloadDir = path.join(this.dataDir, 'downloads', key);
-      await mkdir(directory, { recursive: true });
+      const directory = path.join(this.dataDir, 'profiles', key);
+      if (!temporary) await mkdir(directory, { recursive: true });
       await mkdir(downloadDir, { recursive: true });
       // No existing profile, account, cookies, host settings or agents are copied.
-      const browserSession = session.fromPath(directory, { cache: true });
-      const profile = { browserSession, downloadDir };
+      const browserSession = temporary
+        ? session.fromPartition(`independent-session-${freshId()}`, { cache: true })
+        : session.fromPath(directory, { cache: true });
+      Object.assign(profile, { browserSession, downloadDir });
       this.permissions.install(browserSession);
       browserSession.on('will-download', (event, item, wc) => {
         const p = [...this.#pages.values()].find(page => !page.closed && page.contents === wc);
-        if (!p || this.#closed || this.#revoking) { event.preventDefault(); return; }
+        if (!p || profile.state !== 'open' || this.#closed || this.#revoking) { event.preventDefault(); return; }
+        profile.downloads.add(item);
         // Never trust a server filename as a path.
         const filename = path.basename(item.getFilename()).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120) || 'download';
         const target = path.join(downloadDir, `${freshId()}-${filename}`);
@@ -461,24 +502,67 @@ export class BrowserHost {
         }
         item.on('updated', (_e, state) => { entry.state = state; entry.receivedBytes = item.getReceivedBytes(); });
         item.once('done', (_e, state) => {
+          profile.downloads.delete(item);
           entry.state = state;
           entry.receivedBytes = item.getReceivedBytes();
           if (!hidden) this.#signal(p, { kind: 'download', id: entry.id, name: filename, state, bytes: entry.receivedBytes });
         });
       });
+      if (profile.state === 'opening') profile.state = 'open';
       return profile;
-    })();
-    this.#profiles.set(key, pending);
-    return pending;
+    })().catch(error => { if (profile.state === 'opening') profile.state = 'failed'; throw error; });
+    return profile;
   }
-  async #createPage(owner, signal) {
-    const profile = await this.#profile(owner);
-    signal.throwIfAborted();
-    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Connection closed before page creation');
+  #disposeSession(profile) {
+    if (profile.closeFlight) return profile.closeFlight;
+    // Fence admission synchronously, including opens still awaiting startup.
+    profile.state = 'closing';
+    const pages = this.#profilePages({ profile });
+    const closedTabIds = pages.map(p => p.id);
+    const failures = [];
+    const stage = async (name, operation) => {
+      try { await bounded(Promise.resolve().then(operation), 5000, `Session cleanup: ${name}`); }
+      catch (error) { failures.push({ stage: name, reason: error.message }); }
+    };
+    const destroyed = pages.map(p => stage(`tab ${p.id}`, async () => {
+      const done = p.contents.isDestroyed() ? Promise.resolve() : new Promise(resolve => p.contents.once('destroyed', resolve));
+      p.closedByAgent = true;
+      p.frame.destroy();
+      await done;
+    }));
+    profile.closeFlight = (async () => {
+      await Promise.all(destroyed);
+      await stage('initialization', () => profile.ready);
+      await Promise.all([...profile.downloads].map(item => stage('download', () => item.cancel())));
+      if (profile.browserSession) {
+        const ses = profile.browserSession;
+        await Promise.all([
+          stage('data', () => ses.clearData()), stage('auth', () => ses.clearAuthCache()),
+          stage('code cache', () => ses.clearCodeCaches({})), stage('DNS cache', () => ses.clearHostResolverCache()),
+        ]);
+        await stage('connections', () => ses.closeAllConnections());
+      }
+      profile.state = failures.length ? 'cleanup-failed' : 'closed';
+      return { disposition: failures.length ? 'failed' : 'executed', ...this.#sessionInfo(profile), closedTabIds,
+        cleanupComplete: failures.length === 0,
+        ...(failures.length ? { code: 'SESSION_CLEANUP_FAILED', replaySafe: false, failures } : {}) };
+    })();
+    return profile.closeFlight;
+  }
+  async #createPage(caller, signal, sessionId) {
+    const owner = caller.sessionId;
+    const profile = await this.#profile(owner, sessionId);
+    this.#assertCaller(caller, signal);
+    if (profile.state !== 'open') fail('CLOSED_SESSION', 'Browser session closed before page creation');
+    if (profile.temporary) this.#assertSessionCreation(caller, signal);
+    const open = [...this.#pages.values()].filter(q => q.owner === owner && !q.closed).length;
+    if (open >= MAX_SESSION_TABS) fail('TAB_LIMIT', `A caller has at most ${MAX_SESSION_TABS} open tabs across all browser sessions`);
     const view = new WebContentsView({ webPreferences: this.#guestPreferences(profile) });
     const p = this.#registerPage(owner, profile, view, null, { width: 1120, height: 820 });
     try {
       await bounded(p.ready, 20000, 'Browser page startup', signal);
+      this.#owned(p.id, caller, signal);
+      if (profile.temporary) this.#assertSessionCreation(caller, signal);
       return p;
     } catch (error) {
       if (!p.frame.isDestroyed()) p.frame.destroy();
@@ -532,7 +616,8 @@ export class BrowserHost {
       visibility: visible => {
         if (p.visible !== visible) { p.visible = visible; this.#invalidate(p, 'logical-visibility'); }
       },
-    }, { preloadPath: this.toolbarPreloadPath, actions: humanActions, ...size });
+    }, { preloadPath: this.toolbarPreloadPath, actions: humanActions,
+      browserSession: { id: profile.id, name: profile.name, temporary: profile.temporary }, ...size });
     p.frame = p.presentation.frame;
     const inheritedManual = parent && parent.presentation.mode !== 'automation';
     if (inheritedManual) { p.paused ||= 'inherited-native-handoff'; p.presentation.beginDrain(); }
@@ -590,9 +675,9 @@ export class BrowserHost {
     // view before returning its WebContents; never replace its initial document.
     wc.setWindowOpenHandler(details => {
       try { if (details.url !== 'about:blank') pageURL(details.url); } catch { return { action: 'deny' }; }
-      if (p.closed || this.#closed || this.#revoking) return { action: 'deny' };
+      if (p.closed || profile.state !== 'open' || this.#closed || this.#revoking) return { action: 'deny' };
       return { action: 'allow', outlivesOpener: false, createWindow: options => {
-        if (p.closed || this.#closed || this.#revoking) throw new Error('Popup owner closed before creation');
+        if (p.closed || profile.state !== 'open' || this.#closed || this.#revoking) throw new Error('Popup owner closed before creation');
         const popupView = new WebContentsView({ webContents: options.webContents });
         // Adopted contents do not inherit this preference; match owned pages.
         popupView.webContents.setBackgroundThrottling(false);
@@ -628,8 +713,10 @@ export class BrowserHost {
     p.ready = (async () => {
       if (!parent) await wc.loadURL('about:blank');
       await p.driver.start();
+      if (p.closed || parent?.closed || profile.state !== 'open') fail('CLOSED_TAB', 'Tab or browser session closed during startup');
+      if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Connection closed during startup');
       await p.presentation.start();
-      if (parent?.closed || this.#closed || this.#revoking) { p.frame.destroy(); return; }
+      if (parent?.closed || profile.state !== 'open' || this.#closed || this.#revoking) { p.frame.destroy(); return; }
     })().catch(error => { if (!p.frame.isDestroyed()) p.frame.destroy(); throw error; });
     if (parent) {
       p.ready.then(async () => {
@@ -678,7 +765,9 @@ export class BrowserHost {
    */
   async execute(unchecked, caller, requestSignal) {
     try {
-      return await this.#execute(validateArgs(unchecked), caller, requestSignal);
+      const result = await this.#execute(validateArgs(unchecked), caller, requestSignal);
+      const p = this.#pages.get(result.tabId ?? unchecked.tabId);
+      return p ? { ...result, sessionId: p.profile.id, sessionName: p.profile.name } : result;
     } catch (error) {
       // An input action (or run) that throws never dispatched: after a
       // dispatch, #run, respond, handle_dialog and run return a result
@@ -696,9 +785,38 @@ export class BrowserHost {
     const signal = requestSignal ? AbortSignal.any([caller.signal, requestSignal]) : caller.signal;
     if (args.action === 'status') return this.status();
     if (args.action === 'revoke') return this.#revoke();
+    if (args.action === 'create_session') {
+      this.#assertSessionCreation(caller, signal);
+      await this.#profile(caller.sessionId);
+      this.#assertSessionCreation(caller, signal);
+      if ([...this.#sessions.values()].filter(p => p.owner === caller.sessionId && p.temporary).length >= MAX_TEMPORARY_SESSIONS) {
+        fail('SESSION_LIMIT', `At most ${MAX_TEMPORARY_SESSIONS} temporary sessions may be created per caller in this connection`);
+      }
+      const profile = this.#newProfile(caller.sessionId, true, args.name);
+      try {
+        await profile.ready;
+        this.#assertSessionCreation(caller, signal);
+      } catch (error) { await this.#disposeSession(profile); throw error; }
+      return { disposition: 'executed', ...this.#sessionInfo(profile) };
+    }
+    if (args.action === 'list_sessions') {
+      await this.#profile(caller.sessionId);
+      this.#assertCaller(caller, signal);
+      return { sessions: [...this.#sessions.values()].filter(p => p.owner === caller.sessionId && p.state !== 'closed')
+        .map(p => this.#sessionInfo(p)) };
+    }
+    if (args.action === 'close_session') {
+      const profile = this.#selectedSession(caller.sessionId, args.sessionId);
+      if (!profile.temporary) fail('DEFAULT_SESSION', 'The default browser session stays for the connection; close its individual tabs instead');
+      if (!profile.closeFlight) {
+        const blocked = this.#profilePages({ profile }).find(p => p.paused || p.presentation.mode !== 'automation');
+        if (blocked) fail('AUTOMATION_PAUSED', 'Only the person can resume a paused or private tab before its browser session is closed', { tabId: blocked.id });
+      }
+      return this.#disposeSession(profile);
+    }
     if (args.action === 'list_tabs') return {
       tabs: [...this.#pages.values()].filter(p => p.owner === caller.sessionId && !p.closed).map(p => ({
-        tabId: p.id,
+        tabId: p.id, sessionId: p.profile.id, sessionName: p.profile.name,
         url: p.presentation.mode === 'automation' ? p.contents.getURL() : null,
         title: p.presentation.mode === 'automation' ? p.contents.getTitle() : null,
         mode: p.presentation.mode, generation: p.presentation.generation,
@@ -710,7 +828,7 @@ export class BrowserHost {
     if (args.action === 'open') {
       const open = [...this.#pages.values()].filter(q => q.owner === caller.sessionId && !q.closed).length;
       if (open >= MAX_SESSION_TABS) fail('TAB_LIMIT', `A session has at most ${MAX_SESSION_TABS} open tabs; close one first`);
-      p = await this.#createPage(caller.sessionId, signal);
+      p = await this.#createPage(caller, signal, args.sessionId);
       try { this.#owned(p.id, caller, signal); }
       catch (error) { p.frame.destroy(); throw error; }
     } else p = this.#owned(args.tabId, caller, signal, inputActions.has(args.action), args.action === 'navigate',
@@ -1652,5 +1770,6 @@ export class BrowserHost {
       if (!p.frame.isDestroyed()) p.frame.destroy();
     }
     this.dialogs.close();
+    await Promise.all([...this.#sessions.values()].filter(profile => profile.temporary).map(profile => this.#disposeSession(profile)));
   }
 }

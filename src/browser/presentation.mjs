@@ -96,6 +96,7 @@ border-radius:16px;background:var(--field);border:1px solid var(--line)}
 #chip{flex:none;padding:5px 10px;border-radius:12px;border:1px solid currentColor;font-size:12px;font-weight:600;white-space:nowrap}
 #chip[data-tone=agent]{color:var(--agent)}#chip[data-tone=user]{color:var(--user)}
 #chip[data-tone=wait]{color:var(--wait)}#chip[data-tone=stop]{color:var(--stop)}
+#session{flex:0 1 auto;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
 #primary{background:var(--agent);color:var(--on-accent)}
 #primary:hover:not(:disabled){background:var(--agent);filter:brightness(1.08)}
 #secondary{border-color:var(--line)}
@@ -111,7 +112,7 @@ ${button('reload', t.reload, `<svg id="reload-icon" viewBox="0 0 24 24" aria-hid
 <label id="omnibox"><span id="security" hidden>${icon('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>')}</span>
 <input id="address" aria-label="${escape(t.address)}" placeholder="${escape(t.addressHint)}" spellcheck="false" autocomplete="off" readonly>
 <span id="notice" role="alert"></span></label>
-<span id="chip" role="status"></span>
+<span id="session"></span><span id="chip" role="status"></span>
 <button id="primary" hidden></button><button id="secondary" hidden></button>
 </div><div id="progress"></div>`;
 }
@@ -140,11 +141,12 @@ body.blocked #message{padding:16px 22px;border-radius:12px;font-size:14px;text-a
  * can return control, from the toolbar or the native menu.
  */
 export class PagePresentation {
-  constructor(view, callbacks, { preloadPath, actions, width = 1120, height = 820, useContentSize = false }) {
+  constructor(view, callbacks, { preloadPath, actions, browserSession, width = 1120, height = 820, useContentSize = false }) {
     this.view = view;
     this.contents = view.webContents;
     this.callbacks = callbacks;
     this.actions = actions;
+    this.browserSession = browserSession;
     this.mode = 'automation';
     this.generation = 0;
     this.closed = false;
@@ -460,7 +462,8 @@ export class PagePresentation {
     if (this.closed || this.frame.isDestroyed() || this.contents.isDestroyed()) return;
     const title = this.contents.getTitle(), url = this.contents.getURL();
     const label = url === 'about:blank' ? '' : title && title !== url ? title : url;
-    this.frame.setTitle(label ? `${label} - ${APP_TITLE}` : APP_TITLE);
+    const sessionLabel = this.browserSession ? ` [${this.browserSession.name} (${this.browserSession.id})]` : '';
+    this.frame.setTitle((label ? `${label} - ${APP_TITLE}` : APP_TITLE) + sessionLabel);
     if (this.toolbarReady && !this.toolbar.isDestroyed()) this.toolbar.send(TOOLBAR_STATE, this.#state());
   }
   #state() {
@@ -474,6 +477,7 @@ export class PagePresentation {
           : paused ? [{ text: paused === 'explicit-stop' ? t.chipStopped : t.chipPaused, tone: 'stop', title: paused }, take, resume]
             : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, { text: t.stopAgent, action: 'stop-automation' }];
     return {
+      browserSession: this.browserSession,
       url: url === 'about:blank' ? '' : url, secure: url.startsWith('https:'),
       securityTitle: url.startsWith('https:') ? t.secure : t.insecure,
       editable: native, navigable: native, loading,

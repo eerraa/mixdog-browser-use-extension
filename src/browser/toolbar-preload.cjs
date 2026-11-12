@@ -21,6 +21,9 @@ window.addEventListener('DOMContentLoaded', () => {
   };
   const render = () => {
     if (!state) return;
+    const session = state.browserSession;
+    $('session').textContent = session ? `${session.name} (${session.id})` : '';
+    $('session').title = $('session').textContent;
     $('back').disabled = !state.canGoBack;
     $('forward').disabled = !state.canGoForward;
     $('reload').disabled = !state.navigable;

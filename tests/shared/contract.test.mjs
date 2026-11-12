@@ -6,7 +6,7 @@ test('strict action shapes exclude model authority and tool approval/resume alia
   for (const action of ['approve', 'resume', 'stop', 'new_tab', '__proto__']) {
     assert.throws(() => validateArgs({ action }), /Unknown browser action/);
   }
-  for (const field of ['sessionId', 'caller', 'callId', 'userGesture']) {
+  for (const field of ['caller', 'callId', 'userGesture']) {
     assert.throws(() => validateArgs({ action: 'open', url: 'https://example.invalid', [field]: 'forged' }), /Unexpected argument/);
   }
   assert.throws(() => validateArgs({ action: 'click', tabId: 'tab', ref: 'e1', target: { name: 'x' } }), /exactly one/);
@@ -22,6 +22,9 @@ test('every public action has a bounded explicit accepted argument shape', () =>
   const actions = [
     { action: 'status' }, { action: 'open', url: 'http://127.0.0.1:9000' },
     { action: 'open', url: 'http://127.0.0.1:9000', screenshot: true, snapshot: 'none' },
+    { action: 'open', url: 'http://127.0.0.1:9000', sessionId: 'ctx2' },
+    { action: 'create_session' }, { action: 'create_session', name: 'Reference account' },
+    { action: 'list_sessions' }, { action: 'close_session', sessionId: 'ctx2' },
     { action: 'navigate', tabId: 't1', url: 'https://example.invalid', snapshot: 'full' },
     ...['observe', 'close_tab', 'hide', 'show', 'downloads', 'handoff', 'permissions', 'requests'].map(action => ({ action, tabId: 't1' })),
     { action: 'observe', tabId: 't1', mode: 'full', depth: 3, screenshot: true },
@@ -57,6 +60,13 @@ test('every public action has a bounded explicit accepted argument shape', () =>
   ];
   for (const args of actions) assert.equal(validateArgs(args), args);
   for (const args of [
+    { action: 'open', url: 'https://example.invalid', sessionId: 'caller-authority' },
+    { action: 'open', url: 'https://example.invalid', sessionId: 'ctx0' },
+    { action: 'create_session', sessionId: 'ctx2' }, { action: 'create_session', name: '   ' },
+    { action: 'create_session', name: 'x'.repeat(81) }, { action: 'create_session', name: 'x\nforged' },
+    { action: 'create_session', name: 'x\u202e' }, { action: 'create_session', name: 2 },
+    { action: 'close_session' }, { action: 'close_session', sessionId: 2 },
+    { action: 'list_sessions', tabId: 't1' }, { action: 'observe', tabId: 't1', sessionId: 'ctx2' },
     { action: 'click', tabId: 't', ref: 'r' }, { action: 'click', tabId: 't', ref: 'e0' },
     { action: 'click', tabId: 't', target: { name: 'x', frameId: 'frame' } }, { action: 'click', tabId: 't', target: { name: 'x', frame: 'f' } },
     { action: 'evaluate', tabId: 't', expression: 'x', frameId: 'e3' }, { action: 'evaluate', tabId: 't', expression: 'x', frame: 'frame' },
@@ -144,7 +154,7 @@ test('text results carry the status line and isError follows the disposition; JS
   assert.equal(toolResult({ action: 'click', disposition: 'uncertain', tabId: 't1', replaySafe: false }, 'click').isError, true);
   const image = toolResult({ action: 'observe', disposition: 'observed', tabId: 't1', screenshot: { mimeType: 'image/png', data: 'AAAA' } }, 'observe');
   assert.deepEqual(image.content[1], { type: 'image', mimeType: 'image/png', data: 'AAAA' });
-  for (const action of ['status', 'list_tabs', 'requests', 'permissions', 'console', 'network', 'inspect', 'performance']) {
+  for (const action of ['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'requests', 'permissions', 'console', 'network', 'inspect', 'performance']) {
     const result = toolResult({ tabId: 't1', rows: [] }, action);
     assert.deepEqual(JSON.parse(result.content[0].text), { tabId: 't1', rows: [] }, action);
     assert.equal(result.isError, false);

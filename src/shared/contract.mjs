@@ -17,7 +17,8 @@ const filePaths = value => Array.isArray(value) && value.length > 0 && value.len
 // Page-changing actions also choose their result: snapshot diff|full|none, screenshot.
 const R = ['screenshot', 'snapshot'];
 const fields = {
-  status: [], open: ['url', ...R], navigate: ['url', ...R],
+  status: [], open: ['url', 'sessionId', ...R], navigate: ['url', ...R],
+  create_session: ['name'], list_sessions: [], close_session: ['sessionId'],
   observe: ['mode', 'find', 'scope', 'depth', 'screenshot', 'wait'], list_tabs: [],
   close_tab: [], hide: [], show: [], click: ['ref', 'target', 'point', ...R],
   fill: ['ref', 'target', 'text', ...R], type: ['ref', 'target', 'text', ...R],
@@ -40,7 +41,7 @@ const ref = value => typeof value === 'string' && REF.test(value);
 // DevTools reads: compact rows, never an observation (devtools.mjs).
 export const devtoolsActions = new Set(['console', 'network', 'inspect', 'performance']);
 export const actions = Object.freeze(Object.keys(fields));
-export const inputActions = new Set(['navigate', 'click', 'fill', 'type', 'press', 'select', 'scroll', 'evaluate', 'upload', 'handle_dialog', 'respond']);
+export const inputActions = new Set(['create_session', 'close_session', 'navigate', 'click', 'fill', 'type', 'press', 'select', 'scroll', 'evaluate', 'upload', 'handle_dialog', 'respond']);
 export const keys = Object.freeze({
   Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
   Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
@@ -92,9 +93,17 @@ export function validateNativeResponse(value) {
 
 export function validateArgs(args) {
   if (!record(args) || !Object.hasOwn(fields, args.action)) fail('INVALID_ARGUMENT', 'Unknown browser action');
-  const allowed = new Set(['action', ...(args.action === 'status' || args.action === 'list_tabs' || args.action === 'open' || args.action === 'revoke' ? [] : ['tabId']), ...fields[args.action]]);
+  const allowed = new Set(['action', ...(['status', 'list_tabs', 'open', 'revoke', 'create_session', 'list_sessions', 'close_session'].includes(args.action) ? [] : ['tabId']), ...fields[args.action]]);
   for (const key of Object.keys(args)) if (!allowed.has(key)) fail('INVALID_ARGUMENT', `Unexpected argument: ${key}`);
   if (allowed.has('tabId') && !(args.action === 'run' && args.tabId === undefined) && !text(args.tabId, 128)) fail('INVALID_ARGUMENT', 'tabId is required');
+  if ((args.sessionId !== undefined || args.action === 'close_session')
+    && !(typeof args.sessionId === 'string' && /^ctx[1-9]\d{0,9}$/.test(args.sessionId))) {
+    fail('INVALID_ARGUMENT', 'sessionId must be a browser session id (ctx<n>) returned by this connection');
+  }
+  if (args.name !== undefined && (!text(args.name, 80) || !args.name.trim()
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(args.name))) {
+    fail('INVALID_ARGUMENT', 'name must be 1–80 characters without control characters');
+  }
   if (args.action === 'run') {
     if (typeof args.script !== 'string' || !args.script.trim() || args.script.length > RUN_BOUNDS.scriptChars) {
       fail('INVALID_ARGUMENT', `script must be 1–${RUN_BOUNDS.scriptChars} characters`);

@@ -50,6 +50,14 @@ rule to keep.
 - Edit: `host.mjs #profile`, `src/shared/paths.mjs`, `src/companion/main.mjs` (userData, `window-all-closed`), `src/mcp/gateway.mjs close` (keeps profiles).
 - Keep: `requirements.md` C4 and AC18; profiles per connection and session; the companion outlives its last page window.
 
+## R21 Browser sessions
+
+- API: R1; public `sessionId` is a browser `ctx<n>` handle, never the authenticated caller's `sessionId`. Only `open` and `close_session` select a browser session; tab actions keep `tabId` as their sole selector.
+- Storage and lifecycle: `host.mjs #newProfile`, `#profile`, `#selectedSession`, `#sessionInfo`, `#disposeSession`, `#assertSessionCreation`, `#createPage`, `#registerPage`, `execute`, `close`. Preserve the default `session.fromPath` and its existing directory. Temporary profiles use unique non-persistent partitions; popups inherit the exact profile.
+- Close fences the profile synchronously, closes its pages, cancels its downloads, clears session data/auth/caches/connections with bounded stages and reports all failures. Re-check profile/caller state after startup awaits. Never reuse a retired id or partition, or reset the connection permission ledger.
+- Attribution: `execute` attaches session id/name to page and DevTools results; `tool.mjs statusLine` prints them. R2 for toolbar state, preload and window-title labels.
+- Keep: `contracts.md` Browser sessions, Observation and input, DevTools reads and Handoff state machine. Local same-origin fixtures must prove storage separation both ways, same-session sharing, scoped logout/close, tab/DevTools attribution, popup inheritance and handoff privacy.
+
 ## R8 MCP transport, timeouts, process lifecycle
 
 - Edit: `src/mcp/main.mjs` (server, error envelope, EOF); `src/mcp/gateway.mjs` (startup 20 s, call 120 s, exit wait 8 s); `src/shared/rpc.mjs` (framing, limits); `src/companion/main.mjs` (roles, methods, `terminate`); `plugin.json` (`startupTimeoutMs` 30000, `timeoutMs` 120000); `host.mjs #run` (25 s); `native/bridge.cpp`.

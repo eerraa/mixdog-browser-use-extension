@@ -1,7 +1,7 @@
 import { actions, keys } from '../shared/contract.mjs';
 
 // These results stay compact JSON; every other action returns text (D13).
-export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
+export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
   'console', 'network', 'inspect', 'performance']);
 
 // Server instructions under connection authority (a plain MCP registration such
@@ -11,7 +11,7 @@ export const CONNECTION_INSTRUCTIONS = `Independent Windows Browser: the browse 
 
 Calls: every call needs action. This connection is its own caller authority: never send _lease. A restarted or reconnected server is a new browser with no tabs: earlier tab ids and refs fail with CLOSED_TAB, so open the page again.
 
-Pages: open {url} (http or https only) returns a tab t<n> and a text snapshot with e<n> refs. Refs stay valid while their element is unchanged: act on them with click, fill, type, press, select or scroll, and read each action's diff instead of observing again. observe takes find:"words", scope:"e5", mode:"full"|"text" or screenshot:true (points are a last resort). run executes a short Playwright-like script for a known multi-step flow. console, network, inspect and performance are DevTools reads.
+Pages: open {url,sessionId?} (http/https) returns a tab t<n>, its browser session ctx<n> and e<n> refs. Omit sessionId for the existing default. create_session {name?} creates an empty temporary session; list_sessions/list_tabs show ids/names. close_session {sessionId} closes only that temporary session and clears its storage; the default stays. Tabs in one session share login; sessions never copy storage. Refs stay valid while unchanged: act on them and read each diff. observe takes find:"words", scope:"e5", mode:"full"|"text" or screenshot:true. run scripts known flows. console, network, inspect and performance are DevTools reads.
 
 Results: the first line is the status. not-executed with dispatched=false means nothing was sent. uncertain or replaySafe=false means the input may have run: inspect the page and never repeat it. STALE_REF: observe or find again.
 
@@ -21,7 +21,7 @@ WebHID and WebUSB: click the page's own connect button with a normal click. The 
 
 Sign-in, passwords, CAPTCHA and 2FA: call handoff on that tab and stop page work. The window flashes without taking focus; tell the person which window needs them and wait until they return control in that window. Pages cannot be observed meanwhile. Never ask for or type their secrets. Sensitive fields never show values, and evaluate and console expressions are refused beside them.
 
-Stop, denial, cancellation and handoff are never bypassed: no new tab, connection or retry loop around them, and no call resumes a stopped page. revoke closes every window of this connection; use it only when asked. Report completion only from observed effects.`;
+Stop, denial, cancellation and handoff are never bypassed: no new session, tab, connection or retry loop around them; no call resumes a stopped page. revoke closes every window of this connection; use it only when asked. Report completion only from observed effects.`;
 
 // Host hooks address a connection by `_channel` and inject `_lease`, so the hook
 // schema names its channel. Without a channel this is the connection-authority
@@ -42,6 +42,8 @@ export function browserTool(channel = null) {
           _lease: { type: 'string', description: 'Injected by the plugin host hook. Do not invent a value.' },
         } : {}),
         tabId: { type: 'string', description: 'Tab id (t<n>) returned by this connection.' },
+        sessionId: { type: 'string', pattern: '^ctx[1-9]\\d{0,9}$', description: 'open/close_session: browser session from create_session/list_sessions, never caller authority. Omit on open for the default.' },
+        name: { type: 'string', maxLength: 80, description: 'create_session: human-readable name for a new empty temporary session.' },
         url: { type: 'string', description: 'Credential-free HTTP(S) URL for open or navigate.' },
         ref: { type: 'string', description: 'Element ref (e<n>) from a result.' },
         target: {
@@ -119,6 +121,7 @@ export function statusLine(result) {
   if (result.requestedInputDispatched === false) fields.push('dispatched=false');
   if (result.preparation && result.preparation !== 'none') fields.push(`preparation=${result.preparation}`);
   if (result.replaySafe === false) fields.push('replaySafe=false');
+  if (result.sessionId) fields.push(`session=${result.sessionId}`, `name=${JSON.stringify(result.sessionName)}`);
   return fields.join(' ');
 }
 

@@ -91,6 +91,35 @@ blocker, not permission to edit it or operate a human approval surface.
    owned tabs. Revocation closes every plugin window in this MCP connection,
    so request it only when the user intends that connection-wide effect.
 
+## Browser sessions
+
+`open {url}` keeps the existing default login/storage. To compare separate accounts,
+use `create_session {name?}` (JSON result: `sessionId:ctx<n>`, name, temporary,
+state), then `open {url, sessionId}`. This selects storage, never caller authority.
+Only use returned ids; sessions belong to this caller and connection. Cookies,
+localStorage, IndexedDB, service workers, Cache Storage, HTTP/auth caches are
+separate; tabs and popups within one session share its login. No storage is copied.
+Login still requires `handoff` and a person, who submits before returning control.
+
+`list_sessions` shows session ids/names and tab counts; `list_tabs` and tab results
+carry `sessionId`/`sessionName`. The window title and toolbar show `name (ctx<n>)`.
+Check these labels when directing the person to an account's window. DevTools and
+page actions still use only `tabId`; do not add `sessionId` to those actions.
+
+Temporary sessions stay alive after their last tab closes. When the task's
+temporary session is no longer needed, `close_session {sessionId}` closes only its
+tabs, cancels its pending downloads and clears its data/auth/caches/connections.
+Completed downloads stay on disk. The default cannot be closed this way. Check
+`cleanupComplete`; `SESSION_CLEANUP_FAILED` means cleanup is incomplete and that
+session stays unusable. Connection end also clears temporary sessions. At most
+16 can be created per caller over a connection's lifetime, closed ones included;
+the 32-tab limit applies across all its sessions.
+
+Never use sessions to bypass Stop, denial, cancellation or handoff. Creating or
+opening a temporary session is refused while any owned tab is paused or private;
+closing one containing such a tab is also refused until the person returns it.
+Permission denials remain terminal for the whole connection.
+
 ## Reading results
 
 Page results are text. The first line is the status:

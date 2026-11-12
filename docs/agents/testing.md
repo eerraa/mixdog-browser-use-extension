@@ -14,10 +14,10 @@ changes.
 | `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract and schema, caller authority and data root), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
 | `npm run test:browser` | `tests/browser/run.mjs` → frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner, queue, permission-broker in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
 | `npm run test:native` | `tests/native/consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
-| `npm run test:live` | `tests/live/*.test.mjs` (9 files, 10 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*` |
+| `npm run test:live` | `tests/live/*.test.mjs` (10 files, 11 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*`, `wb-ses-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, connection authority (a plain MCP registration as Claude Code makes it), refused configurations, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 24, `test:browser` 196, `test:live` 10, `test:package` 15, `test:native` 1 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 24, `test:browser` 203, `test:live` 11, `test:package` 15, `test:native` 1 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
@@ -49,6 +49,15 @@ changes.
 - `harness.mjs` uses `BrowserPolicy.manual()` with `consentHelperPath = build/native-consent.exe`. With that helper present, a manual-consent path can raise a real Windows consent prompt. Keep native helpers out of the repo `build/` (build them in an isolated copy, `build-release.md`) or run attended.
 
 ## Where to add tests
+
+`sessions.test.mjs` runs `sessions-harness.mjs` on one local origin: cookies,
+localStorage, IndexedDB, service workers, Cache Storage and HTTP cache separated
+both ways; same-session tabs and popups share storage; DOM/iframe/evaluate/DevTools
+results and chrome carry the right session; synthetic human login/return and
+logout leave the other account intact; scoped close/worker cleanup and connection
+teardown clear temporary data. It prints `SESSIONS_CONTRACT_PASSED`. Its short
+`wb-ses-*` temp prefix keeps Chromium's nested CacheStorage paths within Windows
+path limits without changing the product's default profile directory.
 
 | Behavior | File |
 | --- | --- |
