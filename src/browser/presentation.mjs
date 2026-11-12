@@ -20,6 +20,8 @@ const STRINGS = {
     takeControl: 'Take control', returnControl: 'Return to agent', resume: 'Resume agent', stopAgent: 'Stop agent',
     chipAgent: 'Agent in control', chipUser: 'You are in control', chipSwitching: 'Switching…',
     chipReturning: 'Returning…', chipStopped: 'Agent stopped', chipPaused: 'Agent paused',
+    chipReturnFailed: 'Return failed', retryReturn: 'Retry return',
+    returnFailed: failure => `Return failed (${failure.stage}: ${failure.code}). Release held keys/buttons, then use the return/resume button, or Take control to keep using this page.`,
     agentHint: 'The agent is using this page. Click the page to take control.',
     userHint: 'The agent cannot read or control this page until you return control.',
     badge: 'Agent in control · click to take over',
@@ -41,6 +43,8 @@ const STRINGS = {
     takeControl: '직접 조작', returnControl: '에이전트에게 돌려주기', resume: '에이전트 재개', stopAgent: '에이전트 중지',
     chipAgent: '에이전트 조작 중', chipUser: '직접 조작 중', chipSwitching: '전환 중…',
     chipReturning: '돌려주는 중…', chipStopped: '에이전트 중지됨', chipPaused: '에이전트 일시정지',
+    chipReturnFailed: '반환 실패', retryReturn: '반환 재시도',
+    returnFailed: failure => `반환에 실패했습니다(${failure.stage}: ${failure.code}). 누른 키·버튼을 놓고 반환·재개 버튼을 다시 누르거나, 직접 조작으로 이 페이지를 계속 사용하세요.`,
     agentHint: '에이전트가 이 페이지를 사용하고 있습니다. 페이지를 클릭하면 직접 조작으로 전환합니다.',
     userHint: '돌려주기 전까지 에이전트는 이 페이지를 읽거나 조작할 수 없습니다.',
     badge: '에이전트 조작 중 · 클릭하면 직접 조작',
@@ -203,6 +207,10 @@ export class PagePresentation {
     this.shield.on('before-input-event', (event, input) => this.shieldKeyboard(event, input));
     this.shield.on('before-mouse-event', (event, input) => this.shieldMouse(event, input));
     this.toolbar.ipc.on(TOOLBAR_ACTION, (event, message) => this.#toolbarAction(event, message));
+    // A press begun in the page can be released over trusted chrome after
+    // focus moves. Record only observed release edges, never infer or replay.
+    this.toolbar.on('before-input-event', (_event, input) => this.#nativeRelease(input));
+    this.toolbar.on('before-mouse-event', (_event, input) => this.#nativeRelease(input));
     this.frame.on('page-title-updated', event => event.preventDefault());
     this.frame.on('resize', () => this.#relayout());
     this.frame.contentView.on('bounds-changed', () => this.#relayout());
@@ -290,6 +298,7 @@ export class PagePresentation {
   }
   shieldKeyboard(event, input) {
     event.preventDefault();
+    this.#nativeRelease(input);
     const key = input.code || input.key;
     const held = this.shieldKeys.has(key);
     if (input.type === 'keyDown') this.shieldKeys.add(key);
@@ -301,6 +310,7 @@ export class PagePresentation {
   shieldMouse(event, input) {
     if (['mouseMove', 'mouseEnter', 'mouseLeave'].includes(input.type)) return;
     event.preventDefault();
+    this.#nativeRelease(input);
     const held = this.shieldButtons.has(input.button);
     if (input.type === 'mouseDown') this.shieldButtons.add(input.button);
     if (input.type === 'mouseUp') this.shieldButtons.delete(input.button);
@@ -308,6 +318,10 @@ export class PagePresentation {
     if ((input.type !== 'mouseUp' || (!held && this.mode === 'automation'))
       && this.mode !== 'native-handoff') this.callbacks.handoff('shell-pointer-intervention');
     this.releaseIfSafe();
+  }
+  #nativeRelease(input) {
+    if (input.type === 'keyUp') this.nativeKeys.delete(input.code || input.key);
+    if (input.type === 'mouseUp') this.nativeButtons.delete(input.button);
   }
   #allowNativeInput(event) {
     try { this.callbacks.guardNativeInput(); return true; }
@@ -348,6 +362,7 @@ export class PagePresentation {
     // A wheel has no release edge. Only an explicit trusted request can resolve
     // that route; never infer the absence of a physical input.
     if (fromMenu) this.unknownGesture = false;
+    this.releaseIfSafe();
     this.#cover();
     this.callbacks.invalidate('handoff-draining');
     this.clear(this.unknownGesture ? 'wheel' : 'draining');
@@ -445,6 +460,7 @@ export class PagePresentation {
   }
   #message() {
     const t = this.text, paused = this.callbacks.paused();
+    if (this.notice?.key === 'returnFailed') return t.returnFailed(this.notice.detail);
     if (this.notice) return this.notice.key === 'paused' ? t.paused(this.notice.detail) : t[this.notice.key];
     if (this.mode === 'returning') return t.returning;
     if (this.mode === 'draining') return this.unknownGesture ? t.wheel : t.draining;
@@ -468,9 +484,15 @@ export class PagePresentation {
   }
   #state() {
     const t = this.text, native = this.mode === 'native-handoff', paused = this.callbacks.paused();
+    const failure = this.callbacks.returnFailure?.();
     const url = this.contents.getURL(), loading = this.contents.isLoading(), history = this.contents.navigationHistory;
     const take = { text: t.takeControl, action: 'take-control' }, resume = { text: t.resume, action: 'resume' };
-    const [chip, primary, secondary] = native
+    const retry = { text: t.retryReturn, action: 'resume' };
+    const [chip, primary, secondary] = failure && this.mode !== 'returning' && paused !== 'explicit-stop'
+      ? [{ text: t.chipReturnFailed, tone: 'stop' }, retry, native ? null : take]
+      : paused === 'explicit-stop' && this.mode !== 'returning'
+        ? [{ text: t.chipStopped, tone: 'stop', title: paused }, native ? resume : take, native ? null : resume]
+      : native
       ? [{ text: t.chipUser, tone: 'user', title: t.userHint }, { text: t.returnControl, action: 'resume' }, null]
       : this.mode === 'returning' ? [{ text: t.chipReturning, tone: 'wait' }, null, null]
         : this.mode === 'draining' ? [{ text: t.chipSwitching, tone: 'wait' }, take, resume]
@@ -484,7 +506,7 @@ export class PagePresentation {
       canGoBack: native && history.canGoBack(), canGoForward: native && history.canGoForward(),
       reloadTitle: loading ? t.stopLoading : t.reload, invalid: this.addressError,
       notice: this.addressError ? t.invalidAddress : this.loadError ? t.loadFailed(this.loadError)
-        : native && this.notice ? this.#message() : null,
+        : failure ? this.#message() : native && this.notice ? this.#message() : null,
       chip, primary, secondary,
     };
   }

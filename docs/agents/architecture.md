@@ -115,6 +115,7 @@ Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` →
 - `#invalidate(p, reason)` on every page change; it also runs `#devtoolsMode`. Refs retire by evidence (walker `gone`/`renamed`, document replacement, `generation`), not by invalidation. That updates privacy windows (`boundary()` on every page of the profile; `profile.devtoolsPrivacy` covers service and shared workers), syncs the DevTools menu item with the mode, and closes human DevTools outside `native-handoff`. `#handoff` (after `enterNative`) and `#resume` (after `finishReturn`) call it too.
 - DevTools reads: `execute` → `#devtoolsRead` (console, network, performance; outside the lane) or `#run` → `#inspect` (lane).
 - Popups become owned pages of the same owner and profile and inherit a pause or handoff.
+- Human return: `#resume` bounds the caller's wait without releasing the tab lane's actual fence. `returnAttempt` counts trusted requests; `returnFailure` holds safe stage/code metadata for `list_tabs` and the presentation's failure notice. The existing modes stay unchanged; precondition failures and timeouts follow `contracts.md` Handoff state machine. Native release edges from trusted chrome keep the original page's held-control tracking current.
 
 ## Window composition
 

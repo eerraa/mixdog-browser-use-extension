@@ -670,6 +670,7 @@ test('packaged connection authority: named temporary sessions preserve the defau
   const listed = dataOf(await call({ action: 'list_tabs' })).tabs;
   assert.deepEqual(listed.map(tab => [tab.tabId, tab.sessionId]), [[a, defaultId], [b, created.sessionId], [b2, created.sessionId]]);
   assert.equal(listed[1].sessionName, 'Reference B');
+  assert.ok(listed.every(tab => tab.returnFailure === null), 'MCP tab metadata carries the return diagnostic state');
   const closed = dataOf(await call({ action: 'close_session', sessionId: created.sessionId }));
   assert.equal(closed.cleanupComplete, true, JSON.stringify(closed));
   assert.deepEqual(new Set(closed.closedTabIds), new Set([b, b2]));

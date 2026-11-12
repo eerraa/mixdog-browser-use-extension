@@ -1245,6 +1245,157 @@ test('toolbar or shield navigation and loss never authorize input; either side c
   } finally { await host.close(); }
 });
 
+test('failed human return shows a terminal diagnostic and retries only after another human request', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents), snapshot = driver.snapshot;
+  try {
+    tab.toolbarAction('ready');
+    await call({ action: 'handoff', tabId });
+    driver.snapshot = async () => { throw new BrowserHostError('ROOT_UNAVAILABLE', 'PRIVATE_RETURN_DETAIL'); };
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    const failed = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === tabId);
+    assert.deepEqual([failed.mode, failed.paused, failed.returnFailure?.stage, failed.returnFailure?.code],
+      ['draining', 'return-failed', 'observation', 'ROOT_UNAVAILABLE']);
+    assert.equal(tab.toolbarState().chip.text, 'Return failed');
+    assert.equal(tab.toolbarState().primary.text, 'Retry return');
+    assert.match(tab.toolbarState().notice, /observation.*ROOT_UNAVAILABLE/);
+    assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_RETURN_DETAIL/);
+    await assert.rejects(call({ action: 'observe', tabId }), { code: 'PRIVATE_HANDOFF' });
+    driver.snapshot = snapshot;
+    await tick();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].paused, 'return-failed', 'Restoring the read path never resumes automatically');
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    const resumed = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(resumed.mode, 'automation');
+    assert.equal(resumed.paused, null);
+    assert.equal(resumed.returnFailure, null);
+    assert.equal((await call({ action: 'observe', tabId })).disposition, 'observed');
+  } finally { driver.snapshot = snapshot; await host.close(); }
+});
+
+test('held native controls refuse return without hiding the release path or advancing generation', async () => {
+  const { host, call, tabId, tab } = await setup();
+  try {
+    tab.toolbarAction('ready');
+    await call({ action: 'handoff', tabId });
+    const before = (await call({ action: 'list_tabs' })).tabs[0];
+    tab.contents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', code: 'ControlLeft', key: 'Control' });
+    tab.contents.emit('before-mouse-event', { preventDefault() {} }, { type: 'mouseDown', button: 'left' });
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    const failed = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(failed.mode, 'native-handoff');
+    assert.equal(failed.generation, before.generation);
+    assert.equal(failed.returnFailure?.code, 'CONTROLS_HELD');
+    assert.equal(tab.exposed(), true);
+    tab.toolbar.emit('before-input-event', { preventDefault() {} }, { type: 'keyUp', code: 'ControlLeft', key: 'Control' });
+    tab.toolbar.emit('before-mouse-event', { preventDefault() {} }, { type: 'mouseUp', button: 'left' });
+    await tick();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'native-handoff', 'Release alone is never Resume');
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+  } finally { await host.close(); }
+});
+
+test('human return reconnects a detached debugger before sending automation-mode commands', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents), reconnect = driver.reconnect, nativeMode = driver.setNativeMode;
+  const order = [];
+  try {
+    await call({ action: 'handoff', tabId });
+    driver.detached();
+    driver.reconnect = async function() { order.push('reconnect'); await reconnect.call(this); };
+    driver.setNativeMode = async function(native) {
+      if (!this.page.connected) throw new BrowserHostError('DEBUGGER_DISCONNECTED', 'Fixture debugger detached');
+      order.push(`native:${native}`);
+      return nativeMode.call(this, native);
+    };
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.deepEqual(order, ['reconnect', 'native:false']);
+    const resumed = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(resumed.mode, 'automation');
+    assert.equal(resumed.connected, true);
+  } finally { driver.reconnect = reconnect; driver.setNativeMode = nativeMode; await host.close(); }
+});
+
+test('human return timeout ends the UI wait but keeps actual cleanup fenced against a late resume', async t => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents), presented = driver.presented, snapshot = driver.snapshot;
+  const started = deferred(), release = deferred();
+  let snapshots = 0, returning, retry;
+  try {
+    tab.toolbarAction('ready');
+    await call({ action: 'handoff', tabId });
+    driver.presented = async () => { started.resolve(); await release.promise; };
+    driver.snapshot = async function() { snapshots++; return snapshot.call(this); };
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    returning = tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await started.promise;
+    t.mock.timers.tick(25000);
+    await returning;
+    const failed = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(failed.returnFailure.code, 'RETURN_TIMEOUT');
+    assert.equal(failed.returnFailure.stage, 'presentation');
+    assert.equal(failed.busy, true, 'A timed-out actual command still fences its lane');
+    assert.equal(tab.toolbarState().chip.text, 'Return failed');
+    assert.equal(snapshots, 0);
+    driver.presented = presented;
+    retry = tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await tick();
+    assert.equal(snapshots, 0, 'A retry cannot pass the old actual command');
+    release.resolve();
+    await retry;
+    assert.equal(snapshots, 1, 'Only the explicitly requested retry observes; the late return cannot commit');
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+  } finally { release.resolve(); await returning; await retry; t.mock.timers.reset(); driver.presented = presented; driver.snapshot = snapshot; await host.close(); }
+});
+
+test('Stop during human return remains terminal after its late read finishes', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents), presented = driver.presented;
+  const started = deferred(), release = deferred();
+  let returning;
+  try {
+    tab.toolbarAction('ready');
+    await call({ action: 'handoff', tabId });
+    driver.presented = async () => { started.resolve(); await release.promise; };
+    returning = tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await started.promise;
+    tab.frame.menu.items.find(item => item.label === 'Stop automation').click();
+    await returning;
+    let state = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(state.paused, 'explicit-stop');
+    assert.equal(state.returnFailure.interruptedBy, 'explicit-stop');
+    assert.equal(tab.toolbarState().chip.text, 'Agent stopped');
+    release.resolve();
+    await tick();
+    state = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(state.paused, 'explicit-stop');
+    await assert.rejects(call({ action: 'evaluate', tabId, expression: '1' }), { code: 'AUTOMATION_PAUSED' });
+    driver.presented = presented;
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].paused, null);
+  } finally { release.resolve(); await returning; driver.presented = presented; await host.close(); }
+});
+
+test('a failed return behind a wheel drain can explicitly take control and return again', async t => {
+  const { host, call, tabId, tab } = await setup();
+  let returning;
+  try {
+    tab.shield.webContents.emit('before-mouse-event', { preventDefault() {} }, { type: 'mouseWheel' });
+    await tick();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    returning = tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await tick();
+    t.mock.timers.tick(25000);
+    await returning;
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].returnFailure.stage, 'queue');
+    await tab.frame.menu.items.find(item => item.label === 'Human handoff').click();
+    assert.equal(tab.exposed(), true);
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+  } finally { await returning; t.mock.timers.reset(); await host.close(); }
+});
+
 test('toolbar controls drive only the person-controlled live page and resume only by its own trusted document', async () => {
   const { host, call, tabId, tab } = await setup();
   const state = async () => (await call({ action: 'list_tabs' })).tabs[0];

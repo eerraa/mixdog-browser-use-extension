@@ -82,6 +82,12 @@ blocker, not permission to edit it or operate a human approval surface.
    Continue only after the person returns control in that window (toolbar
    **Return to agent** or **Resume agent**, or the **Resume automation** menu)
    and fresh state is available.
+   If return fails, read `list_tabs.returnFailure` (attempt, stage, code,
+   human-only retry). Ask the person to release held keys/buttons for
+   `CONTROLS_HELD`, then use **Retry return** in that same window. Return has a
+   25 s bound, but actual operations remain fenced until they settle. A null
+   private URL/title is withheld, not an empty page. Never replay page input,
+   create a replacement session or clear Stop to recover from a failed return.
 7. Respect explicit cancellation/denial and Stop. `respond` is a typed
    interaction, not a universal permission override or Resume endpoint.
    Mandatory OS identity and unsupported capture/serial/Bluetooth are specific

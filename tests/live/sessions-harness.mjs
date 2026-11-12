@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { BrowserHost } from '../../src/browser/host.mjs';
+import { FrameDriver } from '../../src/browser/frames.mjs';
+import { BrowserHostError } from '../../src/shared/contract.mjs';
 import { bounded, pause } from '../../src/shared/async.mjs';
-import { frameOf, menu, pageContents, presentationOf, refOf, toolbarPreloadPath } from './presentation.mjs';
+import { clickToolbar, frameOf, menu, pageContents, presentationOf, refOf, toolbarPreloadPath } from './presentation.mjs';
 
 const directory = process.argv[2];
 app.setPath('userData', path.join(directory, 'electron'));
@@ -144,6 +146,53 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   assert.deepEqual(await evaluate(b2.tabId, 'fetch("/http-cache").then(r=>r.json())'), cachedB);
   console.log('PASS bidirectional cookies/localStorage/IndexedDB/service-worker/CacheStorage/HTTP-cache isolation and same-session sharing');
 
+  // Both sessions are handed over. One return fails, the other still completes;
+  // only a second trusted human request can recover the failed page in place.
+  const presented = FrameDriver.prototype.presented;
+  let failA = true;
+  FrameDriver.prototype.presented = async function() {
+    if (this.page.id === a.tabId && failA) throw new BrowserHostError('CAPTURE_FAILED', 'PRIVATE_RETURN_DIAGNOSTIC');
+    return presented.call(this);
+  };
+  try {
+    await Promise.all([call({ action: 'handoff', tabId: a.tabId }), call({ action: 'handoff', tabId: b.tabId })]);
+    await Promise.all([menu(frameOf(a.contents), 'Resume automation'), menu(frameOf(b.contents), 'Resume automation')]);
+    const tabs = await until(async () => {
+      const current = (await call({ action: 'list_tabs' })).tabs;
+      return current.find(t => t.tabId === a.tabId).returnFailure
+        && current.find(t => t.tabId === b.tabId).mode === 'automation' && current;
+    }, 'independent return completion');
+    const failed = tabs.find(t => t.tabId === a.tabId), normal = tabs.find(t => t.tabId === b.tabId);
+    assert.deepEqual([failed.mode, failed.paused, failed.returnFailure.stage, failed.returnFailure.code],
+      ['draining', 'return-failed', 'presentation', 'CAPTURE_FAILED']);
+    assert.equal(failed.busy, false);
+    assert.equal(failed.url, null);
+    assert.equal(failed.title, null);
+    assert.equal(normal.mode, 'automation');
+    assert.equal(normal.paused, null);
+    assert.equal(normal.returnFailure, null);
+    const { frame: failedFrame, toolbar: failedToolbar } = presentationOf(a.contents);
+    await until(async () => failedToolbar.executeJavaScript('document.querySelector("#chip").dataset.tone==="stop"&&document.querySelector("#primary").dataset.action==="resume"'), 'terminal return failure UI');
+    const failureUI = await failedToolbar.executeJavaScript('({chip:document.querySelector("#chip").textContent,notice:document.querySelector("#notice").textContent,button:document.querySelector("#primary").textContent})');
+    assert.match(failureUI.chip, /Return failed|반환 실패/);
+    assert.match(failureUI.button, /Retry return|반환 재시도/);
+    assert.match(failureUI.notice, /presentation.*CAPTURE_FAILED/);
+    assert.doesNotMatch(JSON.stringify([failed, failureUI]), /PRIVATE_RETURN_DIAGNOSTIC/);
+    await assert.rejects(call({ action: 'observe', tabId: a.tabId }), { code: 'PRIVATE_HANDOFF' });
+    assert.deepEqual(await stored(b.tabId), expected('B'));
+    failA = false;
+    failedFrame.focus();
+    failedToolbar.focus();
+    await clickToolbar(failedToolbar, '#primary[data-action="resume"]');
+    await until(async () => {
+      const tab = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId);
+      return tab.mode === 'automation' && tab.paused === null && tab.returnFailure === null;
+    }, 'explicit retry return');
+    assert.deepEqual(await stored(a.tabId), expected('A'));
+    assert.deepEqual(await stored(b.tabId), expected('B'));
+  } finally { FrameDriver.prototype.presented = presented; }
+  console.log('PASS simultaneous session handoffs, terminal return failure, safe diagnostics and human retry preserve both logins');
+
   for (const [tab, marker] of [[a, 'A'], [b, 'B'], [a2, 'A'], [b2, 'B']]) {
     const observed = await call({ action: 'observe', tabId: tab.tabId, mode: 'full' });
     assert.equal(observed.sessionId, tab.sessionId);
@@ -191,6 +240,20 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   }
   console.log('PASS alternating DOM/iframe/evaluate/console/network/inspect results and window labels belong to the right sessions');
 
+  // Read initial response bodies before detaching CDP: a detach legitimately
+  // discards Chromium's stored body handles, which must never be re-fetched.
+  await call({ action: 'handoff', tabId: a.tabId });
+  a.contents.debugger.detach();
+  await until(async () => !(await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId).connected, 'debugger detach during handoff');
+  await menu(frameOf(a.contents), 'Resume automation');
+  await until(async () => {
+    const tab = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId);
+    return tab.connected && tab.mode === 'automation' && tab.paused === null;
+  }, 'trusted return reconnects the real debugger');
+  assert.deepEqual(await stored(a.tabId), expected('A'));
+  assert.deepEqual(await stored(b.tabId), expected('B'));
+  console.log('PASS real debugger reconnect during human return preserves isolated session storage');
+
   await evaluate(b.tabId, '(window.open("/popup", "session-child"), "opened")');
   const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.url === origin + '/popup'), 'session popup');
   assert.equal(popup.sessionId, b.sessionId);
@@ -215,10 +278,14 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   await until(async () => (await call({ action: 'console', tabId: a.tabId, filter: 'SW_MARKER A' })).rows?.length, 'A worker recording stays independent of B handoff');
   assert.ok((await call({ action: 'console', tabId: a.tabId, filter: 'SW_MARKER' })).rows.every(row => row.msg === 'SW_MARKER A'));
   // Synthetic human input on the same live page; real credentials are never used.
+  // An agent handoff only flashes; the person must activate the intended window.
+  frameOf(b.contents).focus();
+  b.contents.focus();
   const point = await b.contents.executeJavaScript('(()=>{const r=document.querySelector("#alias").getBoundingClientRect();return {x:Math.round(r.x+10),y:Math.round(r.y+10)}})()');
   b.contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
   b.contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
   await b.contents.insertText('B-login');
+  await until(() => b.contents.executeJavaScript('document.querySelector("#alias").value==="B-login"'), 'fixture human input');
   const finish = await b.contents.executeJavaScript('(()=>{const r=document.querySelector("#finish").getBoundingClientRect();return {x:Math.round(r.x+10),y:Math.round(r.y+10)}})()');
   b.contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...finish });
   b.contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...finish });

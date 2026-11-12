@@ -41,6 +41,7 @@ const MIN_POINT_OPACITY = 0.1;
 const MAX_SESSION_TABS = 32;
 // Electron retains partition objects until process exit; bound lifetime allocation.
 const MAX_TEMPORARY_SESSIONS = 16;
+const RETURN_TIMEOUT_MS = 25000;
 const clipText = (value, max) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
 /**
@@ -212,18 +213,30 @@ export class BrowserHost {
     }
     const controller = new AbortController();
     p.returnController = controller;
-    // Gate new requests and withdraw old UI before the queued return can wait.
-    // Late device selection/Windows results must not survive a successful return.
-    this.permissions.withdraw(p);
+    const attempt = ++p.returnAttempt;
+    let stage = 'withdraw-requests';
+    p.returnFailure = null;
+    p.presentation.clear();
     try {
-      await this.#queue.run(p.id, async signal => {
-        await p.driver.waitForIdle(signal);
-        const generation = p.presentation.beginReturn();
+      // Withdraw before the queued return waits; late choices never authorize it.
+      this.permissions.withdraw(p);
+      stage = 'queue';
+      const returning = this.#queue.run(p.id, async signal => {
+        const step = async (name, operation) => {
+          signal.throwIfAborted();
+          stage = name;
+          const value = await operation();
+          signal.throwIfAborted();
+          return value;
+        };
+        await step('initialization', () => p.ready);
+        await step('cleanup', () => p.driver.waitForIdle(signal));
+        const generation = await step('controls', () => p.presentation.beginReturn());
         this.#invalidate(p, 'trusted-human-resume');
         p.driver.actorSignal = signal;
         try {
           // Human DevTools never outlive native handoff (D11).
-          await this.#closeDevTools(p);
+          await step('devtools', () => this.#closeDevTools(p));
           if (p.devtoolsShown) {
             // The page view kept its in-window focus while DevTools was active, so no
             // focus event moved it to chrome; re-activate the window with chrome focused.
@@ -231,20 +244,21 @@ export class BrowserHost {
             if (!p.presentation.frame.isDestroyed()) p.presentation.frame.focus();
             p.presentation.toolbar.focus();
           }
-          await p.driver.setNativeMode(false);
-          if (!p.connected) { await p.driver.reconnect(); p.connected = true; }
+          // No configuration command can reach a detached debugger. Reconnect
+          // behind the actual-operation fence, before restoring automation mode.
+          if (!p.connected) await step('reconnect', async () => { await p.driver.reconnect(); p.connected = true; });
+          await step('automation-mode', () => p.driver.setNativeMode(false));
           // The trusted return proves a presented frame and a readable root
           // document; it never captures an image.
-          await p.driver.presented();
+          await step('presentation', () => p.driver.presented());
           // Whatever the person typed during the handoff stays theirs: those
           // fields are sensitive before the first agent-visible observation.
-          if (p.privateSince !== undefined) await p.driver.privatize(p.privateSince);
-          await this.#perceive(p, null, signal, true);
-          signal.throwIfAborted();
+          if (p.privateSince !== undefined) await step('privacy', () => p.driver.privatize(p.privateSince));
+          await step('observation', () => this.#perceive(p, null, signal, true));
           // Deliver every DevTools event queued during the handoff while
           // recording is still off, on every page sharing the profile.
-          await Promise.all(this.#profilePages(p).map(q => q.driver?.devtoolsFlush()));
-          signal.throwIfAborted();
+          await step('devtools-flush', () => Promise.all(this.#profilePages(p).map(q => q.driver?.devtoolsFlush())));
+          stage = 'commit';
           p.presentation.finishReturn(generation);
           p.privateSince = undefined;
           p.paused = null;
@@ -253,9 +267,25 @@ export class BrowserHost {
           this.#signal(p, { kind: 'state', state: 'returned' });
         } finally { p.driver.actorSignal = undefined; }
       }, controller.signal);
-    } catch {
-      p.paused ||= 'return-failed';
-      p.presentation.failClosed('return-failed');
+      // This bounds the person's wait, never the lane's actual-operation fence.
+      // A late command still settles in the lane; its aborted step cannot commit.
+      await bounded(returning, RETURN_TIMEOUT_MS, 'Human return', undefined,
+        () => controller.abort(new BrowserHostError('RETURN_TIMEOUT', 'Human return timed out')));
+    } catch (error) {
+      if (this.#closed || this.#revoking || p.closed) return;
+      const cause = controller.signal.aborted ? controller.signal.reason : error;
+      const code = cause instanceof BrowserHostError && /^[A-Z][A-Z0-9_]{0,63}$/.test(cause.code) ? cause.code : 'RETURN_FAILED';
+      const interrupted = controller.signal.aborted && cause?.code === 'AUTOMATION_PAUSED';
+      p.returnFailure = { attempt, stage, code, retry: 'human-only',
+        ...(interrupted ? { interruptedBy: p.paused } : {}) };
+      // Only fixed stages/codes reach owned tab metadata and chrome. Never
+      // expose a raw error, URL, field value or held-key name beside a login.
+      // A refused precondition must leave native releases reachable. In other
+      // failures keep the shield, preserving a newer Stop/interruption reason.
+      if (!(code === 'CONTROLS_HELD' && p.presentation.mode === 'native-handoff' && !controller.signal.aborted)) {
+        p.presentation.failClosed(interrupted ? p.paused : 'return-failed');
+      }
+      p.presentation.clear('returnFailed', p.returnFailure);
     } finally {
       if (p.returnController === controller) p.returnController = null;
     }
@@ -585,7 +615,7 @@ export class BrowserHost {
     const p = {
       id: `t${++this.#tabSequence}`, owner, profile, view, contents: view.webContents, closed: false, connected: true, visible: false,
       paused: parent?.paused ?? null, model: null, base: null, shot: null, cursor: null,
-      dialog: null, downloads: [], permissionDocuments: new Map(),
+      dialog: null, downloads: [], permissionDocuments: new Map(), returnAttempt: 0, returnFailure: null,
     };
     // Service and shared workers serve every page of the profile: their
     // events are private while any page of the profile is not in automation.
@@ -613,6 +643,7 @@ export class BrowserHost {
       invalidate: reason => this.#invalidate(p, reason),
       guardNativeInput: () => p.driver.assertNoDialogCleanup(),
       paused: () => p.paused,
+      returnFailure: () => p.returnFailure,
       visibility: visible => {
         if (p.visible !== visible) { p.visible = visible; this.#invalidate(p, 'logical-visibility'); }
       },
@@ -821,6 +852,7 @@ export class BrowserHost {
         title: p.presentation.mode === 'automation' ? p.contents.getTitle() : null,
         mode: p.presentation.mode, generation: p.presentation.generation,
         paused: p.paused, visible: p.presentation.logicalVisible(), connected: p.connected, busy: this.#queue.isBusy(p.id),
+        returnFailure: p.returnFailure,
       })),
     };
     if (args.action === 'run') return this.#runScript(args, caller, signal);

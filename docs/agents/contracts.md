@@ -161,8 +161,21 @@ for the trusted return check). Every transition increments `generation`.
 | native-handoff, draining, or paused automation | toolbar Return or Resume; menu Resume automation | returning |
 | returning | fresh trusted observation passes | automation, paused = null |
 | returning | observation fails | draining, paused = `return-failed` |
+| native-handoff | return refused because keys/buttons are still held | native-handoff, same generation; private return-failure notice |
 
 - Resume comes only from that window's toolbar document or native menu; no tool action resumes. Resume is refused while a page dialog is pending.
+- A return attempt has a 25 s bound, including its queue wait. Timeout aborts the attempt, never the actual-operation fence. A late step checks cancellation before any next phase or commit; a newer Stop/interruption stays paused. An explicit retry queues behind any actual command still settling, without replaying page input.
+- Failed returns show **Return failed / 반환 실패** and a human-only **Retry return / 반환 재시도** action, rather than a permanent switching indicator. The failed tab stays shielded/private; `CONTROLS_HELD` before covering instead leaves the native release path reachable without advancing generation. Actual release edges on the page, shield or trusted toolbar update held-control tracking; focus changes never clear it and releases never resume automation.
+- `list_tabs.returnFailure` is null after a successful return, otherwise `{attempt, stage, code, retry:'human-only', interruptedBy?}` for the latest failure. Only fixed stage/code metadata is exposed: no raw browser error, URL, title, secret or held-key name. A private tab's null URL/title still mean withheld metadata, not an empty page. No automatic retry is performed.
+
+| Return stage | Check |
+| --- | --- |
+| `withdraw-requests`, `queue`, `initialization`, `cleanup` | withdraw old choices; await the tab lane, startup and actual browser cleanup |
+| `controls` | prove releases and begin the covered return |
+| `devtools`, `reconnect`, `automation-mode` | close human DevTools; reconnect a detached debugger before configuration; restore automation mode |
+| `presentation`, `privacy`, `observation` | prove a frame; privatize human fields; read the root document |
+| `devtools-flush`, `commit` | flush this profile's recordings while private; finish only the current live return |
+
 - Stop (`explicit-stop`) blocks input without changing mode, survives hide, show and handoff, and clears only on Resume.
 - The gesture that starts a handoff is never delivered. A wheel cannot confirm a handoff; an explicit control is required.
 - Fail-closed triggers: `unexpected-page-input`, `page-not-shielded`, `presentation-hidden`, `presentation-minimized` (automation only), `presentation-navigation-blocked`, `presentation-renderer-lost`, `presentation-lost`, `devtools-outside-handoff`.

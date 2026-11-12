@@ -23,6 +23,7 @@ rule to keep.
 
 - Edit: `presentation.mjs` (`beginDrain`, `enterNative`, `beginReturn`, `finishReturn`, `failClosed`, `shieldKeyboard`, `shieldMouse`, `nativeKeyboard`, `nativeMouse`, frame event handlers); `host.mjs` (`#pause`, `#handoff`, `#resume`, `#owned`); `permissions.mjs admits` (requests during native handoff).
 - Keep: every row of `contracts.md` Handoff state machine.
+- Return failures: `host.mjs #resume` (bounded attempt, stage/code metadata, reconnect before automation configuration, no late commit or lost Stop); `presentation.mjs #nativeRelease`, `#state`, `#message` (only observed releases, failure chip and human retry). Check both simultaneous isolated handoffs and a late actual read after timeout.
 
 ## R4 Observation, targeting, frames, input dispatch
 
