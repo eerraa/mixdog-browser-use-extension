@@ -163,7 +163,17 @@ test('text results carry the status line and isError follows the disposition; JS
     code: 'STALE_REF', requestedInputDispatched: false, preparation: 'none', tabId: 't1',
   });
   assert.deepEqual(errorResult(stale, { action: 'click', tabId: 't1', ref: 'e4' }), { isError: true, content: [{ type: 'text',
-    text: 'not-executed click e4 tab=t1 code=STALE_REF dispatched=false\nreason e4 link "Help" was removed; observe again' }] });
+    text: 'not-executed click e4 tab=t1 code=STALE_REF dispatched=false\nreason e4 link "Help" was removed; observe again\n'
+      + 'note Observe this same tab for current element and iframe refs; handoff/return invalidates earlier refs. Never replay an executed or uncertain input.' }] });
+  const staleFrame = JSON.parse(errorResult({ code: 'STALE_REF', message: 'Old iframe' }, { action: 'inspect', tabId: 't1' }).content[0].text);
+  assert.match(staleFrame.recovery, /same tab.*iframe refs/);
+  assert.match(staleFrame.recovery, /Never replay/);
+  for (const action of ['console', 'network']) {
+    const result = JSON.parse(toolResult({ tabId: 't1', withheld: 2, next: 5 }, action).content[0].text);
+    assert.equal(result.withheld, 2);
+    assert.match(result.withheldReason, /privacy.*cumulative.*returning control does not restore/);
+    assert.equal(JSON.parse(toolResult({ tabId: 't1', next: 5 }, action).content[0].text).withheldReason, undefined);
+  }
   const read = JSON.parse(errorResult(Object.assign(new Error('refused'), { code: 'SIDE_EFFECT' }), { action: 'console', tabId: 't1' }).content[0].text);
   assert.deepEqual([read.disposition, read.code], ['failed-or-unknown', 'SIDE_EFFECT']);
   assert.match(errorResult(Object.assign(new Error('paused'), { code: 'PRIVATE_HANDOFF' }), { action: 'observe', tabId: 't1' }).content[0].text,

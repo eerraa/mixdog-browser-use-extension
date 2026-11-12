@@ -67,7 +67,18 @@ console.log('SW_MARKER '+marker);e.respondWith(Promise.resolve(new Response(mark
       return res.end(JSON.stringify({ account, sequence: ++cacheRequests }));
     }
     if (url.pathname === '/api/who') { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ account })); }
-    if (url.pathname === '/frame') { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><button>Frame action</button>'); }
+    if (url.pathname === '/frame-script.js') {
+      res.setHeader('Content-Type', 'text/javascript');
+      return res.end(`window.planModel={showPlans:false};
+window.showFixturePlans=async()=>{await new Promise(resolve=>setTimeout(resolve,20));
+window.planModel.showPlans=true;window.planModel.identity=localStorage.getItem('identity');
+const button=document.createElement('button');button.id='plans';button.textContent='See All Plans fixture';document.body.append(button);
+console.log('FRAME_PLANS '+window.planModel.identity);return window.planModel;};`);
+    }
+    if (url.pathname === '/frame') {
+      res.setHeader('Content-Type', 'text/html');
+      return res.end('<!doctype html><button>Frame action</button><script src="/frame-script.js"></script>');
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(`<!doctype html><meta charset="utf-8"><title>Session fixture</title>
 <h1>Session fixture</h1><p id="identity"></p>
@@ -152,6 +163,10 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
     const body = await call({ action: 'network', tabId: tab.tabId, id: network.rows[0].id, body: true });
     assert.deepEqual(JSON.parse(body.body), { account: marker });
     assert.equal(body.sessionId, tab.sessionId);
+    const detail = await call({ action: 'network', tabId: tab.tabId, id: network.rows[0].id });
+    assert.equal(detail.s, 200);
+    assert.equal(detail.resHeaders['Content-Type'], 'application/json');
+    assert.ok(detail.reqHeaders.Referer.startsWith(origin));
     assert.equal(await evaluate(tab.tabId, 'window.fixtureValue'), marker);
     const expression = await call({ action: 'console', tabId: tab.tabId, expression: 'window.fixtureValue' });
     assert.ok(JSON.stringify(expression).includes(marker));
@@ -159,6 +174,18 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
     assert.equal(inspected.sessionId, tab.sessionId);
     const frame = refOf(observed, 'iframe', 'Child fixture');
     assert.equal((await call({ action: 'evaluate', tabId: tab.tabId, frame, expression: 'document.querySelector("button").textContent' })).value, 'Frame action');
+    const changed = await call({ action: 'evaluate', tabId: tab.tabId, frame, world: 'page',
+      expression: '(async()=>{const model=await window.showFixturePlans();return {visible:model.showPlans,identity:model.identity}})()' });
+    assert.equal(changed.code, undefined, JSON.stringify(changed));
+    assert.deepEqual(changed.value, { visible: true, identity: marker });
+    const frameDOM = await call({ action: 'observe', tabId: tab.tabId, mode: 'full' });
+    assert.ok(frameDOM.text.includes('button "See All Plans fixture"'), frameDOM.text);
+    const frameInspect = await call({ action: 'inspect', tabId: tab.tabId, target: { selector: '#plans', frame } });
+    assert.equal(frameInspect.visible, true);
+    assert.equal(frameInspect.sessionId, tab.sessionId);
+    const scriptRows = await call({ action: 'network', tabId: tab.tabId, filter: '/frame-script.js' });
+    const scriptBody = await call({ action: 'network', tabId: tab.tabId, id: scriptRows.rows[0].id, body: true });
+    assert.match(scriptBody.body, /window\.showFixturePlans/);
     const toolbar = presentationOf(tab.contents).toolbar;
     await until(async () => (await toolbar.executeJavaScript("document.getElementById('session').textContent")) === `${tab.sessionName} (${tab.sessionId})`, 'session toolbar label');
   }
@@ -168,6 +195,8 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.url === origin + '/popup'), 'session popup');
   assert.equal(popup.sessionId, b.sessionId);
   assert.deepEqual(await stored(popup.tabId), expected('B'));
+  const beforeHandoff = await call({ action: 'observe', tabId: b.tabId, mode: 'full' });
+  const previousFrame = refOf(beforeHandoff, 'iframe', 'Child fixture');
   assert.equal(await evaluate(a.tabId, 'fetch("/sw-marker").then(r=>r.text())'), 'A');
   assert.equal(await evaluate(b.tabId, 'fetch("/sw-marker").then(r=>r.text())'), 'B');
   for (const [tab, marker] of [[a, 'A'], [b, 'B']]) {
@@ -196,6 +225,11 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   await until(() => b.contents.executeJavaScript('localStorage.getItem("identity")==="B-login"'), 'fixture human sign in');
   await menu(frameOf(b.contents), 'Resume automation');
   await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === b.tabId).mode === 'automation', 'human return');
+  await assert.rejects(call({ action: 'evaluate', tabId: b.tabId, frame: previousFrame, world: 'page', expression: 'window.planModel' }), { code: 'STALE_REF' });
+  const afterHandoff = await call({ action: 'observe', tabId: b.tabId, mode: 'full' });
+  const currentFrame = refOf(afterHandoff, 'iframe', 'Child fixture');
+  assert.notEqual(currentFrame, previousFrame);
+  assert.equal((await call({ action: 'evaluate', tabId: b.tabId, frame: currentFrame, world: 'page', expression: 'window.planModel.showPlans' })).value, true);
   assert.doesNotMatch(JSON.stringify(await call({ action: 'console', tabId: b.tabId })), /PRIVATE_B/);
   assert.equal(await evaluate(b2.tabId, 'localStorage.getItem("identity")'), 'B-login');
   assert.deepEqual(await stored(a.tabId), expected('A'));

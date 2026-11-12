@@ -58,6 +58,10 @@ logout leave the other account intact; scoped close/worker cleanup and connectio
 teardown clear temporary data. It prints `SESSIONS_CONTRACT_PASSED`. Its short
 `wb-ses-*` temp prefix keeps Chromium's nested CacheStorage paths within Windows
 path limits without changing the product's default profile directory.
+The iframe checks also run an asynchronous page-world script that reveals a
+button, inspect its CSS, read loaded JavaScript through network response bodies,
+and require new iframe refs after handoff/return. MCP result shaping explains
+privacy `withheld` counts and stale-ref recovery in `contract.test.mjs`.
 
 | Behavior | File |
 | --- | --- |

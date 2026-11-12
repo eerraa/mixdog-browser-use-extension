@@ -212,6 +212,13 @@ return await page.getByRole('status').innerText();
 
 ## Debugging with DevTools reads
 
+`withheld` is a cumulative count of events excluded by human-control privacy;
+`withheldReason` explains it. This includes shared-worker and late-event/redirect
+boundaries. Returning control does not recover excluded records. `dropped` means
+buffer eviction, and `omitted` means result truncation. After handoff/return,
+`STALE_REF` or `STALE_FRAME` requires a new observation of the same tab for current
+element and iframe refs; never replay an executed or uncertain input to recover.
+
 Use these instead of repeated `observe` or screenshots when the question is
 why a page misbehaves. They return compact text rows, never an observation or
 image, never change refs, and answer even while an action is running.

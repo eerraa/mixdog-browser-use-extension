@@ -13,7 +13,7 @@ Calls: every call needs action. This connection is its own caller authority: nev
 
 Pages: open {url,sessionId?} (http/https) returns a tab t<n>, its browser session ctx<n> and e<n> refs. Omit sessionId for the existing default. create_session {name?} creates an empty temporary session; list_sessions/list_tabs show ids/names. close_session {sessionId} closes only that temporary session and clears its storage; the default stays. Tabs in one session share login; sessions never copy storage. Refs stay valid while unchanged: act on them and read each diff. observe takes find:"words", scope:"e5", mode:"full"|"text" or screenshot:true. run scripts known flows. console, network, inspect and performance are DevTools reads.
 
-Results: the first line is the status. not-executed with dispatched=false means nothing was sent. uncertain or replaySafe=false means the input may have run: inspect the page and never repeat it. STALE_REF: observe or find again.
+Results: the first line is the status. not-executed with dispatched=false means nothing was sent. uncertain or replaySafe=false means the input may have run: inspect the page and never repeat it. STALE_REF after handoff/return: observe the same tab for new element/iframe refs. DevTools withheld counts are cumulative privacy exclusions, not missing functionality; returning control cannot restore excluded records.
 
 Native requests (file chooser, alert or confirm, notifications, geolocation, HID, USB) appear as request lines or through requests on that tab. Answer with respond: tabId, requestRef and a response holding exactly one offered optionRef, explicit files, or cancel:true. Never repeat the click that opened a request. Cancelling a permission or device request is final for that scope in this connection.
 
@@ -126,7 +126,12 @@ export function statusLine(result) {
 }
 
 export function toolResult(result, action) {
-  if (JSON_ACTIONS.has(action)) return { isError: failed(result), content: [{ type: 'text', text: JSON.stringify(result) }] };
+  if (JSON_ACTIONS.has(action)) {
+    const data = ['console', 'network'].includes(action) && result.withheld > 0 ? { ...result,
+      withheldReason: 'Human-control privacy: cumulative excluded events (including shared workers and late events/redirects); returning control does not restore them.',
+    } : result;
+    return { isError: failed(result), content: [{ type: 'text', text: JSON.stringify(data) }] };
+  }
   const text = [statusLine(result), result.text].filter(Boolean).join('\n');
   return {
     isError: failed(result) || result.code !== undefined,
@@ -140,6 +145,8 @@ export function toolResult(result, action) {
 export function errorResult(error, args = {}) {
   const notExecuted = error?.requestedInputDispatched === false;
   const code = error?.code ?? 'BROWSER_ERROR';
+  const recovery = ['STALE_REF', 'STALE_FRAME'].includes(code)
+    ? 'Observe this same tab for current element and iframe refs; handoff/return invalidates earlier refs. Never replay an executed or uncertain input.' : null;
   if (!args.action || JSON_ACTIONS.has(args.action) || !actions.includes(args.action)) {
     return {
       isError: true,
@@ -147,6 +154,7 @@ export function errorResult(error, args = {}) {
         disposition: notExecuted ? 'not-executed' : 'failed-or-unknown', code, reason: error?.message, replaySafe: false,
         ...(notExecuted ? { tabId: error.tabId, preparation: error.preparation, requestedInputDispatched: false } : {}),
         ...(error?.candidates ? { candidates: error.candidates } : {}),
+        ...(recovery ? { recovery } : {}),
       }) }],
     };
   }
@@ -154,6 +162,7 @@ export function errorResult(error, args = {}) {
     disposition: notExecuted ? 'not-executed' : 'failed', action: args.action, ref: args.ref, tabId: error?.tabId ?? args.tabId,
     code, requestedInputDispatched: notExecuted ? false : undefined, preparation: error?.preparation,
   }), `reason ${error?.message ?? 'Browser error'}`];
+  if (recovery) lines.push(`note ${recovery}`);
   if (error?.candidates?.length) lines.push('candidates:', ...error.candidates);
   return { isError: true, content: [{ type: 'text', text: lines.join('\n') }] };
 }
