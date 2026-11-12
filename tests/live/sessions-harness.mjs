@@ -256,38 +256,58 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
 
   await Promise.all([call({ action: 'handoff', tabId: a.tabId }), call({ action: 'handoff', tabId: b.tabId })]);
   const aFrame = frameOf(a.contents), bFrame = frameOf(b.contents);
-  aFrame.focus(); a.contents.focus();
+  aFrame.show(); aFrame.focus(); a.contents.focus();
   await until(() => aFrame.isFocused(), 'A fixture foreground');
   const pressed = new Promise(resolve => a.contents.once('before-input-event', resolve));
   a.contents.sendInputEvent({ type: 'keyDown', keyCode: 'Control' });
   await pressed;
-  bFrame.focus(); b.contents.focus();
+  bFrame.show(); bFrame.focus(); b.contents.focus();
   await until(() => bFrame.isFocused(), 'B fixture foreground');
   // This release goes to B. A cannot observe it, just as with a different app
   // or a native menu. Synthetic Chromium input does not hold a physical key.
   b.contents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' });
   assert.deepEqual(await host.permissions.surface.inputIdle(aFrame), { known: false, idle: false },
     'A background owner cannot supply reliable idle proof');
-  assert.deepEqual(await host.permissions.surface.inputIdle(bFrame), { known: true, idle: true },
-    'The actual helper recognizes a foreground owner and released physical input');
+  // Electron's isFocused is thread-local activation, not Win32 foreground.
+  // Real OS foreground acquisition requires an attended desktop; never turn
+  // a denied focus request into idle proof just to run the UI regression.
+  if (process.env.WB_NATIVE_FOREGROUND_CHECK === '1') {
+    await until(async () => {
+      const state = await host.permissions.surface.inputIdle(bFrame);
+      return state.known && state.idle;
+    }, 'attended Windows foreground owner and physical release');
+    console.log('PASS attended physical foreground idle query');
+  } else console.log('NOT_VERIFIED attended physical foreground idle query (native guard/bit acceptance covered by C++ fixture)');
   assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId).mode, 'native-handoff',
     'An idle desktop alone cannot resume A');
-  aFrame.focus();
+  aFrame.show(); aFrame.focus();
   const aToolbar = presentationOf(a.contents).toolbar;
   aToolbar.focus();
   await until(() => aFrame.isFocused(), 'A trusted return foreground');
+  // Control only the OS sample boundary for the deterministic live UI case.
+  // The native suite separately executes the production guard and bit scan;
+  // no foreground denial is replaced in production or counted as a live pass.
+  const inputIdle = host.permissions.surface.inputIdle;
+  let proof = { known: false, idle: false };
+  host.permissions.surface.inputIdle = async () => proof;
+  await clickToolbar(aToolbar, '#primary[data-action="resume"]');
+  await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId).returnFailure?.code === 'CONTROLS_HELD', 'unknown physical state remains blocked');
+  proof = { known: true, idle: true };
+  assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId).mode, 'native-handoff', 'Idle proof alone is not a return');
+  await until(() => aToolbar.executeJavaScript('document.querySelector("#primary").textContent.match(/Retry return|반환 재시도/)'), 'trusted retry UI');
   await clickToolbar(aToolbar, '#primary[data-action="resume"]');
   await until(async () => {
     const tab = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId);
     return tab.mode === 'automation' && tab.paused === null && tab.returnFailure === null;
-  }, 'lost native release recovery through the real helper and trusted return');
+  }, 'lost native release recovery through a controlled OS sample and trusted retry');
+  host.permissions.surface.inputIdle = inputIdle;
   assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === b.tabId).mode, 'native-handoff',
     'Returning A does not return B');
   await menu(bFrame, 'Resume automation');
   await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === b.tabId).mode === 'automation', 'B separate human return');
   assert.deepEqual(await stored(a.tabId), expected('A'));
   assert.deepEqual(await stored(b.tabId), expected('B'));
-  console.log('PASS lost release in another window reconciles only through a trusted return and guarded physical idle proof; both logins remain');
+  console.log('PASS live lost-release UI: unknown sample refuses, known idle sample plus human Retry returns only A; both logins remain (OS sample boundary controlled)');
 
   await evaluate(b.tabId, '(window.open("/popup", "session-child"), "opened")');
   const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.url === origin + '/popup'), 'session popup');

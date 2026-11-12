@@ -47,7 +47,7 @@ changes.
 - Windows open without taking focus (`showInactive`); leave the desktop alone during the run.
 - `review-harness.mjs` clicks immediately after `open` on a page without contentful paint in its root, which exercises the paint-holding wait (`FrameDriver.inputReady`); a dropped click there shows as `effect 0`.
 - `harness.mjs` uses `BrowserPolicy.manual()` with `consentHelperPath = build/native-consent.exe`. With that helper present, a manual-consent path can raise a real Windows consent prompt. Keep native helpers out of the repo `build/` (build them in an isolated copy, `build-release.md`) or run attended.
-- For the sessions input-state check, set `WB_INPUT_HELPER` to a freshly built package's `bin/native-consent.exe`, or create only `build/input-state/` and compile `g++ -std=c++17 -O2 -static -municode native/consent.cpp -o build/input-state/native-consent.exe`. This separate path leaves the general harness's `build/native-consent.exe` absent. The sessions fixture waits for actual OS foreground focus before testing the native helper; a request to focus alone is not proof that Windows completed it.
+- For the sessions input-state check, set `WB_INPUT_HELPER` to a freshly built package's `bin/native-consent.exe`, or create only `build/input-state/` and compile `g++ -std=c++17 -O2 -static -municode native/consent.cpp -o build/input-state/native-consent.exe`. This separate path leaves the general harness's `build/native-consent.exe` absent. Electron `isFocused()` is thread-local activation, not proof of Win32 foreground; the helper must still reject another foreground owner. `WB_NATIVE_FOREGROUND_CHECK=1` adds an attended real foreground-idle check, outside the done criteria; otherwise it is explicitly printed `NOT_VERIFIED`.
 
 ## Where to add tests
 
@@ -68,10 +68,13 @@ checks terminal failure UI and safe diagnostic metadata while the other session
 returns normally, then uses the trusted Retry return button and verifies both
 sessions' stored logins. Host units cover held-control release on chrome,
 detached-debugger ordering, timeout fences, late replies and a newer Stop.
-The real helper also rejects a background owner and confirms idle on its own
-foreground fixture window. A synthetic key press in A followed by its release
-in B leaves A's tracking stale; only A's trusted Return reconciles it, with both
-stored logins preserved and B still in handoff until its own trusted return.
+The real helper rejects a background owner. A synthetic key press in A followed
+by its release in B leaves A's tracking stale. At the OS-sample boundary, the
+deterministic live UI case supplies unknown then known-idle results: only A's
+trusted Retry reconciles it, with both stored logins preserved and B still in
+handoff until its own return. Production native guard acceptance/refusals and
+the high-bit scan are executed by `input-state.cpp` with Win32 boundary fixtures;
+an attended physical foreground-idle result is reported separately.
 
 | Behavior | File |
 | --- | --- |

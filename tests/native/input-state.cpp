@@ -6,7 +6,19 @@
 static SHORT keyStates[256] = {};
 static int samples = 0;
 static SHORT fixtureAsyncKeyState(int key) { ++samples; return keyStates[key]; }
+static HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
+static bool validOwner = true, correctForeground = true, objectQuery = true, activeDesktop = true, processAccess = true;
+static HWND fixtureForeground() { return correctForeground ? owner : nullptr; }
+static BOOL fixtureWindow(HWND value) { return validOwner && value == owner; }
+static DWORD fixtureOwnerPid(HWND, DWORD* pid) { *pid = GetCurrentProcessId(); return GetCurrentThreadId(); }
+static BOOL fixtureObjectInfo(HANDLE, int, void* value, DWORD, DWORD*) { *static_cast<BOOL*>(value) = activeDesktop; return objectQuery; }
+static HANDLE fixtureOpenProcess(DWORD access, BOOL inherit, DWORD pid) { return processAccess ? OpenProcess(access, inherit, pid) : nullptr; }
 #define GetAsyncKeyState fixtureAsyncKeyState
+#define GetForegroundWindow fixtureForeground
+#define IsWindow fixtureWindow
+#define GetWindowThreadProcessId fixtureOwnerPid
+#define GetUserObjectInformationW fixtureObjectInfo
+#define OpenProcess fixtureOpenProcess
 #define wmain consentMain
 #include "../../native/consent.cpp"
 #undef wmain
@@ -25,6 +37,14 @@ int wmain() {
     keyStates[key] = 0;
   }
   assert(!inputContext(nullptr, 0, nullptr));
+  const HDESK desktop = reinterpret_cast<HDESK>(static_cast<uintptr_t>(0x5678));
+  assert(inputContext(owner, GetCurrentProcessId(), desktop));
+  correctForeground = false; assert(!inputContext(owner, GetCurrentProcessId(), desktop)); correctForeground = true;
+  validOwner = false; assert(!inputContext(owner, GetCurrentProcessId(), desktop)); validOwner = true;
+  objectQuery = false; assert(!inputContext(owner, GetCurrentProcessId(), desktop)); objectQuery = true;
+  activeDesktop = false; assert(!inputContext(owner, GetCurrentProcessId(), desktop)); activeDesktop = true;
+  processAccess = false; assert(!inputContext(owner, GetCurrentProcessId(), desktop)); processAccess = true;
+  assert(!inputContext(owner, GetCurrentProcessId() + 1, desktop));
   std::puts("INPUT_STATE_BITS_PASSED");
   return 0;
 }
