@@ -168,6 +168,15 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.url === origin + '/popup'), 'session popup');
   assert.equal(popup.sessionId, b.sessionId);
   assert.deepEqual(await stored(popup.tabId), expected('B'));
+  assert.equal(await evaluate(a.tabId, 'fetch("/sw-marker").then(r=>r.text())'), 'A');
+  assert.equal(await evaluate(b.tabId, 'fetch("/sw-marker").then(r=>r.text())'), 'B');
+  for (const [tab, marker] of [[a, 'A'], [b, 'B']]) {
+    const logs = await until(async () => {
+      const result = await call({ action: 'console', tabId: tab.tabId, filter: 'SW_MARKER' });
+      return result.rows?.length && result;
+    }, 'session worker console attribution');
+    assert.ok(logs.rows.every(row => row.msg === `SW_MARKER ${marker}`), JSON.stringify(logs));
+  }
   await call({ action: 'handoff', tabId: b.tabId });
   await assert.rejects(call({ action: 'observe', tabId: b.tabId }), { code: 'PRIVATE_HANDOFF' });
   await assert.rejects(call({ action: 'close_session', sessionId: b.sessionId }), { code: 'AUTOMATION_PAUSED' });
@@ -175,6 +184,7 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   await b.contents.executeJavaScript('console.log("PRIVATE_B"); fetch("/sw-marker").then(r=>r.text())');
   assert.equal(await evaluate(a.tabId, 'fetch("/sw-marker").then(r=>r.text())'), 'A');
   await until(async () => (await call({ action: 'console', tabId: a.tabId, filter: 'SW_MARKER A' })).rows?.length, 'A worker recording stays independent of B handoff');
+  assert.ok((await call({ action: 'console', tabId: a.tabId, filter: 'SW_MARKER' })).rows.every(row => row.msg === 'SW_MARKER A'));
   // Synthetic human input on the same live page; real credentials are never used.
   const point = await b.contents.executeJavaScript('(()=>{const r=document.querySelector("#alias").getBoundingClientRect();return {x:Math.round(r.x+10),y:Math.round(r.y+10)}})()');
   b.contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });

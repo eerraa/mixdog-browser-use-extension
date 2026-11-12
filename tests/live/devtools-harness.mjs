@@ -203,7 +203,7 @@ self.addEventListener('fetch', event => {
 
   // 4. Page world: side-effect-free read, refusal, isolated contrast and explicit opt-in.
   assert.deepEqual(measure('console-expression', await call({ action: 'console', tabId, expression: 'window.secretGlobal.answer' })),
-    { tabId, type: 'number', value: 42 });
+    { tabId, sessionId: 'ctx1', sessionName: 'Default', type: 'number', value: 42 });
   assert.match((await call({ action: 'console', tabId, expression: 'window.secretGlobal' })).preview, /answer: 42/);
   assert.equal((await call({ action: 'evaluate', tabId, expression: 'typeof window.secretGlobal' })).value, 'undefined');
   await assert.rejects(call({ action: 'console', tabId, expression: 'window.secretGlobal.answer = 1' }), error => error.code === 'SIDE_EFFECT');

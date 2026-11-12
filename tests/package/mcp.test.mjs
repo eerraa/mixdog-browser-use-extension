@@ -136,6 +136,11 @@ async function sdk(t, context) {
 async function fixture(t) {
   const state = { count: 0, started: 0, shadowPhase: '', shadowApplies: 0, userAgents: [], nativeResults: [] };
   const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/session-api')) {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ account: /(?:^|;\s*)fixtureAccount=([^;]+)/.exec(req.headers.cookie ?? '')?.[1] ?? '' }));
+      return;
+    }
     if (req.url === '/') state.userAgents.push(req.headers['user-agent']);
     if (req.url === '/count') { state.count++; res.end('ok'); return; }
     if (req.url === '/started') { state.started++; res.end('ok'); return; }
@@ -146,6 +151,10 @@ async function fixture(t) {
       res.end('ok'); return;
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (req.url.startsWith('/sessions')) {
+      res.end('<!doctype html><title>Browser session fixture</title><p id="identity">empty</p>');
+      return;
+    }
     if (req.url === '/autonomous') {
       res.end(`<!doctype html><meta charset="utf-8"><title>Packaged app verification</title>
         <button id="attach">Attach local fixture</button><input id="file" type="file" hidden>
@@ -249,7 +258,7 @@ test('packaged folder: standard SDK, hook admission, real page, replay/ownership
   assert.equal((await first.client.callTool({ name: 'browse', arguments: issued })).isError, true, 'a used ticket is never replayed');
   const clicked = await first.call('owner-a', { action: 'click', tabId, ref: reference });
   assert.equal(clicked.isError, false, textOf(clicked));
-  assert.match(textOf(clicked), /^executed click e\d+ tab=t\d+ snap=s\d+\n/);
+  assert.match(textOf(clicked), /^executed click e\d+ tab=t\d+ snap=s\d+ session=ctx\d+ name="Default"\n/);
   await until(() => page.state.count === 1, 'one local HTTP side effect from one browser click');
   // The ref names the same unchanged button; a second click is a new, deliberate input.
   assert.equal((await first.call('owner-a', { action: 'click', tabId, ref: reference })).isError, false);
@@ -324,7 +333,7 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
     // permission prompt leaves the renderer running: the click is executed.
     if (scenario.kind === 'javascript-dialog') {
       assert.equal(click.isError, true, textOf(click));
-      assert.match(textOf(click), /^uncertain click e\d+ tab=t\d+ code=DIALOG_OPEN replaySafe=false\n[\s\S]*\nrequest \S+ javascript-dialog/, textOf(click));
+      assert.match(textOf(click), /^uncertain click e\d+ tab=t\d+ code=DIALOG_OPEN replaySafe=false session=ctx\d+ name="Default"\n[\s\S]*\nrequest \S+ javascript-dialog/, textOf(click));
     } else assert.equal(click.isError, false, textOf(click));
     const requests = await connection.call(owner, { action: 'requests', tabId });
     assert.equal(requests.isError, false, JSON.stringify(dataOf(requests)));
@@ -603,6 +612,99 @@ test('connection authority (plain MCP registration): no hooks or key on disk, ow
   assert.equal(page.state.count, 1, 'nothing reached the first connection\'s page');
   const closed = await first.call({ action: 'close_tab', tabId });
   assert.equal(closed.isError, false, textOf(closed));
+});
+
+test('packaged connection authority: named temporary sessions preserve the default login and attribute DevTools', { timeout: 90000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const page = await fixture(t);
+  const { call, descriptor } = await plainClient(t, context);
+  for (const action of ['create_session', 'list_sessions', 'close_session']) assert.ok(descriptor.inputSchema.properties.action.enum.includes(action));
+  assert.equal(descriptor.inputSchema.properties.sessionId.type, 'string');
+  const openedA = await call({ action: 'open', url: page.url + 'sessions/a' });
+  assert.equal(openedA.isError, false, textOf(openedA));
+  const a = tabOf(openedA);
+  const initial = dataOf(await call({ action: 'list_sessions' })).sessions;
+  const defaultId = initial.find(session => session.isDefault).sessionId;
+  const write = async (tabId, marker) => {
+    const result = await call({ action: 'evaluate', tabId, world: 'page', expression: `(async()=>{
+      document.cookie='fixtureAccount=${marker}; Path=/';localStorage.setItem('identity','${marker}');
+      window.fixtureIdentity='${marker}';document.querySelector('#identity').textContent='${marker}';
+      console.log('SESSION_EVENT ${marker}');await fetch('/session-api?${marker}');return '${marker}';})()` });
+    assert.equal(result.isError, false, textOf(result));
+  };
+  const read = async tabId => {
+    const result = await call({ action: 'evaluate', tabId, expression: '({cookie:document.cookie,local:localStorage.getItem("identity")})' });
+    assert.equal(result.isError, false, textOf(result));
+    return valueOf(result);
+  };
+  await write(a, 'A');
+  const created = dataOf(await call({ action: 'create_session', name: 'Reference B' }));
+  assert.equal(created.temporary, true);
+  assert.equal(created.isolated, true);
+  const openedB = await call({ action: 'open', sessionId: created.sessionId, url: page.url + 'sessions/b' });
+  assert.equal(openedB.isError, false, textOf(openedB));
+  assert.match(textOf(openedB), new RegExp(`session=${created.sessionId} name="Reference B"`));
+  const b = tabOf(openedB);
+  assert.deepEqual(await read(b), { cookie: '', local: null });
+  await write(b, 'B');
+  assert.deepEqual(await read(a), { cookie: 'fixtureAccount=A', local: 'A' });
+  const sibling = await call({ action: 'open', sessionId: created.sessionId, url: page.url + 'sessions/b2' });
+  const b2 = tabOf(sibling);
+  assert.deepEqual(await read(b2), { cookie: 'fixtureAccount=B', local: 'B' });
+  for (const [tabId, sessionId, marker] of [[a, defaultId, 'A'], [b, created.sessionId, 'B']]) {
+    const observed = await call({ action: 'observe', tabId });
+    assert.ok(has(observed, marker), textOf(observed));
+    const console = dataOf(await call({ action: 'console', tabId, filter: 'SESSION_EVENT' }));
+    assert.deepEqual(console.rows.map(row => row.msg), [`SESSION_EVENT ${marker}`]);
+    assert.equal(console.sessionId, sessionId);
+    const network = await until(async () => {
+      const result = dataOf(await call({ action: 'network', tabId, filter: '/session-api' }));
+      return result.rows?.some(row => row.s === 200) && result;
+    }, 'session network recorded');
+    assert.equal(network.sessionId, sessionId);
+    const body = dataOf(await call({ action: 'network', tabId, id: network.rows[0].id, body: true }));
+    assert.deepEqual(JSON.parse(body.body), { account: marker });
+    const inspected = dataOf(await call({ action: 'inspect', tabId, target: { selector: '#identity' } }));
+    assert.equal(inspected.sessionId, sessionId);
+  }
+  const listed = dataOf(await call({ action: 'list_tabs' })).tabs;
+  assert.deepEqual(listed.map(tab => [tab.tabId, tab.sessionId]), [[a, defaultId], [b, created.sessionId], [b2, created.sessionId]]);
+  assert.equal(listed[1].sessionName, 'Reference B');
+  const closed = dataOf(await call({ action: 'close_session', sessionId: created.sessionId }));
+  assert.equal(closed.cleanupComplete, true, JSON.stringify(closed));
+  assert.deepEqual(new Set(closed.closedTabIds), new Set([b, b2]));
+  assert.deepEqual(await read(a), { cookie: 'fixtureAccount=A', local: 'A' });
+  assert.equal(dataOf(await call({ action: 'close_session', sessionId: defaultId })).code, 'DEFAULT_SESSION');
+  assert.equal((await call({ action: 'open', sessionId: created.sessionId, url: page.url })).isError, true);
+  const next = dataOf(await call({ action: 'create_session', name: 'Reference B' }));
+  assert.notEqual(next.sessionId, created.sessionId);
+  const fresh = await call({ action: 'open', sessionId: next.sessionId, url: page.url + 'sessions/fresh' });
+  assert.deepEqual(await read(tabOf(fresh)), { cookie: '', local: null });
+});
+
+test('packaged hook authority: browser session selectors cannot change caller identity or a ticket digest', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  const page = await fixture(t);
+  const connection = await sdk(t, context);
+  const owner = 'session-owner';
+  const created = dataOf(await connection.call(owner, { action: 'create_session', name: 'Owned session' }));
+  const defaultId = dataOf(await connection.call(owner, { action: 'list_sessions' })).sessions.find(session => session.isDefault).sessionId;
+  const args = { action: 'open', sessionId: created.sessionId, url: page.url + 'sessions/owned' };
+  const authorized = await authorize(context.env, connection.channel, owner, args);
+  const tampered = await connection.client.callTool({ name: 'browse', arguments: { ...authorized, sessionId: defaultId } });
+  assert.equal(tampered.isError, true, textOf(tampered));
+  assert.deepEqual(dataOf(await connection.call(owner, { action: 'list_tabs' })).tabs, []);
+  const foreign = await connection.call('other-caller', args);
+  assert.equal(foreign.isError, true);
+  assert.match(textOf(foreign), /FOREIGN_SESSION/);
+  const close = dataOf(await connection.call('other-caller', { action: 'close_session', sessionId: created.sessionId }));
+  assert.equal(close.code, 'FOREIGN_SESSION');
+  const opened = await connection.call(owner, args);
+  assert.equal(opened.isError, false, textOf(opened));
+  const foreignTab = await connection.call('other-caller', { action: 'observe', tabId: tabOf(opened) });
+  assert.equal(foreignTab.isError, true);
+  assert.match(textOf(foreignTab), /FOREIGN_TAB/);
+  assert.equal(dataOf(await connection.call(owner, { action: 'close_session', sessionId: created.sessionId })).cleanupComplete, true);
 });
 
 test('connection authority: stdio EOF exits the owned launcher gracefully', { timeout: 40000 }, async t => {

@@ -380,6 +380,7 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
   await check('toolbar: read-only in automation; take-control, address Enter, back, reload, resume and stop-automation', async () => {
     const first = `http://127.0.0.1:${port}/toolbar-a`, second = `http://127.0.0.1:${port}/toolbar-b`;
     const opened = await call({ action: 'open', url: first });
+    const windowTitle = title => `${title} - Independent Browser [${opened.sessionName} (${opened.sessionId})]`;
     const id = opened.tabId;
     const tab = async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === id);
     const page = pageContents(first);
@@ -391,7 +392,7 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       let current = await ui(s => s.tone === 'agent' && s.address === first);
       assert.deepEqual(current, { address: first, readOnly: true, back: true, forward: true, reload: true,
         tone: 'agent', primary: 'take-control', secondary: 'stop-automation' });
-      assert.equal(toolbarFrame.getTitle(), `Toolbar fixture A - Independent Browser [${opened.sessionName} (${opened.sessionId})]`);
+      assert.equal(toolbarFrame.getTitle(), windowTitle('Toolbar fixture A'));
       assert.equal(await toolbar.executeJavaScript("document.getElementById('session').textContent"), `${opened.sessionName} (${opened.sessionId})`);
       assertShielded(page, 'toolbar fixture page');
       // 2. Take control from the toolbar: native handoff on the same page.
@@ -416,7 +417,7 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       const secondBefore = requests('/toolbar-b');
       pressToolbar(toolbar, 'Enter');
       await until(() => page.getURL() === second && !page.isLoading()
-        && toolbarFrame.getTitle() === 'Toolbar fixture B - Independent Browser', 'address navigation');
+        && toolbarFrame.getTitle() === windowTitle('Toolbar fixture B'), 'address navigation');
       assert.equal(presentationOf(page).frame, toolbarFrame, 'Address navigation must keep the same page and frame');
       assert.equal(requests('/toolbar-b'), secondBefore + 1);
       assert.equal((await tab()).mode, 'native-handoff');
@@ -424,14 +425,14 @@ export async function runAdditionalScenarios({ host, caller, tabId, port, check,
       await ui(s => s.address === second && !s.back);
       await clickToolbar(toolbar, '#back');
       await until(() => page.getURL() === first && !page.isLoading()
-        && toolbarFrame.getTitle() === 'Toolbar fixture A - Independent Browser', 'toolbar back');
+        && toolbarFrame.getTitle() === windowTitle('Toolbar fixture A'), 'toolbar back');
       await ui(s => s.address === first && !s.forward && !s.reload);
       await page.executeJavaScript('window.__toolbarReloadMarker=true');
       const firstBefore = requests('/toolbar-a');
       await clickToolbar(toolbar, '#reload');
       await until(async () => requests('/toolbar-a') === firstBefore + 1 && !page.isLoading()
         && await page.executeJavaScript('window.__toolbarReloadMarker!==true'), 'toolbar reload');
-      assert.equal(toolbarFrame.getTitle(), 'Toolbar fixture A - Independent Browser');
+      assert.equal(toolbarFrame.getTitle(), windowTitle('Toolbar fixture A'));
       assert.equal(presentationOf(page).frame, toolbarFrame);
       // 4. Toolbar resume returns to automation and a fresh observe succeeds.
       await ui(s => s.primary === 'resume');
