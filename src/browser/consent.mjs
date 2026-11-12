@@ -10,6 +10,7 @@ export class ConsentSurface {
   constructor(helperPath) {
     this.helperPath = helperPath;
     this.prompts = new Map();
+    this.inputQueries = new Set();
     this.closed = false;
   }
   dismiss(id) {
@@ -96,8 +97,45 @@ export class ConsentSurface {
     try { return await bounded(result, 90000, 'Windows consent', undefined, () => child.kill()); }
     finally { prompt.child = undefined; }
   }
+  async inputIdle(window, signal) {
+    signal?.throwIfAborted();
+    const unknown = { known: false, idle: false };
+    if (this.closed || window.isDestroyed()) return unknown;
+    let child;
+    try {
+      const handle = window.getNativeWindowHandle();
+      const hwnd = `0x${(handle.length === 8 ? handle.readBigUInt64LE() : BigInt(handle.readUInt32LE())).toString(16)}`;
+      child = spawn(this.helperPath, ['--input-idle', hwnd, String(process.pid)], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch { return unknown; }
+    this.inputQueries.add(child);
+    let output = '', bytes = 0;
+    const result = new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.stdout.on('data', data => {
+        bytes += data.length;
+        if (bytes > 256) { child.kill(); reject(new Error('Invalid input state response')); }
+        else output += data.toString('utf8');
+      });
+      child.stderr.resume();
+      child.on('close', code => {
+        try {
+          const state = JSON.parse(output);
+          if (code !== 0 || Object.keys(state).sort().join(',') !== 'idle,known,mode'
+            || state.mode !== 'input-idle' || typeof state.known !== 'boolean' || typeof state.idle !== 'boolean') {
+            resolve(unknown);
+          } else resolve({ known: state.known, idle: state.known && state.idle });
+        } catch { resolve(unknown); }
+      });
+    });
+    try { return await bounded(result, 1500, 'Windows input state', signal); }
+    catch { signal?.throwIfAborted(); return unknown; }
+    finally { child.kill(); this.inputQueries.delete(child); }
+  }
   close() {
     this.closed = true;
+    for (const child of this.inputQueries) child.kill();
     for (const id of this.prompts.keys()) this.dismiss(id);
   }
 }

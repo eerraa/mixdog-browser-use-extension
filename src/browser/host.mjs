@@ -231,7 +231,11 @@ export class BrowserHost {
         };
         await step('initialization', () => p.ready);
         await step('cleanup', () => p.driver.waitForIdle(signal));
-        const generation = await step('controls', () => p.presentation.beginReturn());
+        const generation = await step('controls', async () => {
+          await p.presentation.reconcileNativeControls(() => this.permissions.surface.inputIdle(p.presentation.frame, signal), signal);
+          signal.throwIfAborted();
+          return p.presentation.beginReturn();
+        });
         this.#invalidate(p, 'trusted-human-resume');
         p.driver.actorSignal = signal;
         try {

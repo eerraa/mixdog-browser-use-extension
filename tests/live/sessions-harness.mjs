@@ -99,7 +99,7 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   await app.whenReady();
-  host = new BrowserHost({ dataDir: directory, consentHelperPath: path.join(directory, 'never-prompt.exe'),
+  host = new BrowserHost({ dataDir: directory, consentHelperPath: process.env.WB_INPUT_HELPER,
     toolbarPreloadPath, onRevokeConnection: async () => { throw new Error('No connection revoke in session tests'); } });
   const controller = new AbortController();
   const caller = { sessionId: 'fixture-caller', callId: 'session-fixture', signal: controller.signal,
@@ -253,6 +253,41 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   assert.deepEqual(await stored(a.tabId), expected('A'));
   assert.deepEqual(await stored(b.tabId), expected('B'));
   console.log('PASS real debugger reconnect during human return preserves isolated session storage');
+
+  await Promise.all([call({ action: 'handoff', tabId: a.tabId }), call({ action: 'handoff', tabId: b.tabId })]);
+  const aFrame = frameOf(a.contents), bFrame = frameOf(b.contents);
+  aFrame.focus(); a.contents.focus();
+  await until(() => aFrame.isFocused(), 'A fixture foreground');
+  const pressed = new Promise(resolve => a.contents.once('before-input-event', resolve));
+  a.contents.sendInputEvent({ type: 'keyDown', keyCode: 'Control' });
+  await pressed;
+  bFrame.focus(); b.contents.focus();
+  await until(() => bFrame.isFocused(), 'B fixture foreground');
+  // This release goes to B. A cannot observe it, just as with a different app
+  // or a native menu. Synthetic Chromium input does not hold a physical key.
+  b.contents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' });
+  assert.deepEqual(await host.permissions.surface.inputIdle(aFrame), { known: false, idle: false },
+    'A background owner cannot supply reliable idle proof');
+  assert.deepEqual(await host.permissions.surface.inputIdle(bFrame), { known: true, idle: true },
+    'The actual helper recognizes a foreground owner and released physical input');
+  assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId).mode, 'native-handoff',
+    'An idle desktop alone cannot resume A');
+  aFrame.focus();
+  const aToolbar = presentationOf(a.contents).toolbar;
+  aToolbar.focus();
+  await until(() => aFrame.isFocused(), 'A trusted return foreground');
+  await clickToolbar(aToolbar, '#primary[data-action="resume"]');
+  await until(async () => {
+    const tab = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === a.tabId);
+    return tab.mode === 'automation' && tab.paused === null && tab.returnFailure === null;
+  }, 'lost native release recovery through the real helper and trusted return');
+  assert.equal((await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === b.tabId).mode, 'native-handoff',
+    'Returning A does not return B');
+  await menu(bFrame, 'Resume automation');
+  await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === b.tabId).mode === 'automation', 'B separate human return');
+  assert.deepEqual(await stored(a.tabId), expected('A'));
+  assert.deepEqual(await stored(b.tabId), expected('B'));
+  console.log('PASS lost release in another window reconciles only through a trusted return and guarded physical idle proof; both logins remain');
 
   await evaluate(b.tabId, '(window.open("/popup", "session-child"), "opened")');
   const popup = await until(async () => (await call({ action: 'list_tabs' })).tabs.find(t => t.url === origin + '/popup'), 'session popup');

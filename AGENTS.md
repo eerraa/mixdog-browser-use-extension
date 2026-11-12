@@ -32,7 +32,7 @@ with Owns, Not here and Update when.
 | `docs/agents/change-map.md` | symbol-level edit steps, rules to keep and extra steps per Edit table ID | which files, tests and docs | implementing a request |
 | `docs/agents/testing.md` | suites, prerequisites, expected counts, Electron substitute, live harnesses, where to add tests, real-device check procedure, test rules | criteria and their status, build steps | verifying a change |
 | `docs/agents/build-release.md` | pins, build and package pipeline, clean package build, versioning, release, licensing upkeep | notice texts, verification | building, packaging, upgrading, releasing |
-| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D25) | the rules themselves | proposing a design change; "why not X?" |
+| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D27) | the rules themselves | proposing a design change; "why not X?" |
 | `README.md` | end-user install, usage, safety (Korean, shipped) | maintainer detail | user-visible behavior changes |
 | `skills/independent-browser/SKILL.md` | how agents use the tool (shipped); its essentials also travel as `CONNECTION_INSTRUCTIONS` in `src/mcp/tool.mjs` | implementation | tool behavior or usage changes |
 | `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | when to update it (`build-release.md` Licensing) | pins, derived Mixdog files or patches change |
@@ -90,7 +90,7 @@ Modules, entry points and import direction: `architecture.md`.
 | Browser unit tests | `npm run test:browser` | node_modules |
 | Live Electron tests | `npm run test:live` | node_modules, unlocked desktop |
 | Native helpers | `npm run build:native -- "<MinGW licenses dir>"` | MinGW-w64 `g++` |
-| Native test | `npm run test:native` | native helpers |
+| Native test | `npm run test:native` | native helper (`WB_INPUT_HELPER` supported), MinGW-w64 `g++` |
 | Package | `npm run package` | build, native helpers |
 | Clean package | `npm run package:clean -- "<abs MinGW licenses dir>"` (working tree → `dist/win-browser-XXXXXX/win-browser`) | node_modules, MinGW-w64 `g++` |
 | Release folder (explicit user request) | `npm run package:clean -- "<abs MinGW licenses dir>" --release` (HEAD → `dist/releases/v<ver>/`) | clean committed tree, MinGW-w64 `g++` |

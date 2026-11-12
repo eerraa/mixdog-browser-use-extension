@@ -119,6 +119,7 @@ export class BrowserWindow extends EventEmitter {
     ownedWindows.push(this);
   }
   setMenu(menu) { this.menu = menu; }
+  getNativeWindowHandle() { const handle = Buffer.alloc(8); handle.writeBigUInt64LE(BigInt(ownedWindows.indexOf(this) + 1)); return handle; }
   setTitle(title) { this.title = title; }
   isVisible() { return this.visible; }
   isDestroyed() { return this.destroyed; }

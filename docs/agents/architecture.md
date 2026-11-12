@@ -116,6 +116,7 @@ Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` →
 - DevTools reads: `execute` → `#devtoolsRead` (console, network, performance; outside the lane) or `#run` → `#inspect` (lane).
 - Popups become owned pages of the same owner and profile and inherit a pause or handoff.
 - Human return: `#resume` bounds the caller's wait without releasing the tab lane's actual fence. `returnAttempt` counts trusted requests; `returnFailure` holds safe stage/code metadata for `list_tabs` and the presentation's failure notice. The existing modes stay unchanged; precondition failures and timeouts follow `contracts.md` Handoff state machine. Native release edges from trusted chrome keep the original page's held-control tracking current.
+- Lost releases: `PagePresentation.reconcileNativeControls` asks the existing `BrowserPermissions.surface` (`ConsentSurface.inputIdle`) for a bounded no-prompt `native-consent.exe --input-idle <hwnd> <pid>` query only during trusted return with native tracking still held. The Win32 helper returns current aggregate known/idle booleans, and the presentation rejects stale proofs after new input, mode/generation change or cancellation. No MCP action exposes this query.
 
 ## Window composition
 

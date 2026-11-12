@@ -1317,6 +1317,64 @@ test('human return reconnects a detached debugger before sending automation-mode
   } finally { driver.reconnect = reconnect; driver.setNativeMode = nativeMode; await host.close(); }
 });
 
+test('human return reconciles a lost native release only with a fresh known idle result', async () => {
+  const { host, call, tabId, tab } = await setup();
+  let state = { known: true, idle: false }, probes = 0;
+  host.permissions.surface.inputIdle = async () => { probes++; return state; };
+  try {
+    tab.toolbarAction('ready');
+    await call({ action: 'handoff', tabId });
+    // The press reached this page; its release went to another window/menu.
+    tab.contents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', code: 'ControlLeft', key: 'Control' });
+    const resume = () => tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    await resume();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].returnFailure.code, 'CONTROLS_HELD');
+    state = { known: false, idle: true };
+    await resume();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'native-handoff', 'An unknown query never proves a release');
+    state = { known: true, idle: true };
+    await tick();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'native-handoff', 'Changing physical state never resumes automatically');
+    await resume();
+    const returned = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(returned.mode, 'automation');
+    assert.equal(returned.returnFailure, null);
+    assert.equal(probes, 3);
+    assert.equal((await call({ action: 'observe', tabId })).disposition, 'observed');
+  } finally { await host.close(); }
+});
+
+test('an idle probe cannot clear input observed after the return request or a newer Stop', async () => {
+  const { host, call, tabId, tab } = await setup();
+  let probe = deferred(), started = deferred(), returning;
+  host.permissions.surface.inputIdle = async () => { started.resolve(); return probe.promise; };
+  const down = code => tab.contents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', code, key: code });
+  const resume = () => tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+  try {
+    await call({ action: 'handoff', tabId });
+    down('ControlLeft');
+    returning = resume();
+    await started.promise;
+    down('ShiftLeft');
+    probe.resolve({ known: true, idle: true });
+    await returning;
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].returnFailure.code, 'CONTROLS_HELD');
+    probe = deferred(); started = deferred();
+    returning = resume();
+    await started.promise;
+    tab.frame.menu.items.find(item => item.label === 'Stop automation').click();
+    await returning;
+    probe.resolve({ known: true, idle: true });
+    await tick();
+    const stopped = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(stopped.paused, 'explicit-stop');
+    assert.equal(stopped.returnFailure.interruptedBy, 'explicit-stop');
+    host.permissions.surface.inputIdle = async () => ({ known: true, idle: false });
+    await resume();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].returnFailure.code, 'CONTROLS_HELD', 'Late idle proof did not erase held-control bookkeeping');
+  } finally { probe.resolve({ known: false, idle: false }); await returning; await host.close(); }
+});
+
 test('human return timeout ends the UI wait but keeps actual cleanup fenced against a late resume', async t => {
   const { host, call, tabId, tab } = await setup();
   const driver = drivers.get(tab.contents), presented = driver.presented, snapshot = driver.snapshot;

@@ -79,6 +79,10 @@ blocker, not permission to edit it or operate a human approval surface.
    biometric data. Page observations are blocked during native handoff, and
    nothing the person does there (pages, dialogs, popups, downloads) reaches
    your results. Fields they typed into stay `sensitive` afterwards.
+   `CONTROLS_HELD`: ask the person to release keys/buttons and retry in that
+   same foreground window. A trusted return checks Windows physical idle state
+   to reconcile releases lost to other apps/menus; no automatic return or input
+   replay follows an idle result. Unknown or held input stays blocked.
    Continue only after the person returns control in that window (toolbar
    **Return to agent** or **Resume agent**, or the **Resume automation** menu)
    and fresh state is available.

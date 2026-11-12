@@ -160,6 +160,7 @@ export class PagePresentation {
     this.shieldButtons = new Set();
     this.nativeKeys = new Set();
     this.nativeButtons = new Set();
+    this.inputRevision = 0;
     this.unknownGesture = false;
     this.releaseWaiters = new Set();
     this.notice = null;
@@ -320,6 +321,7 @@ export class PagePresentation {
     this.releaseIfSafe();
   }
   #nativeRelease(input) {
+    if (['keyDown', 'keyUp', 'mouseDown', 'mouseUp', 'mouseWheel'].includes(input.type)) this.inputRevision++;
     if (input.type === 'keyUp') this.nativeKeys.delete(input.code || input.key);
     if (input.type === 'mouseUp') this.nativeButtons.delete(input.button);
   }
@@ -328,6 +330,7 @@ export class PagePresentation {
     catch { event.preventDefault(); return false; }
   }
   nativeKeyboard(event, input) {
+    this.inputRevision++;
     if (this.mode !== 'native-handoff') {
       if (this.contents.isFocused()) {
         event.preventDefault();
@@ -346,6 +349,7 @@ export class PagePresentation {
     if (input.type === 'keyUp') this.nativeKeys.delete(key);
   }
   nativeMouse(event, input) {
+    if (['mouseDown', 'mouseUp', 'mouseWheel'].includes(input.type)) this.inputRevision++;
     // Debugger mouse dispatch emits this event too. While shielded, no OS
     // pointer event can reach the page, so automation input passes untouched.
     if (this.mode !== 'native-handoff') return;
@@ -397,6 +401,20 @@ export class PagePresentation {
     }
     this.refresh();
     this.callbacks.visibility(this.logicalVisible());
+  }
+  async reconcileNativeControls(probe, signal) {
+    if (!this.nativeKeys.size && !this.nativeButtons.size) return;
+    const revision = this.inputRevision, generation = this.generation, mode = this.mode;
+    const state = await probe();
+    signal?.throwIfAborted();
+    // A missing release can have gone to a different app or a native menu.
+    // Only a fresh OS idle sample may reconcile the old bookkeeping. Neither
+    // focus nor a late reply proves release, and shield gestures stay fenced.
+    if (state?.known === true && state.idle === true && !this.closed
+      && revision === this.inputRevision && generation === this.generation && mode === this.mode) {
+      this.nativeKeys.clear();
+      this.nativeButtons.clear();
+    }
   }
   beginReturn() {
     if (this.nativeKeys.size || this.nativeButtons.size || this.shieldKeys.size || this.shieldButtons.size || this.unknownGesture) {

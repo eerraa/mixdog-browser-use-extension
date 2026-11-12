@@ -62,6 +62,9 @@ actual JavaScript inputs, including the adapted protocol implementation.
 The independent native sources are included under `sources/native/`.
 Windows UserConsentVerifier is used through its documented desktop ABI;
 no credential or biometric data is returned to this plugin.
+Its separate no-prompt input-idle mode uses documented Win32 input, desktop,
+window and token queries to return only aggregate known/idle booleans. It does
+not install hooks, retain key identities or synthesize input.
 
 The shipped Windows helpers are built with MinGW-w64 GCC. Compiler provenance,
 original GCC GPLv3/Runtime Library Exception 3.1, MinGW-w64 runtime notices and

@@ -2,6 +2,8 @@
 // IUserConsentVerifierInterop / UserConsentVerifier contract.
 // No credential, PIN, biometric data, or authentication fallback is received.
 // Contract: https://learn.microsoft.com/windows/win32/api/userconsentverifierinterop/
+// The separate --input-idle mode reads only aggregate current physical state
+// through documented Win32 APIs; it never prompts, logs keys or injects input.
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <unknwn.h>
@@ -10,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 using HStr = void*;
 struct Inspectable : IUnknown {
@@ -80,7 +83,83 @@ static HRESULT awaitResult(AsyncEnum* operation, HWND owner, DWORD ownerPid, INT
   return hr;
 }
 
+static bool tokenInputAccess(HANDLE process, DWORD* integrity, DWORD* uiAccess) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
+  DWORD bytes = 0;
+  GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &bytes);
+  bool ok = false;
+  if (bytes && bytes <= 65536) {
+    std::vector<BYTE> buffer(bytes);
+    if (GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), bytes, &bytes)) {
+      const auto label = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buffer.data());
+      if (IsValidSid(label->Label.Sid) && *GetSidSubAuthorityCount(label->Label.Sid)) {
+        *integrity = *GetSidSubAuthority(label->Label.Sid, *GetSidSubAuthorityCount(label->Label.Sid) - 1);
+        ok = GetTokenInformation(token, TokenUIAccess, uiAccess, sizeof(*uiAccess), &bytes) != FALSE;
+      }
+    }
+  }
+  CloseHandle(token);
+  return ok;
+}
+
+static bool inputContext(HWND owner, DWORD ownerPid, HDESK inputDesktop) {
+  DWORD currentPid = 0, needed = 0;
+  if (!owner || !ownerPid || !IsWindow(owner) || GetForegroundWindow() != owner
+    || !GetWindowThreadProcessId(owner, &currentPid) || currentPid != ownerPid) return false;
+  BOOL receivesInput = FALSE;
+  const HDESK threadDesktop = GetThreadDesktop(GetCurrentThreadId());
+  if (!threadDesktop || !GetUserObjectInformationW(threadDesktop, UOI_IO, &receivesInput, sizeof(receivesInput), &needed)
+    || !receivesInput) return false;
+  receivesInput = FALSE;
+  if (!GetUserObjectInformationW(inputDesktop, UOI_IO, &receivesInput, sizeof(receivesInput), &needed)
+    || !receivesInput) return false;
+  HANDLE foreground = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
+  if (!foreground) return false;
+  DWORD helperIL = 0, foregroundIL = 0, helperUI = 0, foregroundUI = 0;
+  const bool ok = tokenInputAccess(GetCurrentProcess(), &helperIL, &helperUI)
+    && tokenInputAccess(foreground, &foregroundIL, &foregroundUI)
+    && helperIL >= foregroundIL && helperUI == foregroundUI;
+  CloseHandle(foreground);
+  return ok;
+}
+
+static bool allInputReleased() {
+  // High bit only: the unreliable historical low bit is never used. This
+  // includes every physical mouse button, so swapped mappings do not matter.
+  for (int key = 1; key <= 0xfe; ++key) if ((GetAsyncKeyState(key) & 0x8000) != 0) return false;
+  return true;
+}
+
+static int inputIdle(HWND owner, DWORD ownerPid) {
+  // Zero from GetAsyncKeyState is ambiguous on another desktop or across
+  // UIPI. Prove those preconditions independently, before AND after sampling.
+  const HDESK inputDesktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS | DESKTOP_HOOKCONTROL);
+  LASTINPUTINFO before = {sizeof(LASTINPUTINFO), 0}, after = {sizeof(LASTINPUTINFO), 0};
+  bool known = inputDesktop && inputContext(owner, ownerPid, inputDesktop) && GetLastInputInfo(&before);
+  bool idle = known;
+  if (known) {
+    idle = allInputReleased();
+    known = inputContext(owner, ownerPid, inputDesktop) && GetLastInputInfo(&after) && before.dwTime == after.dwTime;
+  }
+  if (inputDesktop) CloseDesktop(inputDesktop);
+  std::printf("{\"mode\":\"input-idle\",\"known\":%s,\"idle\":%s}\n", known ? "true" : "false", known && idle ? "true" : "false");
+  return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+  if (argc >= 2 && !std::wcscmp(argv[1], L"--input-idle")) {
+    HWND owner = nullptr;
+    DWORD ownerPid = 0;
+    if (argc == 4) {
+      wchar_t* end = nullptr;
+      const auto address = std::wcstoull(argv[2], &end, 16);
+      if (end != argv[2] && !*end) owner = reinterpret_cast<HWND>(address);
+      const auto pid = std::wcstoull(argv[3], &end, 10);
+      if (end != argv[3] && !*end && pid <= MAXDWORD) ownerPid = static_cast<DWORD>(pid);
+    }
+    return inputIdle(owner, ownerPid);
+  }
   const bool availability = argc == 2 && !std::wcscmp(argv[1], L"--availability");
   const bool verification = argc == 4 && !std::wcscmp(argv[1], L"--verify");
   if (!availability && !verification) return report("invalid", E_INVALIDARG, -1);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,8 @@ test('real Electron browser sessions: storage, tabs, DevTools, handoff and scope
   const directory = await mkdtemp(path.join(os.tmpdir(), 'wb-ses-'));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  env.WB_INPUT_HELPER = process.env.WB_INPUT_HELPER ?? path.join(root, 'build/input-state/native-consent.exe');
+  await access(env.WB_INPUT_HELPER);
   const child = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'),
     [path.join(root, 'tests/live/sessions-harness.mjs'), directory], { cwd: root, env, windowsHide: false });
   let stdout = '', stderr = '';

@@ -13,11 +13,11 @@ changes.
 | --- | --- | --- | --- | --- |
 | `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract and schema, caller authority and data root), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
 | `npm run test:browser` | `tests/browser/run.mjs` → frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner, queue, permission-broker in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
-| `npm run test:native` | `tests/native/consent.test.mjs`: availability enum only, never a prompt | `build/native-consent.exe` | no | — |
-| `npm run test:live` | `tests/live/*.test.mjs` (10 files, 11 tests) | `node_modules/electron/dist`, unlocked desktop | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*`, `wb-ses-*` |
+| `npm run test:native` | `tests/native/consent.test.mjs`: availability enum, unknown input-owner query and compiled `input-state.cpp` high-bit fixture; never a prompt or injected key | `WB_INPUT_HELPER` (or `build/native-consent.exe`), MinGW-w64 `g++` | no | — (fixture removes its own `browser-input-state-*`) |
+| `npm run test:live` | `tests/live/*.test.mjs` (10 files, 11 tests) | `node_modules/electron/dist`, unlocked desktop; sessions also `WB_INPUT_HELPER` or `build/input-state/native-consent.exe` | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*`, `wb-ses-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, connection authority (a plain MCP registration as Claude Code makes it), refused configurations, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 24, `test:browser` 209, `test:live` 11, `test:package` 17, `test:native` 1 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 24, `test:browser` 211, `test:live` 11, `test:package` 17, `test:native` 3 passing. A lower count means skipped or lost tests.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.
 
@@ -47,6 +47,7 @@ changes.
 - Windows open without taking focus (`showInactive`); leave the desktop alone during the run.
 - `review-harness.mjs` clicks immediately after `open` on a page without contentful paint in its root, which exercises the paint-holding wait (`FrameDriver.inputReady`); a dropped click there shows as `effect 0`.
 - `harness.mjs` uses `BrowserPolicy.manual()` with `consentHelperPath = build/native-consent.exe`. With that helper present, a manual-consent path can raise a real Windows consent prompt. Keep native helpers out of the repo `build/` (build them in an isolated copy, `build-release.md`) or run attended.
+- For the sessions input-state check, set `WB_INPUT_HELPER` to a freshly built package's `bin/native-consent.exe`, or create only `build/input-state/` and compile `g++ -std=c++17 -O2 -static -municode native/consent.cpp -o build/input-state/native-consent.exe`. This separate path leaves the general harness's `build/native-consent.exe` absent. The sessions fixture waits for actual OS foreground focus before testing the native helper; a request to focus alone is not proof that Windows completed it.
 
 ## Where to add tests
 
@@ -67,6 +68,10 @@ checks terminal failure UI and safe diagnostic metadata while the other session
 returns normally, then uses the trusted Retry return button and verifies both
 sessions' stored logins. Host units cover held-control release on chrome,
 detached-debugger ordering, timeout fences, late replies and a newer Stop.
+The real helper also rejects a background owner and confirms idle on its own
+foreground fixture window. A synthetic key press in A followed by its release
+in B leaves A's tracking stale; only A's trusted Return reconciles it, with both
+stored logins preserved and B still in handoff until its own trusted return.
 
 | Behavior | File |
 | --- | --- |
