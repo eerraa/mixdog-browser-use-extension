@@ -5,6 +5,12 @@
 #include <string>
 #include <vector>
 
+// MinGW-w64 8.1 headers predate this Windows 10 attribute:
+// ProcThreadAttributeValue(ProcThreadAttributeJobList = 13, FALSE, TRUE, FALSE).
+#ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
+#define PROC_THREAD_ATTRIBUTE_JOB_LIST 0x0002000D
+#endif
+
 // The launcher owns only the process tree it creates. A non-inherited Windows
 // job closes every descendant if the launcher is terminated by the MCP host.
 // It never scans, signals, or changes another process/session.
@@ -60,32 +66,36 @@ int wmain(int argc, wchar_t** argv) {
   startup.StartupInfo.hStdInput = handles[0];
   startup.StartupInfo.hStdOutput = handles[1];
   startup.StartupInfo.hStdError = handles[2];
+  // The child is created inside the job. Assigning it after CreateProcess left
+  // a window in which a host terminating this launcher orphaned a suspended
+  // child that still held the host's stdio pipes.
   SIZE_T attributeSize = 0;
-  InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeSize);
+  InitializeProcThreadAttributeList(nullptr, 2, 0, &attributeSize);
   std::vector<BYTE> attributes(attributeSize);
   startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
-  if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attributeSize)
-    || !UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-      handles, sizeof(handles), nullptr, nullptr)) {
-    const int result = failed(L"standard handle allowlist");
+  if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 2, 0, &attributeSize)) {
+    const int result = failed(L"process attribute list");
+    for (HANDLE handle : handles) CloseHandle(handle);
+    CloseHandle(job);
+    return result;
+  }
+  if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+      handles, sizeof(handles), nullptr, nullptr)
+    || !UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+      &job, sizeof(job), nullptr, nullptr)) {
+    const int result = failed(L"child handle and job attributes");
+    DeleteProcThreadAttributeList(startup.lpAttributeList);
     for (HANDLE handle : handles) CloseHandle(handle);
     CloseHandle(job);
     return result;
   }
   PROCESS_INFORMATION child{};
   const BOOL created = CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, TRUE,
-    EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+    EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
     nullptr, root.c_str(), &startup.StartupInfo, &child);
   DeleteProcThreadAttributeList(startup.lpAttributeList);
   for (HANDLE handle : handles) CloseHandle(handle);
   if (!created) { const int result = failed(L"CreateProcess"); CloseHandle(job); return result; }
-  if (!AssignProcessToJobObject(job, child.hProcess)) {
-    const int result = failed(L"AssignProcessToJobObject");
-    TerminateProcess(child.hProcess, 90);
-    CloseHandle(child.hThread); CloseHandle(child.hProcess); CloseHandle(job);
-    return result;
-  }
-  ResumeThread(child.hThread);
   CloseHandle(child.hThread);
   WaitForSingleObject(child.hProcess, INFINITE);
   DWORD exitCode = 1;

@@ -20,7 +20,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 ```
 
 - Authority (`src/shared/paths.mjs authorityMode`): `WB_AUTHORITY` from the registration, `hook` by default. Mixdog runs `${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe --mcp` from `plugin.json` plus `hooks/hooks.json`; Claude Code runs the same launcher by absolute path with `WB_AUTHORITY=connection` and `WB_DATA_DIR`, and loads no manifest, hooks or skill.
-- `native/bridge.cpp` resolves the plugin root from its own path, clears `NODE_OPTIONS` and `NODE_PATH`, and runs the child in a kill-on-close Job, so children die with the launcher. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
+- `native/bridge.cpp` resolves the plugin root from its own path, clears `NODE_OPTIONS` and `NODE_PATH`, and creates the child inside a kill-on-close Job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, D28), so children die with the launcher at any moment, including during creation. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
 - One companion per MCP server process, which is one connection. Channel = fresh UUID; key = 32 random bytes (base64url); both passed as `WB_CHANNEL`/`WB_IPC_KEY`. Ready line `WB_READY <channel>` on stdout within 20 s.
 - Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`. Hooks find it through `connections/<channel>/endpoint.json` (hook authority only).
 
@@ -80,7 +80,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/dialogs.mjs` | JS dialog adapter: wraps `dialog.showMessageBox`, pairs CDP events | `BrowserDialogs`, `showManualMessageBox` |
 | `src/browser/consent.mjs` | `native-consent.exe` prompt surface; native page menu | `ConsentSurface`, `installPageMenu` |
 | `src/browser/user-agent.mjs` | removes `IndependentWindowsBrowser/` and `Electron/` UA tokens | `configureBrowserIdentity` |
-| `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; Job object | `wmain` |
+| `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; child created in its Job | `wmain` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
 
 Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` → `shared/`; `hook/` → `shared/`. `shared/` imports no other layer and no Electron, and `mcp/` and `hook/` never import `browser/`, so the MCP and hook bundles carry no engine code. Inside `browser/`, `host.mjs` imports the other modules and `perception/*` modules are pure. Nothing under `src/` imports `build/`.

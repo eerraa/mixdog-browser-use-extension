@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -45,6 +45,17 @@ async function until(predicate, label) {
     await delay(20);
   }
   throw new Error(`Timed out: ${label}`);
+}
+// Read-only process listing: [{ProcessId, ParentProcessId, CommandLine}] for one image name.
+function processes(name) {
+  const shell = path.join(process.env.SYSTEMROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const script = '[Console]::OutputEncoding = [Text.Encoding]::UTF8; '
+    + `@(Get-CimInstance Win32_Process -Filter "Name='${name}'" | Select-Object ProcessId, ParentProcessId, CommandLine) | ConvertTo-Json -Compress`;
+  return new Promise((resolve, reject) => execFile(shell, ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', windowsHide: true }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve([].concat(JSON.parse(stdout.trim() || '[]')));
+    }));
 }
 async function environment(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'browser-package-한글-'));
@@ -530,6 +541,30 @@ test('packaged stdio EOF gracefully exits the owned launcher without a parent fo
   const result = await Promise.race([connection.exit, delay(5000).then(() => null)]);
   assert.ok(result, 'MCP stdin EOF must close its companion and exit; a parent force-kill is not graceful shutdown');
   assert.equal(result.code, 0, JSON.stringify(result));
+});
+
+// A host may terminate the launcher while it is still creating its child. The
+// child is created inside the launcher's job, so it ends with the launcher.
+// Probabilistic: a launcher that assigned the job after CreateProcess left a
+// suspended child after about one termination in twenty.
+test('a launcher terminated during child creation leaves no child behind', { timeout: 120000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const launchers = new Set();
+  const leftovers = async () => (await processes('electron.exe')).filter(p => launchers.has(p.ParentProcessId));
+  try {
+    for (let run = 0; run < 48; run++) {
+      const child = spawn(executable, ['--mcp'], { env: context.env, stdio: 'ignore', windowsHide: true });
+      const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); });
+      launchers.add(child.pid);
+      await delay(run % 24);
+      child.kill();
+      await exited;
+    }
+    await delay(1000);
+    assert.deepEqual(await leftovers(), [], 'Every child of a terminated launcher must end with its job');
+  } finally {
+    for (const left of await leftovers()) { try { process.kill(left.ProcessId); } catch {} }
+  }
 });
 
 for (const requestId of [0, 17]) test(`JSON-RPC cancellation id ${requestId} aborts browser execution without a reply or input replay`, { timeout: 45000 }, async t => {
