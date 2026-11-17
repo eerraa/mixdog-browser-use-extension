@@ -100,12 +100,13 @@ Windows x64 ZIP을 받아 압축을 풉니다. 공개된 SHA256 파일로 다운
 
 ### Claude Code에 등록
 
-Claude Code에서는 플러그인 마켓플레이스나 훅 없이, 압축을 푼 `win-browser` 폴더의 실행기를
-일반 MCP 서버(stdio)로 등록합니다. 등록은 사용자 설정(`~/.claude.json`)을 바꾸므로 사용자가
+Claude Code에서는 플러그인 마켓플레이스나 훅 없이, `win-browser` 폴더의 실행기를 일반 MCP
+서버(stdio)로 등록합니다. 아래 "고정 경로와 업데이트"의 고정 경로를 한 번 등록해 두면 버전이
+바뀌어도 다시 등록할 필요가 없습니다. 등록은 사용자 설정(`~/.claude.json`)을 바꾸므로 사용자가
 직접 실행합니다(PowerShell 예시).
 
 ```powershell
-claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code" -- "C:\경로\win-browser\bin\bridge.exe" --mcp
+claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code" -- "C:\설치루트\win-browser\bin\bridge.exe" --mcp
 ```
 
 - `WB_AUTHORITY=connection`: Claude Code는 세션마다 MCP 서버를 따로 띄우므로 그 연결 자체를
@@ -126,6 +127,28 @@ claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_D
 - 기본 `browser-policy.json`의 HID·USB·알림·위치 위임은 Claude Code 등록에도 같게 적용됩니다.
   대화 턴 경계는 MCP 서버에 전달되지 않으므로 위임의 caller generation은 그 연결(세션)이
   끝날 때까지 하나로 유지됩니다.
+- Codex·DSH 같은 다른 MCP 호스트도 같은 실행기(`bin\bridge.exe --mcp`)와 두 환경 변수로
+  등록합니다.
+
+### 고정 경로와 업데이트
+
+MCP 호스트에는 버전마다 바뀌는 폴더 대신 고정 경로 하나만 등록합니다. 버전별 폴더는 나란히
+두고, 고정 경로는 현재 버전을 가리키는 디렉터리 정션으로 둡니다.
+
+```text
+C:\설치루트\win-browser                               ← 호스트에 등록하는 경로(정션)
+C:\설치루트\win-browser-versions\v<버전>\win-browser   ← 버전별 설치
+```
+
+- 새 버전은 옆 폴더에 풀고 정션만 바꿉니다. 실행 중인 폴더는 덮어쓰지 않습니다.
+- 이미 실행 중인 연결은 시작할 때의 버전을 끝까지 쓰고, 다음 연결(새 세션, `/mcp` 재연결,
+  호스트 재시작)부터 새 버전을 씁니다. 실행 중인 버전은 `status` 결과의 `version`에 나옵니다.
+- ZIP으로 받았다면 `C:\설치루트\win-browser-versions\v<버전>\`에 압축을 풀고 정션을 바꿉니다.
+  `cmd /c rmdir "C:\설치루트\win-browser"`는 정션만 지우고 대상 폴더는 지우지 않습니다.
+  그다음 `cmd /c mklink /J "C:\설치루트\win-browser" "C:\설치루트\win-browser-versions\v<버전>\win-browser"`를
+  실행합니다.
+- 소스 저장소에서는 `npm run install:local -- "C:\설치루트"`가 릴리즈 폴더를 파일별 SHA256으로
+  확인해 설치하고 정션을 바꾼 뒤, 실행 중이 아닌 이전 버전 폴더를 지웁니다.
 - Claude Code는 긴 MCP 결과를 줄이거나 파일로 넘기므로 큰 페이지는 `mode:"full"`보다
   `find`·`scope`로 읽습니다.
 

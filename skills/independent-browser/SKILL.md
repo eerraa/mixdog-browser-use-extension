@@ -172,7 +172,8 @@ page, and the body:
 - `hide` voids that tab's refs and points; `show` keeps them (observe before
   acting).
 - `status`, `list_tabs`, `requests`, `respond`, `permissions`, `downloads`,
-  `revoke` and the DevTools reads return compact JSON.
+  `revoke` and the DevTools reads return compact JSON. `status.version` is the
+  running package version.
 
 ## Scripts (`run`)
 

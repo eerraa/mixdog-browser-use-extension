@@ -19,6 +19,27 @@ static int failed(const wchar_t* operation) {
   return 90;
 }
 
+// The package root is the final path of this executable, links resolved. A
+// stable folder that is a junction to a versioned install is resolved once
+// here, so this process tree never loads files of a later install.
+static bool packageRoot(std::wstring& root) {
+  std::vector<wchar_t> buffer(32768);
+  DWORD size = GetModuleFileNameW(nullptr, buffer.data(), 32768);
+  if (!size || size >= 32768) return false;
+  const HANDLE file = CreateFileW(buffer.data(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    nullptr, OPEN_EXISTING, 0, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  size = GetFinalPathNameByHandleW(file, buffer.data(), 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  CloseHandle(file);
+  if (!size || size >= 32768) return false;
+  root.assign(buffer.data(), size);
+  if (!root.compare(0, 8, L"\\\\?\\UNC\\")) root = L"\\\\" + root.substr(8);
+  else if (!root.compare(0, 4, L"\\\\?\\") && root.size() - 4 < MAX_PATH) root.erase(0, 4);
+  root.resize(root.find_last_of(L'\\'));
+  root.resize(root.find_last_of(L'\\')); // <plugin>\bin\bridge.exe
+  return true;
+}
+
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2) return 64;
   const bool browser = !std::wcscmp(argv[1], L"--browser");
@@ -26,12 +47,8 @@ int wmain(int argc, wchar_t** argv) {
     : !std::wcscmp(argv[1], L"--mcp") ? L"mcp.cjs"
     : !std::wcscmp(argv[1], L"--hook") ? L"hook.cjs" : nullptr;
   if (!script) return 64;
-  wchar_t executable[32768];
-  const DWORD size = GetModuleFileNameW(nullptr, executable, 32768);
-  if (!size || size >= 32768) return failed(L"GetModuleFileName");
-  std::wstring root(executable, size);
-  root.resize(root.find_last_of(L"\\/"));
-  root.resize(root.find_last_of(L"\\/")); // <plugin>/bin/bridge.exe
+  std::wstring root;
+  if (!packageRoot(root)) return failed(L"package root");
   const std::wstring runtime = root + L"\\runtime\\electron.exe";
   const std::wstring entry = root + L"\\app\\" + script;
   std::wstring command = L"\"" + runtime + L"\" \"" + entry + L"\"";

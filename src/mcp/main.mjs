@@ -6,13 +6,17 @@ import { createGateway } from './gateway.mjs';
 import { authorityMode, pluginData } from '../shared/paths.mjs';
 import { CONNECTION_INSTRUCTIONS, browserTool, errorResult, toolResult } from './tool.mjs';
 
+// The package version: the MCP handshake and `status` report it, so a host that
+// still runs an earlier install is visible to the agent and the person.
+const VERSION = '0.5.2';
+
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
   const authority = authorityMode();
   const gateway = await createGateway(root, pluginData(), { authority });
   // A plain MCP registration loads no skill; the server instructions carry
   // its guidance instead. Under host hooks the shipped skill does.
-  const server = new Server({ name: 'win-browser', version: '0.5.2' }, {
+  const server = new Server({ name: 'win-browser', version: VERSION }, {
     capabilities: { tools: {} },
     ...(authority === 'connection' ? { instructions: CONNECTION_INSTRUCTIONS } : {}),
   });
@@ -27,7 +31,7 @@ async function main() {
       // the stdio connection is the caller and the argument is not part of a call.
       if (hooked && args?._channel !== gateway.channel) throw new Error('Missing, foreign or replaced browser channel');
       if (!args || typeof args !== 'object') throw new Error('Browse arguments must be an object');
-      const result = args.action === 'status' ? await gateway.status() : await gateway.execute(args, extra.signal);
+      const result = args.action === 'status' ? { version: VERSION, ...await gateway.status() } : await gateway.execute(args, extra.signal);
       return toolResult(result, args.action);
     } catch (error) {
       const args = request.params.arguments;

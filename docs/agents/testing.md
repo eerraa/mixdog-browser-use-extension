@@ -11,13 +11,13 @@ changes.
 
 | Command | Scope | Needs | Real windows | `%TEMP%` dirs left |
 | --- | --- | --- | --- | --- |
-| `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract and schema, caller authority and data root), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch) | `node_modules` | no | `companion-termination-*` |
+| `npm test` | `tests/shared/*.test.mjs` (authority, rpc, browse contract and schema, caller authority and data root), `tests/companion/*.test.mjs` (shutdown), `tests/scripts/*.test.mjs` (SDK patch, local install) | `node_modules` | no | `companion-termination-*` (local install tests remove their `browser-install-*`) |
 | `npm run test:browser` | `tests/browser/run.mjs` → frames, host, policy, requests, dialogs, user-agent, devtools, perception, runner, queue, permission-broker in one `node --test` (30 s cap); arguments select a subset | `node_modules` | no (Electron mocked) | `independent-browser-check-*`, `independent-browser-unit-*`, `browser-startup-cancel-*`, `browser-policy-*` |
 | `npm run test:native` | `tests/native/consent.test.mjs`: availability enum, unknown input-owner query and compiled `input-state.cpp` high-bit fixture; never a prompt or injected key | `WB_INPUT_HELPER` (or `build/native-consent.exe`), MinGW-w64 `g++` | no | — (fixture removes its own `browser-input-state-*`) |
 | `npm run test:live` | `tests/live/*.test.mjs` (10 files, 11 tests) | `node_modules/electron/dist`, unlocked desktop; sessions also `WB_INPUT_HELPER` or `build/input-state/native-consent.exe` | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*`, `wb-ses-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, connection authority (a plain MCP registration as Claude Code makes it), refused configurations, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 24, `test:browser` 211, `test:live` 11, `test:package` 18, `test:native` 3 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 29, `test:browser` 211, `test:live` 11, `test:package` 19, `test:native` 3 passing. A lower count means skipped or lost tests.
 - The launcher termination test in `mcp.test.mjs` is probabilistic: it terminates the launcher 48 times during child creation. The earlier suspended-create launcher left a child after about one termination in twenty (1–3 per 48–60 in local runs), so one pass is evidence, not proof; a single leftover is a defect.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.

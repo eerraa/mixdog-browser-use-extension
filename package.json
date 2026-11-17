@@ -17,7 +17,8 @@
     "test:live": "node --test tests/live/*.test.mjs",
     "test:package": "node --test tests/package/*.test.mjs",
     "package": "node scripts/package.mjs",
-    "package:clean": "node scripts/clean-package.mjs"
+    "package:clean": "node scripts/clean-package.mjs",
+    "install:local": "node scripts/install-local.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1"

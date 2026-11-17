@@ -15,7 +15,7 @@ when tests pass.
 
 | ID | Requirement |
 | --- | --- |
-| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses, registered as a Mixdog plugin or as a plain MCP server in Claude Code. Users never install dev tools, build, or patch Mixdog or Claude Code. |
+| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses, registered as a Mixdog plugin or as a plain MCP server in Claude Code or another MCP host (Codex, DSH), at one stable install path (`build-release.md` Local install). Users never install dev tools, build, or patch Mixdog or Claude Code. |
 | C2 | Natural selection: one MCP tool and the `independent-browser` skill (in Claude Code, the server instructions); agents choose them for interactive web work without being told. Own names are fine; built-in names and UI are not cloned. |
 | C3 | Real browser work: navigation, DOM and screenshot observation, exact targeting, click, typing, forms, tabs, frames, HTML uploads, downloads, dialogs and result checks, with ref freshness and validation, cancellation and uncertainty semantics. |
 | C4 | Independence: works with built-in Browser Use off; own windows and profiles; the person handles login, passwords, CAPTCHA and 2FA in the same window; no copying of profiles, cookies or accounts; no built-in handoff. |
@@ -61,6 +61,6 @@ for AC21 (`testing.md` Real-device checks). `verified` = checked on a package bu
 | AC20 | C7 | A choice a person makes in a `datalist` suggestion window during automation fails closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (inserted text) | not verified |
 | AC21 | C1, C2, C8 | Registered in Claude Code as a plain MCP server under connection authority, the tool appears as `mcp__win-browser__browse` with the server instructions, its calls are admitted without hooks, a `_lease` argument is refused, separate sessions get separate companions, and an agent picks the tool for interactive web work unprompted | unit `paths`, `contract`; package `mcp` (connection authority) | not verified |
 | AC22 | C3, C4, C6, C7, C8 | Named temporary browser sessions in one connection isolate cookies, localStorage, IndexedDB, service workers, Cache Storage, HTTP/auth cache; same-session tabs share login; scoped logout/close preserves the default; tab/DOM/iframe/evaluate/DevTools attribution and handoff privacy work in both accounts; Stop/denial cannot be reset by creating or closing a session | unit `contract`, `host`; live `sessions`, `browser-host`, `devtools`; package `mcp` | not verified |
-| AC23 | C1 | A host terminating the launcher at any moment, including while it creates its child, leaves no process of that connection | package `mcp` (launcher termination) | not verified |
+| AC23 | C1 | A host terminating the launcher at any moment, including while it creates its child, leaves no process of that connection; hosts registered at the stable install path start the newest installed version on their next connection, a running connection keeps its own version folder, and `status` reports the running `version` | unit `install-local`; package `mcp` (launcher termination, junction, connection authority) | not verified |
 
 C10 governs every verification report (`testing.md` Rules) and has no criterion of its own.

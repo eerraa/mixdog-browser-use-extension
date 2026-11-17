@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -567,6 +567,28 @@ test('a launcher terminated during child creation leaves no child behind', { tim
   }
 });
 
+// A stable folder may be a junction to a versioned install. The launcher
+// resolves it once, so a later switch of the junction never mixes versions.
+test('a launcher reached through a junction runs its process tree from the resolved package', { timeout: 40000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const link = path.join(context.directory, 'stable');
+  await symlink(artifact, link, 'junction');
+  t.after(() => unlink(link)); // Removes the junction only, never the package.
+  const launcher = spawn(path.join(link, 'bin', 'bridge.exe'), ['--mcp'], { env: context.env, stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
+  const exited = new Promise(resolve => launcher.once('exit', code => resolve({ code })));
+  launcher.stderr.on('data', bytes => context.errors.push(bytes.toString('utf8')));
+  try {
+    const child = await until(async () => (await processes('electron.exe')).find(p => p.ParentProcessId === launcher.pid), 'launcher child');
+    const command = child.CommandLine.toLowerCase();
+    const resolved = path.join(await realpath(artifact), 'app', 'mcp.cjs').toLowerCase();
+    assert.ok(command.includes(`"${resolved}"`), `child must run from the resolved package: ${child.CommandLine}`);
+    assert.ok(!command.includes(link.toLowerCase()), `child must not run through the junction: ${child.CommandLine}`);
+  } finally {
+    launcher.stdin.end();
+    if (!await Promise.race([exited, delay(5000).then(() => null)])) { launcher.kill(); await exited; }
+  }
+});
+
 for (const requestId of [0, 17]) test(`JSON-RPC cancellation id ${requestId} aborts browser execution without a reply or input replay`, { timeout: 45000 }, async t => {
   const context = await environment(t);
   const page = await fixture(t);
@@ -611,6 +633,7 @@ test('connection authority (plain MCP registration): no hooks or key on disk, ow
   assert.equal(Object.hasOwn(first.descriptor.inputSchema.properties, '_lease'), false);
   assert.equal(Object.hasOwn(first.descriptor.inputSchema.properties, '_channel'), false);
   const status = dataOf(await first.call({ action: 'status' }));
+  assert.equal(status.version, JSON.parse(await readFile(path.join(artifact, 'plugin.json'), 'utf8')).version);
   assert.equal(status.tabCount, 0);
   assert.equal(status.capabilities.delegation.mode, 'delegated');
   const directory = path.join(context.directory, 'connections', first.channel);

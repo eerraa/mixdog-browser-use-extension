@@ -1,11 +1,11 @@
 # Build and release
 
 Owns: pins, build and package pipeline, clean package build, versioning, release
-procedure and licensing upkeep.
+procedure, local install and licensing upkeep.
 Not here: notice texts (`THIRD_PARTY_NOTICES.md`, `third_party/mixdog/`), verification
 (`testing.md`), package contents (`architecture.md` Package layout).
-Update when: a pin, build or package step, version location, release step or notice
-section changes.
+Update when: a pin, build or package step, version location, release or install step
+or notice section changes.
 
 ## Pins
 
@@ -52,7 +52,7 @@ Mixdog runs a registered package in place and keys its data by the folder path (
 
 ## Versioning
 
-Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `plugin.json` `version`, server `version` in `src/mcp/main.mjs`.
+Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `plugin.json` `version`, `VERSION` in `src/mcp/main.mjs` (the MCP handshake and `status` report it).
 
 ## Release (explicit user request only)
 
@@ -63,9 +63,33 @@ Bump together: `package.json` `version`, `package-lock.json` (root and `packages
    - `win-browser-v<ver>-files.sha256`: one `<sha256>  win-browser/<path>` line per packaged file; `release.json`: version, source commit, ZIP name and digest.
 3. Run `test:package` on `dist/releases/v<ver>/win-browser`, and on the `win-browser` of the ZIP extracted to a fresh temp dir.
 4. On explicit request only: tag `v<ver>` on that commit, push, then create the GitHub release on `eerraa/mixdog-browser-use-extension` with the ZIP and its `.sha256`. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler. Check that the uploaded asset digest equals the local sha256.
-5. Users register the new folder themselves; existing registrations are never replaced automatically. Mixdog: the `dist/releases/v<ver>/win-browser` folder. Claude Code: `claude mcp remove --scope user win-browser` for an earlier entry, then `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <abs repo>\dist\releases\v<ver>\win-browser\bin\bridge.exe --mcp`, checked with `claude mcp get win-browser`; running sessions see it after `/mcp` reconnect or a restart.
+5. MCP hosts receive the release through Local install: hosts registered at the stable path start it on their next connection, with no registration change. Mixdog registers a folder path itself: the `dist/releases/v<ver>/win-browser` folder, registered again for each release by the user.
 
 Published releases are the `v<ver>` git tags and their GitHub releases.
+
+## Local install
+
+One stable path per machine is the only registration of MCP hosts (D29). `npm run install:local -- "<abs install root>" [<release dir>]` (`scripts/install-local.mjs`; default release dir `dist/releases/v<package.json version>`):
+
+| Path | Content |
+| --- | --- |
+| `<root>\win-browser` | directory junction to the current version; the path every host registers |
+| `<root>\win-browser-versions\v<ver>\win-browser` | one verified install per version; never overwritten |
+
+1. Verify the release folder's `win-browser/` against `win-browser-v<ver>-files.sha256`: exactly the listed files, each with its sha256.
+2. Copy it to a staging folder beside the versions, verify again, rename to `v<ver>`. An existing `v<ver>` is reused only when it verifies; it may be running, so it is never replaced.
+3. Create the new junction beside the stable path, then swap names (stable → old, new → stable, remove the old link). A real folder at the stable path is refused.
+4. Remove each other `v<ver>` that no running process has its image in (`Win32_Process.ExecutablePath`) and whose name can be detached by rename; report the rest as `inUse` for a later install.
+
+A running connection keeps its version: the launcher resolves the junction when it starts (`architecture.md` Processes). The next connection (new session, `/mcp` reconnect, host restart) starts the new version; `status.version` shows which one runs.
+
+Registrations at the stable path (user steps unless the user asks the agent; data dirs stay per host):
+
+| Host | Registration |
+| --- | --- |
+| Claude Code | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <root>\win-browser\bin\bridge.exe --mcp`; replace an earlier entry with `claude mcp remove --scope user win-browser` first; check with `claude mcp get win-browser` |
+| Codex | `~/.codex/config.toml` `[mcp_servers.win-browser]`: `command = "<root>/win-browser/bin/bridge.exe"`, `args = ["--mcp"]`, `[mcp_servers.win-browser.env]` `WB_AUTHORITY = "connection"`, `WB_DATA_DIR = '<abs dir>'` |
+| DSH | the profile's `cordis.patch.yml` entry `@deepseek-ai/dsh-mcp-client` with `serverName: win-browser`, `transport: stdio`, `command: <root>/win-browser/bin/bridge.exe`, `args: [--mcp]`, `env` as above |
 
 ## Licensing
 

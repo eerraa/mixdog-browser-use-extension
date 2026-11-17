@@ -18,7 +18,7 @@ the code.
 - Hook authority: `end` aborts the session's admitted work and blocks its late calls. `UserPromptSubmit` starts a new generation even when `end` was lost.
 - Tabs of another caller session fail with `FOREIGN_TAB`. Browser profiles are per connection and caller, with optional additional browser sessions below.
 - Pipe `hello` must match the channel and the 43-character key (constant-time compare). One gateway per companion. Methods per role: gateway `status`, `call`, `shutdown`; hook `begin`, `end`, `issue`.
-- `status` is answered by the gateway without consuming a ticket.
+- `status` is answered by the gateway without consuming a ticket and reports the running package `version`.
 
 ## Browser sessions
 

@@ -20,7 +20,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 ```
 
 - Authority (`src/shared/paths.mjs authorityMode`): `WB_AUTHORITY` from the registration, `hook` by default. Mixdog runs `${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe --mcp` from `plugin.json` plus `hooks/hooks.json`; Claude Code runs the same launcher by absolute path with `WB_AUTHORITY=connection` and `WB_DATA_DIR`, and loads no manifest, hooks or skill.
-- `native/bridge.cpp` resolves the plugin root from its own path, clears `NODE_OPTIONS` and `NODE_PATH`, and creates the child inside a kill-on-close Job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, D28), so children die with the launcher at any moment, including during creation. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
+- `native/bridge.cpp` resolves the plugin root from the final path of its own executable (junctions resolved, so the whole tree runs from one version folder of a Local install), clears `NODE_OPTIONS` and `NODE_PATH`, and creates the child inside a kill-on-close Job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, D28), so children die with the launcher at any moment, including during creation. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
 - One companion per MCP server process, which is one connection. Channel = fresh UUID; key = 32 random bytes (base64url); both passed as `WB_CHANNEL`/`WB_IPC_KEY`. Ready line `WB_READY <channel>` on stdout within 20 s.
 - Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`. Hooks find it through `connections/<channel>/endpoint.json` (hook authority only).
 
@@ -80,7 +80,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/dialogs.mjs` | JS dialog adapter: wraps `dialog.showMessageBox`, pairs CDP events | `BrowserDialogs`, `showManualMessageBox` |
 | `src/browser/consent.mjs` | `native-consent.exe` prompt surface; native page menu | `ConsentSurface`, `installPageMenu` |
 | `src/browser/user-agent.mjs` | removes `IndependentWindowsBrowser/` and `Electron/` UA tokens | `configureBrowserIdentity` |
-| `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; child created in its Job | `wmain` |
+| `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; final-path package root; child created in its Job | `wmain`, `packageRoot` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
 
 Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` → `shared/`; `hook/` → `shared/`. `shared/` imports no other layer and no Electron, and `mcp/` and `hook/` never import `browser/`, so the MCP and hook bundles carry no engine code. Inside `browser/`, `host.mjs` imports the other modules and `perception/*` modules are pure. Nothing under `src/` imports `build/`.
@@ -153,5 +153,7 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 `plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist), `app/{mcp,hook,companion}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and the fork record `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
 Mixdog derives the registry stem from the folder basename, so it must stay `win-browser` (server `plugin-win-browser`). Claude Code uses no file of the folder's plugin surface: it runs `bin/bridge.exe --mcp` by absolute path under the server name its registration gives (`win-browser` → `mcp__win-browser__browse`).
+
+Installed copies (`build-release.md` Local install): `<root>\win-browser` is a junction to `<root>\win-browser-versions\v<ver>\win-browser`, one package folder per version.
 
 `npm run package:clean` (`scripts/clean-package.mjs`) runs the three build steps in a temp copy and keeps only this folder; with `--release` it lays out `dist/releases/v<ver>/`: `win-browser/`, `win-browser-v<ver>-windows-x64.zip`, its `.sha256`, `win-browser-v<ver>-files.sha256` (one sha256 per packaged file) and `release.json` (version, source commit, ZIP digest).

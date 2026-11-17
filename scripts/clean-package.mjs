@@ -87,7 +87,7 @@ try {
   const version = JSON.parse(await readFile(path.join(temp, 'package.json'), 'utf8')).version;
   const manifest = JSON.parse(await readFile(path.join(temp, 'plugin.json'), 'utf8'));
   const server = await readFile(path.join(temp, 'src', 'mcp', 'main.mjs'), 'utf8');
-  if (manifest.version !== version || !server.includes(`version: '${version}'`)) {
+  if (manifest.version !== version || !server.includes(`const VERSION = '${version}';`)) {
     throw new Error(`Version ${version} differs between package.json, plugin.json and src/mcp/main.mjs`);
   }
   // Never replace a release: Mixdog runs registered packages in place.
