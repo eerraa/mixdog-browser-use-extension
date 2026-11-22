@@ -55,3 +55,30 @@ test('the fixed package policy is loaded once; later file edits do not change it
   assert.equal(policy.permits('hid'), true);
   assert.equal((await BrowserPolicy.load(root)).permits('hid'), false);
 });
+
+test('browser-policy.json supports optional explicit automationMode while keeping shipped JSON standard by default', () => {
+  const shipped = new BrowserPolicy(delegated());
+  assert.equal(shipped.automationMode, 'standard');
+  assert.equal(shipped.explicitAutomationMode, false);
+  assert.equal(shipped.describe().automationMode, 'standard');
+
+  for (const base of [delegated(), { version: 1, mode: 'manual' }, { version: 1, mode: 'disabled' }]) {
+    const elevated = new BrowserPolicy({ ...base, automationMode: 'elevated' });
+    assert.equal(elevated.mode, base.mode);
+    assert.equal(elevated.automationMode, 'elevated');
+    assert.equal(elevated.explicitAutomationMode, true);
+    assert.equal(elevated.describe().automationMode, 'elevated');
+
+    const standard = new BrowserPolicy({ ...base, automationMode: 'standard' });
+    assert.equal(standard.mode, base.mode);
+    assert.equal(standard.automationMode, 'standard');
+    assert.equal(standard.explicitAutomationMode, true);
+
+    for (const bad of ['Elevated', 'full', true, null, '']) {
+      const rejected = new BrowserPolicy({ ...base, automationMode: bad });
+      assert.equal(rejected.mode, 'disabled');
+      assert.equal(rejected.automationMode, 'standard');
+      assert.equal(rejected.explicitAutomationMode, false);
+    }
+  }
+});

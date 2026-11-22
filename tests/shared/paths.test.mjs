@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { authorityMode, pluginData } from '../../src/shared/paths.mjs';
+import { authorityMode, automationMode, pluginData } from '../../src/shared/paths.mjs';
 
 const mixdog = path.resolve('C:\\mixdog-data');
 const own = path.resolve('C:\\wb-data');
@@ -26,4 +26,14 @@ test('each authority reads only its own absolute data root and never falls back 
     assert.throws(() => pluginData(env), /WB_DATA_DIR must be an absolute directory/);
   }
   assert.throws(() => pluginData({ WB_AUTHORITY: 'other', MIXDOG_PLUGIN_DATA: mixdog }), /WB_AUTHORITY/);
+});
+
+test('automationMode is unset by default, accepts only standard or elevated, and fails closed on unknown values', () => {
+  assert.equal(automationMode({}), null);
+  assert.equal(automationMode({ WB_AUTOMATION_MODE: '' }), null);
+  assert.equal(automationMode({ WB_AUTOMATION_MODE: 'standard' }), 'standard');
+  assert.equal(automationMode({ WB_AUTOMATION_MODE: 'elevated' }), 'elevated');
+  for (const value of ['Elevated', 'full', 'true', '1', ' elevated', 'unsafe']) {
+    assert.throws(() => automationMode({ WB_AUTOMATION_MODE: value }), /WB_AUTOMATION_MODE must be standard or elevated/, value);
+  }
 });

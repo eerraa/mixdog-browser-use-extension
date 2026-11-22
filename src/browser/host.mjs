@@ -59,6 +59,9 @@ export class BrowserHost {
   #closed = false;
   #revoking = false;
   #revokeFlight;
+  #automationMode = 'standard';
+  #configuredAutomationMode = 'standard';
+  #automationModeSource = 'default';
   // Connection-wide refs (D14), result signals and short ids.
   #refs = new RefRegistry();
   #signals = new SignalQueue();
@@ -66,11 +69,16 @@ export class BrowserHost {
   #snapshotSequence = 0;
 
   constructor({ dataDir, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
+    automationMode = policy.automationMode ?? 'standard',
+    automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
     runnerPreloadPath, createRunnerSandbox: sandboxFactory = createRunnerSandbox }) {
     if (![dataDir, consentHelperPath, toolbarPreloadPath].every(value => typeof value === 'string' && path.isAbsolute(value))
       || (runnerPreloadPath !== undefined && !(typeof runnerPreloadPath === 'string' && path.isAbsolute(runnerPreloadPath)))
       || typeof onRevokeConnection !== 'function') {
       throw new TypeError('Absolute plugin dataDir/consentHelperPath/toolbarPreloadPath and onRevokeConnection are required');
+    }
+    if (automationMode !== 'standard' && automationMode !== 'elevated') {
+      throw new TypeError('automationMode must be standard or elevated');
     }
     this.dataDir = dataDir;
     this.toolbarPreloadPath = toolbarPreloadPath;
@@ -79,6 +87,9 @@ export class BrowserHost {
     this.connectionId = freshId();
     this.onRevokeConnection = onRevokeConnection;
     this.policy = policy;
+    this.#automationMode = automationMode;
+    this.#configuredAutomationMode = automationMode;
+    this.#automationModeSource = automationModeSource;
     this.nativeRequests = new BrowserRequests();
     this.permissions = new BrowserPermissions({
       connectionId: this.connectionId, consentHelperPath, policy, nativeRequests: this.nativeRequests,
@@ -94,11 +105,28 @@ export class BrowserHost {
   }
 
   status() {
+    const elevated = this.#automationMode === 'elevated';
     return {
       state: this.#closed ? 'closed' : this.#revoking ? 'terminating-revocation' : 'connected',
-      connectionId: this.connectionId, tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
+      connectionId: this.connectionId,
+      automationMode: this.#automationMode,
+      tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
       capabilities: {
+        automation: {
+          mode: this.#automationMode,
+          configuredMode: this.#configuredAutomationMode,
+          source: this.#automationModeSource,
+          scope: elevated
+            ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted without shield auto-handoff'
+            : 'standard safety boundary: shield click/key triggers handoff; human handles sign-in and secrets',
+          shieldAutoHandoff: !elevated,
+          sensitiveInputAllowed: elevated,
+          sensitiveValuesMasked: true,
+          pageCodeBlockedBesideSecrets: true,
+          manualHandoffRequiredFor: ['OS identity', 'CAPTCHA', 'human verification'],
+          revocableByUser: true,
+        },
         sessions: { temporary: true, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
         nativeRequests: ['javascript-dialog', 'file-picker', 'hid', 'usb', 'notifications', 'geolocation'],
         javascriptDialogs: {
@@ -111,10 +139,26 @@ export class BrowserHost {
           unsupported: ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker'],
         },
         unsupported: ['display-capture', 'serial', 'bluetooth', 'javascript-prompt'],
-        mandatoryHuman: ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the browser window after Stop/handoff'],
+        mandatoryHuman: elevated
+          ? ['OS identity', 'CAPTCHA', 'human Resume in the browser window after Stop/handoff']
+          : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the browser window after Stop/handoff'],
         delegation: this.policy.describe(),
       },
     };
+  }
+  // One-way connection-wide user downgrade back to standard mode. Takes effect
+  // synchronously across all existing tabs, popups, queued work, and active
+  // script runs while preserving Stop and native-handoff states.
+  #revertToStandard() {
+    if (this.#closed || this.#revoking || this.#automationMode === 'standard') return;
+    this.#automationMode = 'standard';
+    this.#automationModeSource = 'revoked-by-user';
+    for (const q of this.#pages.values()) {
+      if (q.closed) continue;
+      if (q.revertStandardMenuItem) q.revertStandardMenuItem.enabled = false;
+      q.presentation.refresh();
+      this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
+    }
   }
   #assertCaller(caller, signal) {
     if (!caller || typeof caller.sessionId !== 'string' || !caller.sessionId || typeof caller.callId !== 'string'
@@ -683,6 +727,7 @@ export class BrowserHost {
       stop: () => this.#pause(p, 'explicit-stop'),
       resume: () => this.#resume(p),
       handoff: () => this.#handoff(p, 'human-handoff', { source: 'human' }),
+      revertStandard: () => this.#revertToStandard(),
       acceptDialog: () => this.#humanDialog(p, true),
       dismissDialog: () => this.#humanDialog(p, false),
       revoke: () => { this.#revoke().catch(() => {}); },
@@ -694,6 +739,7 @@ export class BrowserHost {
       invalidate: reason => this.#invalidate(p, reason),
       guardNativeInput: () => p.driver.assertNoDialogCleanup(),
       paused: () => p.paused,
+      elevated: () => this.#automationMode === 'elevated',
       returnFailure: () => p.returnFailure,
       visibility: visible => {
         if (p.visible !== visible) { p.visible = visible; this.#invalidate(p, 'logical-visibility'); }
@@ -703,7 +749,10 @@ export class BrowserHost {
     p.frame = p.presentation.frame;
     const inheritedManual = parent && parent.presentation.mode !== 'automation';
     if (inheritedManual) { p.paused ||= 'inherited-native-handoff'; p.presentation.beginDrain(); }
-    p.devtoolsMenuItem = installPageMenu(p.frame, humanActions).items.find(item => item.id === 'open-devtools');
+    const pageMenu = installPageMenu(p.frame, humanActions);
+    p.devtoolsMenuItem = pageMenu.items.find(item => item.id === 'open-devtools');
+    p.revertStandardMenuItem = pageMenu.items.find(item => item.id === 'revert-standard');
+    if (p.revertStandardMenuItem) p.revertStandardMenuItem.enabled = this.#automationMode === 'elevated';
     // DevTools outside native handoff would be human input that bypasses the shield.
     wc.on('devtools-opened', () => {
       p.devtoolsShown = true;
@@ -901,6 +950,7 @@ export class BrowserHost {
     if (args.action === 'list_tabs') return {
       tabs: [...this.#pages.values()].filter(p => p.owner === caller.sessionId && !p.closed).map(p => ({
         tabId: p.id, sessionId: p.profile.id, sessionName: p.profile.name,
+        automationMode: this.#automationMode,
         url: p.presentation.mode === 'automation' ? p.contents.getURL() : null,
         title: p.presentation.mode === 'automation' ? p.contents.getTitle() : null,
         mode: p.presentation.mode, generation: p.presentation.generation,
@@ -1758,8 +1808,10 @@ export class BrowserHost {
     }
     {
       const info = await p.driver.callOn(frame, objectId, `function() {
+        const s = globalThis.__independentState;
         return {connected:this.isConnected,disabled:!!this.disabled,readOnly:!!this.readOnly,
-          tag:this.tagName,type:this.type,multiple:!!this.multiple,editable:this.isContentEditable};
+          tag:this.tagName,type:this.type,multiple:!!this.multiple,editable:this.isContentEditable,
+          sensitive:!!(s && s.sensitive(this))};
       }`);
       if (!info.connected || info.disabled || info.readOnly) fail('NOT_ACTIONABLE', 'Target is replaced, disabled or readonly');
       if (args.action === 'upload') {
@@ -1783,6 +1835,12 @@ export class BrowserHost {
           && !(info.tag === 'TEXTAREA' || (info.tag === 'INPUT' && !['file', 'button', 'submit', 'reset', 'checkbox', 'radio', 'hidden'].includes(info.type)))) {
           fail('INVALID_TEXT_TARGET', 'Target is not an editable text input');
         }
+        const assertSensitiveInputAllowed = () => {
+          if (['fill', 'type'].includes(args.action) && info.sensitive && args.text && this.#automationMode !== 'elevated') {
+            fail('SENSITIVE_INPUT_REFUSED', 'Typing into sensitive fields (passwords, OTP, verification codes) requires human handoff in standard mode; clear with text:"" or opt in with WB_AUTOMATION_MODE=elevated');
+          }
+        };
+        assertSensitiveInputAllowed();
         await dispatch('DOM.focus', { objectId }, frame.sessionId);
         // Keys go to the focused element, so BEFORE each step the target must
         // still be the live, enabled, focused element of the same document,
@@ -1819,6 +1877,7 @@ export class BrowserHost {
           return state.code !== 'TARGET_MISMATCH';
         };
         const insert = async () => {
+          assertSensitiveInputAllowed();
           await ensureEditable();
           const outcome = await guarded('beforeinput', () => dispatch('Input.insertText', { text: args.text }));
           if (missed(outcome)) state.code = 'TARGET_MISMATCH';

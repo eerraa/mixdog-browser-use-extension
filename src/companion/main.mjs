@@ -8,11 +8,12 @@ import { BrowserHost } from '../browser/host.mjs';
 import { BrowserPolicy } from '../browser/policy.mjs';
 import { configureBrowserIdentity } from '../browser/user-agent.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
-import { connectionPaths, pluginData } from '../shared/paths.mjs';
+import { automationMode, connectionPaths, pluginData } from '../shared/paths.mjs';
 
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
+const envAutomationMode = automationMode();
 const paths = connectionPaths(pluginData(), channel);
 if (!key || !/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error('Companion launch credential is missing');
 const userData = path.join(paths.directory, 'electron');
@@ -57,12 +58,17 @@ function terminate(reason) {
 }
 
 app.whenReady().then(async () => {
+  const policy = await BrowserPolicy.load(root);
+  const configuredAutomationMode = envAutomationMode ?? policy.automationMode;
+  const automationModeSource = envAutomationMode ? 'env' : policy.explicitAutomationMode ? 'policy' : 'default';
   host = new BrowserHost({
     dataDir: paths.directory,
     consentHelperPath: path.join(root, 'bin', 'native-consent.exe'),
     toolbarPreloadPath: path.join(root, 'app', 'toolbar-preload.cjs'),
     runnerPreloadPath: path.join(root, 'app', 'runner-preload.cjs'),
-    policy: await BrowserPolicy.load(root),
+    policy,
+    automationMode: configuredAutomationMode,
+    automationModeSource,
     onRevokeConnection: () => terminate('permission-revocation'),
   });
   listener = net.createServer(socket => {

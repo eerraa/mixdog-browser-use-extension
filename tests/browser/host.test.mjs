@@ -131,11 +131,13 @@ function tabFor(contents) {
     toolbarState: () => frame.webContents.sent.findLast(([channel]) => channel === TOOLBAR_STATE)?.[1],
   };
 }
-async function setup({ policy = BrowserPolicy.manual() } = {}) {
+async function setup({ policy = BrowserPolicy.manual(), automationMode, automationModeSource } = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-unit-'));
   const revoked = [];
   const host = new BrowserHost({
     dataDir, consentHelperPath: path.join(dataDir, 'not-invoked.exe'), toolbarPreloadPath, policy,
+    ...(automationMode !== undefined ? { automationMode } : {}),
+    ...(automationModeSource !== undefined ? { automationModeSource } : {}),
     onRevokeConnection: disposition => { revoked.push(disposition); },
   });
   const authority = caller('one');
@@ -2727,6 +2729,168 @@ test('Stop during a shield-held drain unblocks the lane immediately; agent hando
     assert.equal(stuck.mode, 'draining');
     assert.equal(stuck.connected, true, 'agent handoff never detached CDP');
   } finally { driver.setNativeMode = origSetNative; await host.close(); }
+});
+
+test('standard mode refuses non-empty sensitive fill/type while allowing empty clear; elevated mode allows sensitive input, suppresses stray shield takeover, and reverts synchronously connection-wide', async () => {
+  const vm = await import('node:vm');
+  page.nodes = [
+    { id: 1, p: 0, k: 'i', r: 'textbox', n: 'Password', s: [], x: true, b: [10, 10, 120, 20], vp: true, o: 1 },
+    { id: 2, p: 0, k: 'i', r: 'textbox', n: 'Email', s: [], b: [10, 40, 120, 20], vp: true, o: 2 },
+  ];
+  const prevCallOn = callOn;
+  callOn = async (_frame, objectId, fn) => {
+    if (String(fn).includes('activeElement')) return true;
+    const isPassword = objectId === 'node-1';
+    return {
+      connected: true, disabled: false, readOnly: false, tag: 'INPUT',
+      type: isPassword ? 'password' : 'email', multiple: false, editable: true, sensitive: isPassword,
+    };
+  };
+  const std = await setup();
+  try {
+    const seen = await std.call({ action: 'observe', tabId: std.tabId });
+    const pwRef = refIn(rendered(seen), 'textbox "Password"');
+    const st = await std.call({ action: 'status' });
+    assert.equal(st.automationMode, 'standard');
+    assert.equal(st.capabilities.automation.shieldAutoHandoff, true);
+    assert.equal(st.capabilities.automation.sensitiveInputAllowed, false);
+    assert.equal((await std.call({ action: 'list_tabs' })).tabs[0].automationMode, 'standard');
+    await assert.rejects(std.call({ action: 'fill', tabId: std.tabId, ref: pwRef, text: 'secret' }),
+      error => error.code === 'SENSITIVE_INPUT_REFUSED' && error.requestedInputDispatched === false);
+    await assert.rejects(std.call({ action: 'type', tabId: std.tabId, ref: pwRef, text: 'secret' }),
+      error => error.code === 'SENSITIVE_INPUT_REFUSED' && error.requestedInputDispatched === false);
+    assert.equal((await std.call({ action: 'fill', tabId: std.tabId, ref: pwRef, text: '' })).disposition, 'executed',
+      'clearing a sensitive field with empty text remains allowed in standard mode');
+  } finally { await std.host.close(); }
+
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-unit-'));
+  const elevatedHost = new BrowserHost({
+    dataDir, consentHelperPath: path.join(dataDir, 'not-invoked.exe'), toolbarPreloadPath,
+    automationMode: 'elevated', automationModeSource: 'env',
+    onRevokeConnection() {},
+    createRunnerSandbox: async ({ onOp }) => ({
+      evaluate: source => vm.runInNewContext(source, {
+        window: { __wbBridge: { call: (op, args) => onOp(op, structuredClone(args)) } }, setTimeout, clearTimeout,
+      }),
+      destroy() {},
+    }),
+  });
+  const auth = caller('elevated-one');
+  const eCall = args => elevatedHost.execute(args, auth);
+  try {
+    const first = await eCall({ action: 'open', url: 'http://127.0.0.1:8000/login' });
+    const second = await eCall({ action: 'open', url: 'http://127.0.0.1:8000/other' });
+    const tab1 = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/login').webContents);
+    const tab2 = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/other').webContents);
+    tab1.toolbarAction('ready');
+    tab2.toolbarAction('ready');
+
+    const st = await eCall({ action: 'status' });
+    assert.equal(st.automationMode, 'elevated');
+    assert.deepEqual([st.capabilities.automation.mode, st.capabilities.automation.source,
+      st.capabilities.automation.shieldAutoHandoff, st.capabilities.automation.sensitiveInputAllowed,
+      st.capabilities.automation.sensitiveValuesMasked, st.capabilities.automation.pageCodeBlockedBesideSecrets],
+      ['elevated', 'env', false, true, true, true]);
+    assert.ok(!st.capabilities.mandatoryHuman.includes('passwords'));
+    assert.ok(st.capabilities.mandatoryHuman.includes('CAPTCHA'));
+    assert.equal((await eCall({ action: 'list_tabs' })).tabs.every(t => t.automationMode === 'elevated'), true);
+    assert.equal(tab1.toolbarState().chip.tone, 'elevated');
+    assert.equal(tab1.toolbarState().elevated.action, 'revert-standard');
+    assert.match(tab1.frame.title, /\[Elevated\]$/);
+    assert.equal(tab1.frame.menu.items.find(item => item.id === 'revert-standard').enabled, true);
+
+    // Accidental shield clicks, wheels and keys are prevented from reaching the
+    // page but do NOT trigger shell-pointer-intervention or leave unknownGesture set.
+    let prevented = 0;
+    const ev = () => ({ preventDefault() { prevented++; } });
+    tab1.shield.webContents.emit('before-mouse-event', ev(), { type: 'mouseDown', button: 'left' });
+    tab1.shield.webContents.emit('before-mouse-event', ev(), { type: 'mouseWheel' });
+    tab1.shield.webContents.emit('before-input-event', ev(), { type: 'keyDown', code: 'KeyA', key: 'a' });
+    await tick();
+    assert.equal(prevented, 3, 'shield still blocks OS events from leaking to the page');
+    let state1 = (await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === first.tabId);
+    assert.equal(state1.mode, 'automation');
+    assert.equal(state1.paused, null);
+
+    // Stop + Resume right after an ignored elevated wheel succeeds immediately
+    // (proving unknownGesture was NOT left set).
+    tab1.toolbarAction('stop-automation');
+    await tick();
+    assert.equal((await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === first.tabId).paused, 'explicit-stop');
+    await tab1.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === first.tabId).paused, null);
+
+    // Sensitive fill/type succeed in elevated mode, while SENSITIVE_PRESENT
+    // remains enforced for evaluate and manual handoff (CAPTCHA) works cleanly.
+    const seen = await eCall({ action: 'observe', tabId: first.tabId });
+    const pwRef = refIn(rendered(seen), 'textbox "Password"');
+    assert.equal((await eCall({ action: 'fill', tabId: first.tabId, ref: pwRef, text: 'elevated-secret' })).disposition, 'executed');
+    sensitivePresent = true;
+    await assert.rejects(eCall({ action: 'evaluate', tabId: first.tabId, expression: '1' }), { code: 'SENSITIVE_PRESENT' });
+    sensitivePresent = false;
+    await eCall({ action: 'handoff', tabId: second.tabId });
+    assert.equal(tab2.exposed(), true);
+
+    // Downgrade between runner steps takes effect immediately on the next step
+    // across all tabs while preserving tab2's native-handoff!
+    const report = await eCall({
+      action: 'run', tabId: first.tabId, script: `
+        await page.getByLabel('Password').fill('step1-secret');
+        return 'ran';`,
+    });
+    assert.equal(report.status, 'ok');
+    assert.doesNotMatch(report.text, /step1-secret/, 'runner report never echoes sensitive text');
+
+    // Trigger user downgrade during a multi-step run right after step 1 completes.
+    let step1Done = false;
+    const origExec = elevatedHost.execute.bind(elevatedHost);
+    elevatedHost.execute = async (args, c, s) => {
+      const res = await origExec(args, c, s);
+      if (!step1Done && args.action === 'fill' && args.text === 'first-email') {
+        step1Done = true;
+        tab1.toolbarAction('revert-standard');
+      }
+      return res;
+    };
+    const midDowngrade = await eCall({
+      action: 'run', tabId: first.tabId, script: `
+        await page.getByLabel('Email').fill('first-email');
+        try {
+          await page.getByLabel('Password').fill('blocked-after-revert');
+          return 'unexpected-success';
+        } catch (err) {
+          return { code: err.code, kind: err.kind };
+        }`,
+    });
+    elevatedHost.execute = origExec;
+    assert.equal(midDowngrade.status, 'ok');
+    assert.match(midDowngrade.text, /"code":"SENSITIVE_INPUT_REFUSED"/);
+    assert.doesNotMatch(midDowngrade.text, /blocked-after-revert/);
+
+    // Verify synchronous connection-wide downgrade state across both tabs.
+    const afterStatus = await eCall({ action: 'status' });
+    assert.equal(afterStatus.automationMode, 'standard');
+    assert.equal(afterStatus.capabilities.automation.source, 'revoked-by-user');
+    assert.equal(tab1.toolbarState().elevated, null);
+    assert.equal(tab1.toolbarState().chip.tone, 'agent');
+    assert.doesNotMatch(tab1.frame.title, /\[Elevated\]/);
+    assert.equal(tab2.toolbarState().elevated, null);
+    assert.equal(tab2.frame.menu.items.find(item => item.id === 'revert-standard').enabled, false);
+    const tabsAfter = (await eCall({ action: 'list_tabs' })).tabs;
+    assert.equal(tabsAfter.every(t => t.automationMode === 'standard'), true);
+    assert.equal(tabsAfter.find(t => t.tabId === second.tabId).mode, 'native-handoff', 'downgrade preserves native handoff on other tabs');
+
+    // After downgrade, shield pointer clicks resume standard takeover behavior.
+    tab1.shield.webContents.emit('before-mouse-event', ev(), { type: 'mouseDown', button: 'left' });
+    tab1.shield.webContents.emit('before-mouse-event', ev(), { type: 'mouseUp', button: 'left' });
+    await tick();
+    assert.equal((await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === first.tabId).paused, 'shell-pointer-intervention');
+  } finally {
+    sensitivePresent = false;
+    callOn = prevCallOn;
+    page.nodes = [];
+    await elevatedHost.close();
+  }
 });
 
 test.after(() => {

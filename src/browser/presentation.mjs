@@ -18,13 +18,18 @@ const STRINGS = {
     address: 'Address', addressHint: 'Enter an http(s) address',
     secure: 'Secure connection (HTTPS)', insecure: 'Not secure (HTTP)',
     takeControl: 'Take control', returnControl: 'Return to agent', resume: 'Resume agent', stopAgent: 'Stop agent',
-    chipAgent: 'Agent in control', chipUser: 'You are in control', chipSwitching: 'Switching…',
+    chipAgent: 'Agent in control', chipElevated: 'Elevated automation', chipUser: 'You are in control', chipSwitching: 'Switching…',
     chipReturning: 'Returning…', chipStopped: 'Agent stopped', chipPaused: 'Agent paused',
     chipReturnFailed: 'Return failed', retryReturn: 'Retry return',
+    revertStandard: 'Elevated · Revert',
+    revertStandardHint: 'Elevated automation is active for this connection (login/sensitive fill allowed with value masking; shield clicks ignored). Click to immediately revert all tabs to standard mode.',
+    titleElevated: 'Elevated',
     returnFailed: failure => `Return failed (${failure.stage}: ${failure.code}). Release held keys/buttons, then use the return/resume button, or Take control to keep using this page.`,
     agentHint: 'The agent is using this page. Click the page to take control.',
+    elevatedHint: 'Elevated automation is active (login/sensitive inputs allowed with value masking; shield clicks ignored). Use toolbar Take control, Stop agent, or Revert.',
     userHint: 'The agent cannot read or control this page until you return control.',
     badge: 'Agent in control · click to take over',
+    elevatedBadge: 'Elevated automation · use Take control or Stop in toolbar',
     stopped: 'The agent is stopped. Take control to use the page, or resume the agent.',
     paused: reason => `The agent is paused (${reason}). Take control to use the page, or resume the agent.`,
     draining: 'Waiting for the agent’s current action to finish. Release any held mouse button or key.',
@@ -41,13 +46,18 @@ const STRINGS = {
     address: '주소', addressHint: 'http(s) 주소 입력',
     secure: '보안 연결(HTTPS)', insecure: '보안 연결 아님(HTTP)',
     takeControl: '직접 조작', returnControl: '에이전트에게 돌려주기', resume: '에이전트 재개', stopAgent: '에이전트 중지',
-    chipAgent: '에이전트 조작 중', chipUser: '직접 조작 중', chipSwitching: '전환 중…',
+    chipAgent: '에이전트 조작 중', chipElevated: '권한 상승 자동화', chipUser: '직접 조작 중', chipSwitching: '전환 중…',
     chipReturning: '돌려주는 중…', chipStopped: '에이전트 중지됨', chipPaused: '에이전트 일시정지',
     chipReturnFailed: '반환 실패', retryReturn: '반환 재시도',
+    revertStandard: '권한 상승 · 해제',
+    revertStandardHint: '이 연결에 권한 상승 자동화가 활성화되어 있습니다(민감 필드 입력 허용·값 마스킹 유지, 보호막 클릭 무시). 클릭하면 모든 탭을 즉시 표준 안전 모드로 되돌립니다.',
+    titleElevated: '권한 상승',
     returnFailed: failure => `반환에 실패했습니다(${failure.stage}: ${failure.code}). 누른 키·버튼을 놓고 반환·재개 버튼을 다시 누르거나, 직접 조작으로 이 페이지를 계속 사용하세요.`,
     agentHint: '에이전트가 이 페이지를 사용하고 있습니다. 페이지를 클릭하면 직접 조작으로 전환합니다.',
+    elevatedHint: '권한 상승 자동화가 활성화되어 있습니다(민감 필드 입력 허용·값 마스킹 유지, 보호막 클릭 무시). 개입은 툴바의 직접 조작·에이전트 중지·해제를 사용하세요.',
     userHint: '돌려주기 전까지 에이전트는 이 페이지를 읽거나 조작할 수 없습니다.',
     badge: '에이전트 조작 중 · 클릭하면 직접 조작',
+    elevatedBadge: '권한 상승 자동화 · 직접 조작·중지는 툴바 사용',
     stopped: '에이전트가 중지되었습니다. 페이지를 쓰려면 직접 조작을 누르거나 에이전트를 재개하세요.',
     paused: reason => `에이전트가 일시정지되었습니다(${reason}). 페이지를 쓰려면 직접 조작을 누르거나 에이전트를 재개하세요.`,
     draining: '에이전트의 진행 중인 동작이 끝나기를 기다리는 중입니다. 누르고 있는 마우스 버튼이나 키를 놓아 주세요.',
@@ -98,8 +108,11 @@ border-radius:16px;background:var(--field);border:1px solid var(--line)}
 #address:read-only{color:var(--muted)}
 #notice{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--stop);font-size:12px}
 #chip{flex:none;padding:5px 10px;border-radius:12px;border:1px solid currentColor;font-size:12px;font-weight:600;white-space:nowrap}
-#chip[data-tone=agent]{color:var(--agent)}#chip[data-tone=user]{color:var(--user)}
+#chip[data-tone=agent]{color:var(--agent)}#chip[data-tone=elevated]{color:var(--wait);background:rgba(176,96,0,.12)}
+#chip[data-tone=user]{color:var(--user)}
 #chip[data-tone=wait]{color:var(--wait)}#chip[data-tone=stop]{color:var(--stop)}
+#elevated{flex:none;height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--wait);background:rgba(176,96,0,.16);color:var(--wait);font-size:12px;font-weight:700}
+#elevated:hover:not(:disabled){background:rgba(176,96,0,.26)}
 #session{flex:0 1 auto;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
 #primary{background:var(--agent);color:var(--on-accent)}
 #primary:hover:not(:disabled){background:var(--agent);filter:brightness(1.08)}
@@ -116,7 +129,7 @@ ${button('reload', t.reload, `<svg id="reload-icon" viewBox="0 0 24 24" aria-hid
 <label id="omnibox"><span id="security" hidden>${icon('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>')}</span>
 <input id="address" aria-label="${escape(t.address)}" placeholder="${escape(t.addressHint)}" spellcheck="false" autocomplete="off" readonly>
 <span id="notice" role="alert"></span></label>
-<span id="session"></span><span id="chip" role="status"></span>
+<span id="session"></span><button id="elevated" hidden></button><span id="chip" role="status"></span>
 <button id="primary" hidden></button><button id="secondary" hidden></button>
 </div><div id="progress"></div>`;
 }
@@ -127,9 +140,11 @@ html,body{margin:0;height:100%;overflow:hidden;background:transparent;user-selec
 font:13px/1.5 "Segoe UI","Malgun Gothic",system-ui,sans-serif}
 #veil{position:fixed;inset:0;display:flex;align-items:flex-end;justify-content:flex-end;padding:12px;box-sizing:border-box}
 body.agent #veil{box-shadow:inset 0 0 0 2px rgba(26,115,232,.65)}
+body.elevated #veil{box-shadow:inset 0 0 0 3px rgba(245,158,11,.85)}
 body.blocked #veil{align-items:center;justify-content:center;background:rgba(15,17,21,.5)}
 #message{max-width:min(560px,calc(100% - 24px));padding:7px 14px;border-radius:999px;background:rgba(32,33,36,.92);color:#fff;
 box-shadow:0 2px 12px rgba(0,0,0,.3)}
+body.elevated #message{background:rgba(120,53,15,.94);border:1px solid rgba(251,191,36,.65)}
 body.blocked #message{padding:16px 22px;border-radius:12px;font-size:14px;text-align:center}
 </style><body class="agent"><div id="veil"><div id="message" role="status">${escape(t.badge)}</div></div>`;
 }
@@ -297,9 +312,20 @@ export class PagePresentation {
     this.#renderShield();
     this.#publish();
   }
+  #isElevated() {
+    return this.callbacks.elevated?.() === true;
+  }
+  #suppressShieldTakeover() {
+    // Only suppress accidental shield-initiated takeover while elevated mode is
+    // active, the tab is in automation, and the shield itself is healthy.
+    // Intercepted events are still preventDefault()ed so nothing leaks to the
+    // live page, and no unknownGesture / held shield controls are recorded.
+    return this.#isElevated() && this.mode === 'automation' && !this.callbacks.paused() && this.shielded();
+  }
   shieldKeyboard(event, input) {
     event.preventDefault();
     this.#nativeRelease(input);
+    if (this.#suppressShieldTakeover()) return;
     const key = input.code || input.key;
     const held = this.shieldKeys.has(key);
     if (input.type === 'keyDown') this.shieldKeys.add(key);
@@ -312,6 +338,7 @@ export class PagePresentation {
     if (['mouseMove', 'mouseEnter', 'mouseLeave'].includes(input.type)) return;
     event.preventDefault();
     this.#nativeRelease(input);
+    if (this.#suppressShieldTakeover()) return;
     const held = this.shieldButtons.has(input.button);
     if (input.type === 'mouseDown') this.shieldButtons.add(input.button);
     if (input.type === 'mouseUp') this.shieldButtons.delete(input.button);
@@ -494,8 +521,11 @@ export class PagePresentation {
   #renderShield() {
     if (!this.ready || this.closed || this.shield.isDestroyed() || this.mode === 'native-handoff') return;
     const message = this.#message();
-    void this.shield.executeJavaScript(`document.body.className=${JSON.stringify(message ? 'blocked' : 'agent')};`
-      + `document.getElementById('message').textContent=${JSON.stringify(message ?? this.text.badge)}`)
+    const elevated = !message && this.#isElevated();
+    const className = message ? 'blocked' : elevated ? 'elevated' : 'agent';
+    const text = message ?? (elevated ? this.text.elevatedBadge : this.text.badge);
+    void this.shield.executeJavaScript(`document.body.className=${JSON.stringify(className)};`
+      + `document.getElementById('message').textContent=${JSON.stringify(text)}`)
       .catch(() => { /* A lost shield already blocks all admissions. */ });
   }
   #publish() {
@@ -503,11 +533,13 @@ export class PagePresentation {
     const title = this.contents.getTitle(), url = this.contents.getURL();
     const label = url === 'about:blank' ? '' : title && title !== url ? title : url;
     const sessionLabel = this.browserSession ? ` [${this.browserSession.name} (${this.browserSession.id})]` : '';
-    this.frame.setTitle((label ? `${label} - ${APP_TITLE}` : APP_TITLE) + sessionLabel);
+    const elevatedLabel = this.#isElevated() ? ` [${this.text.titleElevated}]` : '';
+    this.frame.setTitle((label ? `${label} - ${APP_TITLE}` : APP_TITLE) + sessionLabel + elevatedLabel);
     if (this.toolbarReady && !this.toolbar.isDestroyed()) this.toolbar.send(TOOLBAR_STATE, this.#state());
   }
   #state() {
     const t = this.text, native = this.mode === 'native-handoff', paused = this.callbacks.paused();
+    const elevated = this.#isElevated();
     const failure = this.callbacks.returnFailure?.();
     const url = this.contents.getURL(), loading = this.contents.isLoading(), history = this.contents.navigationHistory;
     const take = { text: t.takeControl, action: 'take-control' }, resume = { text: t.resume, action: 'resume' };
@@ -521,9 +553,13 @@ export class PagePresentation {
       : this.mode === 'returning' ? [{ text: t.chipReturning, tone: 'wait' }, null, null]
         : this.mode === 'draining' ? [{ text: t.chipSwitching, tone: 'wait' }, take, resume]
           : paused ? [{ text: paused === 'explicit-stop' ? t.chipStopped : t.chipPaused, tone: 'stop', title: paused }, take, resume]
-            : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, { text: t.stopAgent, action: 'stop-automation' }];
+            : elevated
+              ? [{ text: t.chipElevated, tone: 'elevated', title: t.elevatedHint }, take, { text: t.stopAgent, action: 'stop-automation' }]
+              : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, { text: t.stopAgent, action: 'stop-automation' }];
     return {
       browserSession: this.browserSession,
+      automationMode: elevated ? 'elevated' : 'standard',
+      elevated: elevated ? { text: t.revertStandard, action: 'revert-standard', title: t.revertStandardHint } : null,
       url: url === 'about:blank' ? '' : url, secure: url.startsWith('https:'),
       securityTitle: url.startsWith('https:') ? t.secure : t.insecure,
       editable: native, navigable: native, loading,
@@ -550,6 +586,7 @@ export class PagePresentation {
       case 'take-control': if (!native && this.mode !== 'returning') void this.actions.handoff(); return;
       case 'resume': if (native || this.mode === 'draining' || this.callbacks.paused()) void this.actions.resume(); return;
       case 'stop-automation': if (!native) this.actions.stop(); return;
+      case 'revert-standard': if (this.#isElevated()) this.actions.revertStandard?.(); return;
       default:
     }
   }

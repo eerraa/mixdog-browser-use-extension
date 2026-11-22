@@ -17,7 +17,7 @@ changes.
 | `npm run test:live` | `tests/live/*.test.mjs` (10 files, 11 tests) | `node_modules/electron/dist`, unlocked desktop; sessions also `WB_INPUT_HELPER` or `build/input-state/native-consent.exe` | yes | `independent-browser-live-*`, `browser-autonomous-live-*`, `browser-observation-한글-*`, `browser-review-*`, `browser-workers-live-*`, `browser-devtools-live-*`, `browser-perception-live-*`, `browser-runner-live-*`, `browser-security-live-*`, `wb-ses-*` |
 | `npm run test:package` | `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs`: packaged `bin/bridge.exe`, MCP SDK client, hook admission, connection authority (a plain MCP registration as Claude Code makes it), refused configurations, real pages | `WB_PACKAGE_DIR` = absolute path of the packaged `win-browser` folder | yes | `browser-package-한글-*` |
 
-- Expected counts: `npm test` 29, `test:browser` 211, `test:live` 11, `test:package` 19, `test:native` 3 passing. A lower count means skipped or lost tests.
+- Expected counts: `npm test` 30, `test:browser` 218, `test:live` 11, `test:package` 20, `test:native` 3 passing. A lower count means skipped or lost tests.
 - The launcher termination test in `mcp.test.mjs` is probabilistic: it terminates the launcher 48 times during child creation. The earlier suspended-create launcher left a child after about one termination in twenty (1–3 per 48–60 in local runs), so one pass is evidence, not proof; a single leftover is a defect.
 - Runners keep stdout and stderr in their temp dirs and print the path. Nothing deletes them; clean up by the prefixes above.
 - File lists: `npm test` globs live in `package.json`; `test:browser` files are listed in `tests/browser/run.mjs` (add new files there); `test:live` and `test:package` glob their folders.

@@ -788,6 +788,7 @@ test('a server without a valid authority and data root refuses to start and spaw
     [{ ...base, WB_AUTHORITY: 'connection' }, /WB_DATA_DIR must be an absolute directory/],
     [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: 'relative-data' }, /WB_DATA_DIR must be an absolute directory/],
     [{ ...base, WB_AUTHORITY: 'hooks', WB_DATA_DIR: data, MIXDOG_PLUGIN_DATA: data }, /WB_AUTHORITY must be hook or connection/],
+    [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: data, WB_AUTOMATION_MODE: 'admin' }, /WB_AUTOMATION_MODE must be standard or elevated/],
   ]) {
     const child = spawn(executable, ['--mcp'], { env, cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
@@ -802,4 +803,41 @@ test('a server without a valid authority and data root refuses to start and spaw
     assert.match(stderr, pattern);
   }
   await assert.rejects(stat(path.join(data, 'connections')), { code: 'ENOENT' }, 'no connection was allocated');
+});
+
+test('packaged connection authority: WB_AUTOMATION_MODE=elevated opts into sensitive input with masking while default standard refuses it', { timeout: 90000 }, async t => {
+  const page = await fixture(t);
+
+  // 1. Default standard mode refuses non-empty password fill.
+  const stdCtx = await connectionEnvironment(t);
+  const std = await plainClient(t, stdCtx);
+  const stdStatus = dataOf(await std.call({ action: 'status' }));
+  assert.equal(stdStatus.automationMode, 'standard');
+  assert.equal(stdStatus.capabilities.automation.sensitiveInputAllowed, false);
+  const stdOpen = await std.call({ action: 'open', url: page.url });
+  const stdTab = tabOf(stdOpen);
+  const stdPw = textOf(stdOpen).match(/(e\d+) textbox(?: "[^"]*")? sensitive(?=\n|$)/m)[1];
+  const stdBlocked = await std.call({ action: 'fill', tabId: stdTab, ref: stdPw, text: 'NEW_SECRET' });
+  assert.equal(stdBlocked.isError, true, textOf(stdBlocked));
+  assert.match(textOf(stdBlocked), /SENSITIVE_INPUT_REFUSED/);
+
+  // 2. Explicit WB_AUTOMATION_MODE=elevated permits password fill while keeping values masked.
+  const elCtx = await connectionEnvironment(t);
+  elCtx.env.WB_AUTOMATION_MODE = 'elevated';
+  const el = await plainClient(t, elCtx);
+  const elStatus = dataOf(await el.call({ action: 'status' }));
+  assert.equal(elStatus.automationMode, 'elevated');
+  assert.equal(elStatus.capabilities.automation.source, 'env');
+  assert.equal(elStatus.capabilities.automation.shieldAutoHandoff, false);
+  assert.equal(elStatus.capabilities.automation.sensitiveInputAllowed, true);
+  const elOpen = await el.call({ action: 'open', url: page.url });
+  const elTab = tabOf(elOpen);
+  assert.equal(dataOf(await el.call({ action: 'list_tabs' })).tabs[0].automationMode, 'elevated');
+  const elPw = textOf(elOpen).match(/(e\d+) textbox(?: "[^"]*")? sensitive(?=\n|$)/m)[1];
+  const elFilled = await el.call({ action: 'fill', tabId: elTab, ref: elPw, text: 'PKG_ELEVATED_PW' });
+  assert.equal(elFilled.isError, false, textOf(elFilled));
+  assert.doesNotMatch(textOf(elFilled), /PKG_ELEVATED_PW/);
+  const elEval = await el.call({ action: 'evaluate', tabId: elTab, expression: '1' });
+  assert.equal(elEval.isError, true, textOf(elEval));
+  assert.match(textOf(elEval), /SENSITIVE_PRESENT/);
 });

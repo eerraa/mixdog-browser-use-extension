@@ -2,7 +2,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const supported = Object.freeze(['hid', 'usb', 'notifications', 'geolocation']);
-const delegatedFields = new Set(['version', 'mode', 'permissions', 'origins', 'selection', 'lifetime', 'newGrants']);
+const delegatedFields = ['version', 'mode', 'permissions', 'origins', 'selection', 'lifetime', 'newGrants'];
+const delegatedAllowed = new Set([...delegatedFields, 'automationMode']);
+const simpleAllowed = new Set(['version', 'mode', 'automationMode']);
+const automationModes = new Set(['standard', 'elevated']);
 
 // A trusted package/host configuration, never an MCP argument or chat receipt.
 // The companion loads one immutable snapshot before it admits tool calls.
@@ -10,15 +13,22 @@ export class BrowserPolicy {
   constructor(value, problem) {
     this.mode = 'disabled';
     this.permissions = Object.freeze([]);
+    this.automationMode = 'standard';
+    this.explicitAutomationMode = false;
     this.reason = problem ?? 'No browser delegation policy was supplied';
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const fields = Object.keys(value);
-      if (value.version === 1 && ['manual', 'disabled'].includes(value.mode)
-        && fields.every(key => ['version', 'mode'].includes(key))) {
+      const hasAutomationMode = Object.hasOwn(value, 'automationMode');
+      const validAutomationMode = !hasAutomationMode || automationModes.has(value.automationMode);
+      if (validAutomationMode && value.version === 1 && ['manual', 'disabled'].includes(value.mode)
+        && fields.every(key => simpleAllowed.has(key))) {
         this.mode = value.mode;
+        this.automationMode = hasAutomationMode ? value.automationMode : 'standard';
+        this.explicitAutomationMode = hasAutomationMode;
         this.reason = value.mode === 'manual' ? 'Protected requests require native human selection' : 'Delegated protected requests are disabled';
-      } else if (value.version === 1 && value.mode === 'delegated'
-        && fields.length === delegatedFields.size && fields.every(key => delegatedFields.has(key))
+      } else if (validAutomationMode && value.version === 1 && value.mode === 'delegated'
+        && delegatedFields.every(key => Object.hasOwn(value, key))
+        && fields.every(key => delegatedAllowed.has(key))
         && Array.isArray(value.permissions) && value.permissions.length > 0
         && value.permissions.every(kind => supported.includes(kind))
         && new Set(value.permissions).size === value.permissions.length
@@ -26,6 +36,8 @@ export class BrowserPolicy {
         && value.lifetime === 'caller-generation' && value.newGrants === true) {
         this.mode = 'delegated';
         this.permissions = Object.freeze([...value.permissions]);
+        this.automationMode = hasAutomationMode ? value.automationMode : 'standard';
+        this.explicitAutomationMode = hasAutomationMode;
         this.reason = 'Origin and offered-option choice delegated to live authenticated owners of their pages';
       } else this.reason = 'Malformed or unsupported browser delegation policy';
     }
@@ -45,6 +57,7 @@ export class BrowserPolicy {
   describe() {
     return {
       mode: this.mode, permissions: [...this.permissions], reason: this.reason,
+      automationMode: this.automationMode,
       origins: 'agent-owned pages', selection: 'explicit offered option',
       lifetime: 'current authenticated caller generation and connection',
       newGrants: this.mode === 'delegated',

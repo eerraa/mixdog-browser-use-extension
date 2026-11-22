@@ -16,6 +16,18 @@ export function authorityMode(env = process.env) {
   return mode;
 }
 
+/** Optional connection-wide automation opt-in from the server registration:
+ * unset/empty defers to browser-policy.json (default `standard`); `standard` or
+ * `elevated` overrides it. Unknown values fail closed before companion startup. */
+export function automationMode(env = process.env) {
+  const mode = env.WB_AUTOMATION_MODE;
+  if (mode === undefined || mode === '') return null;
+  if (mode !== 'standard' && mode !== 'elevated') {
+    throw new Error('WB_AUTOMATION_MODE must be standard or elevated');
+  }
+  return mode;
+}
+
 /** The data root: `MIXDOG_PLUGIN_DATA` under hook authority (assigned by Mixdog
  * per registered folder), `WB_DATA_DIR` under connection authority. */
 export function pluginData(env = process.env) {

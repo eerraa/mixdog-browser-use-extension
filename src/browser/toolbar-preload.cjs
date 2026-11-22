@@ -18,6 +18,9 @@ window.addEventListener('DOMContentLoaded', () => {
     button.hidden = !spec;
     button.textContent = spec?.text ?? '';
     button.dataset.action = spec?.action ?? '';
+    button.title = spec?.title ?? '';
+    if (spec?.title) button.setAttribute('aria-label', spec.title);
+    else button.removeAttribute('aria-label');
   };
   const render = () => {
     if (!state) return;
@@ -40,6 +43,7 @@ window.addEventListener('DOMContentLoaded', () => {
     $('omnibox').classList.toggle('invalid', state.invalid);
     $('notice').textContent = state.notice ?? '';
     $('notice').title = state.notice ?? '';
+    actionButton($('elevated'), state.elevated);
     $('chip').textContent = state.chip.text;
     $('chip').dataset.tone = state.chip.tone;
     $('chip').title = state.chip.title ?? '';
@@ -48,7 +52,7 @@ window.addEventListener('DOMContentLoaded', () => {
   };
   for (const id of ['back', 'forward']) $(id).addEventListener('click', () => send(id));
   $('reload').addEventListener('click', () => send(state?.loading ? 'stop-loading' : 'reload'));
-  for (const id of ['primary', 'secondary']) {
+  for (const id of ['elevated', 'primary', 'secondary']) {
     $(id).addEventListener('click', event => {
       const action = event.currentTarget.dataset.action;
       if (action) send(action);

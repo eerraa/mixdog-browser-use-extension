@@ -140,11 +140,12 @@ export class ConsentSurface {
   }
 }
 
-export function installPageMenu(window, { stop, resume, handoff, revoke, acceptDialog, dismissDialog, openDevTools }) {
+export function installPageMenu(window, { stop, resume, handoff, revoke, acceptDialog, dismissDialog, openDevTools, revertStandard }) {
   const menu = Menu.buildFromTemplate([
     { label: 'Stop automation', click: stop },
     { label: 'Resume automation', click: resume },
     { label: 'Human handoff', click: handoff },
+    { id: 'revert-standard', label: 'Revert connection to standard mode', enabled: false, click: revertStandard },
     { label: 'Accept pending page dialog', click: acceptDialog },
     { label: 'Dismiss pending page dialog', click: dismissDialog },
     // Enabled only in native handoff; the host refuses it in every other mode.

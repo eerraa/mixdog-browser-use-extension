@@ -71,27 +71,43 @@ blocker, not permission to edit it or operate a human approval surface.
    is ambiguous, report the missing identification rather than guessing.
    Allow notifications/geolocation only when needed by the task. Selecting
    explicit local files discloses their contents to the requesting site.
-6. For password entry, login, CAPTCHA or 2FA, request `handoff` on that exact
-   tab and stop automated page work. The window flashes but does not take
-   focus; tell the person which window needs them, and ask them to finish
-   signing in (submit the form) before returning control. The person uses the same
-   live page in its browser window. Do not request, log or supply their password, PIN, OTP or
-   biometric data. Page observations are blocked during native handoff, and
-   nothing the person does there (pages, dialogs, popups, downloads) reaches
-   your results. Fields they typed into stay `sensitive` afterwards.
-   `CONTROLS_HELD`: ask the person to release keys/buttons and retry in that
-   same foreground window. A trusted return checks Windows physical idle state
-   to reconcile releases lost to other apps/menus; no automatic return or input
-   replay follows an idle result. Unknown or held input stays blocked.
-   Continue only after the person returns control in that window (toolbar
-   **Return to agent** or **Resume agent**, or the **Resume automation** menu)
-   and fresh state is available.
-   If return fails, read `list_tabs.returnFailure` (attempt, stage, code,
-   human-only retry). Ask the person to release held keys/buttons for
-   `CONTROLS_HELD`, then use **Retry return** in that same window. Return has a
-   25 s bound, but actual operations remain fenced until they settle. A null
-   private URL/title is withheld, not an empty page. Never replay page input,
-   create a replacement session or clear Stop to recover from a failed return.
+6. Automation mode (`status.automationMode`, `list_tabs[].automationMode`):
+   - **Standard mode (default)**: non-empty `fill`/`type` on `sensitive` fields
+     (passwords, OTP/verification codes, cards) is refused (`SENSITIVE_INPUT_REFUSED`,
+     `dispatched=false`). For password entry, login, CAPTCHA or 2FA, request
+     `handoff` on that exact tab and stop automated page work. Do not request,
+     log or supply the person's password, PIN, OTP or biometric data.
+   - **Elevated mode (explicit host/policy opt-in only, via `WB_AUTOMATION_MODE=elevated`
+     or `browser-policy.json` `"automationMode": "elevated"`)**: `fill`/`type`/`click`/`observe`
+     on sensitive login, password and OTP fields are allowed without automatic
+     handoff, and stray clicks or keys on the live input shield are ignored while
+     automation runs. Sensitive field values still stay masked in snapshots, diffs,
+     `read`, `find`, DevTools and `run` reports, and `evaluate` / `console(expression)`
+     still refuse with `SENSITIVE_PRESENT` while a sensitive field holds a value.
+     Still request manual `handoff` for CAPTCHA or other human-only verification.
+     The person can immediately downgrade the entire connection back to `standard`
+     (one-way) from the amber toolbar **Elevated · Revert** button or the native
+     menu **Revert connection to standard mode**, or pause with **Stop agent** /
+     **Take control**; never try to bypass a downgrade or pause.
+   - **Handoff & return (both modes)**: on `handoff`, the window flashes without
+     taking focus; tell the person which window needs them and ask them to finish
+     (e.g. submit the login or solve the CAPTCHA) before returning control. Page
+     observations are blocked during native handoff, and nothing the person does
+     there (pages, dialogs, popups, downloads) reaches your results. Fields they
+     typed into stay `sensitive` afterwards.
+     `CONTROLS_HELD`: ask the person to release keys/buttons and retry in that
+     same foreground window. A trusted return checks Windows physical idle state
+     to reconcile releases lost to other apps/menus; no automatic return or input
+     replay follows an idle result. Unknown or held input stays blocked.
+     Continue only after the person returns control in that window (toolbar
+     **Return to agent** or **Resume agent**, or the **Resume automation** menu)
+     and fresh state is available.
+     If return fails, read `list_tabs.returnFailure` (attempt, stage, code,
+     human-only retry). Ask the person to release held keys/buttons for
+     `CONTROLS_HELD`, then use **Retry return** in that same window. Return has a
+     25 s bound, but actual operations remain fenced until they settle. A null
+     private URL/title is withheld, not an empty page. Never replay page input,
+     create a replacement session or clear Stop to recover from a failed return.
 7. Respect explicit cancellation/denial and Stop. `respond` is a typed
    interaction, not a universal permission override or Resume endpoint.
    Mandatory OS identity and unsupported capture/serial/Bluetooth are specific
@@ -161,19 +177,23 @@ page, and the body:
   formed and no text was inserted; observe before deciding.
 - Values print as JSON strings. `sensitive` fields (passwords, OTP and
   verification codes, card fields, fields the person typed during a handoff)
-  never show their value, in a container `read` or a text wait either. While
-  one holds a value in the frame or in any same-origin frame or window, and
-  while any of your windows is under the person's control, `evaluate` and
-  `console` with `expression` answer `not-executed` `SENSITIVE_PRESENT`;
-  continue with ordinary actions, or clear the field with `fill` and
-  `text:""` first if the task allows.
+  never show their value, in a container `read` or a text wait either. In
+  `standard` mode, non-empty `fill`/`type` into a sensitive field is refused
+  (`SENSITIVE_INPUT_REFUSED`, `dispatched=false`); empty `fill` (`text:""`)
+  remains allowed to clear it if the task allows. While one holds a value in
+  the frame or in any same-origin frame or window, and while any of your
+  windows is under the person's control, `evaluate` and `console` with
+  `expression` answer `not-executed` `SENSITIVE_PRESENT` in both `standard`
+  and `elevated` modes; continue with ordinary actions, or clear the field
+  with `fill` and `text:""` first if the task allows.
 - `upload` and file-picker `respond` take local drive-letter paths only;
   network paths (`\\host\share`) are refused.
 - `hide` voids that tab's refs and points; `show` keeps them (observe before
   acting).
 - `status`, `list_tabs`, `requests`, `respond`, `permissions`, `downloads`,
   `revoke` and the DevTools reads return compact JSON. `status.version` is the
-  running package version.
+  running package version, and `status.automationMode` / `list_tabs[].automationMode`
+  report the active `standard` or `elevated` mode.
 
 ## Scripts (`run`)
 
@@ -303,8 +323,11 @@ closes when control returns.
 - Stop, native handoff, a failed return, or permission refusal is not ordinary
   staleness. Do not open another tab or connection to get around it.
 - The window shows the live page under an input shield while automation runs.
-  A person's click or key on it, or the toolbar's Take control or Stop agent,
-  pauses automation; the initiating gesture is discarded before handoff.
+  In `standard` mode, a person's click or key on the shield, or the toolbar's
+  Take control or Stop agent, pauses automation (the initiating gesture is
+  discarded before handoff). In `elevated` mode, accidental clicks or keys on
+  the shield are ignored while automation runs so only explicit Take control,
+  Stop agent, Elevated · Revert, or the native menu pause or downgrade it.
 - Scrolling uses the verified native DOM scroll container. A widget that
   requires physical wheel gestures needs human handoff, not synthetic retries.
 - A terminated/revoked connection requires the user's explicit reconnection;

@@ -14,10 +14,10 @@ rule to keep.
 
 ## R2 Toolbar, window chrome, labels, languages
 
-- Edit: `src/browser/presentation.mjs`: `STRINGS` (a new locale needs its key and the selection in the constructor), `toolbarHTML` and `shieldHTML` (markup, CSS, icons), `#state` (what each mode shows), `#toolbarAction` (accepted actions and mode guards), `TOOLBAR_HEIGHT`.
+- Edit: `src/browser/presentation.mjs`: `STRINGS` (a new locale needs its key and the selection in the constructor), `toolbarHTML` and `shieldHTML` (markup, CSS, icons, amber `#elevated` revert button and shield styling), `#state` (what each mode shows, including `elevated`), `setAutomationMode`, `#toolbarAction` (accepted actions and mode guards, including `revert-standard`), `TOOLBAR_HEIGHT`.
 - Edit: `src/browser/toolbar-preload.cjs` (`render`, `send`); action names must match `#toolbarAction`.
-- Edit: `host.mjs #registerPage` `humanActions`; native menu in `consent.mjs installPageMenu`.
-- Keep: chrome CSP and no navigation; the toolbar never resumes by itself; address bar and history only in native-handoff.
+- Edit: `host.mjs #registerPage` `humanActions`, `#revertToStandard`; native menu in `consent.mjs installPageMenu` (including `revert-standard`).
+- Keep: chrome CSP and no navigation; the toolbar never resumes by itself; address bar and history only in native-handoff; one-way `revert-standard` lowers the entire connection synchronously without clearing Stop or native-handoff.
 
 ## R3 Handoff, Stop, resume, fail-closed
 
@@ -44,8 +44,8 @@ rule to keep.
 
 ## R6 Device or web permissions, delegation policy
 
-- Edit: `permissions.mjs` (handlers, chooser flow, delegated selection, `admits`); `permission-broker.mjs` (ledger rules); `policy.mjs` (`supported`, schema) with `browser-policy.json`; `consent.mjs` and `native/consent.cpp` (manual OS consent); `host.mjs status().capabilities`.
-- Keep: `requirements.md` C5, C6 and `contracts.md` Native requests and permissions.
+- Edit: `permissions.mjs` (handlers, chooser flow, delegated selection, `admits`); `permission-broker.mjs` (ledger rules); `policy.mjs` (`supported`, schema including optional `automationMode`) with `browser-policy.json`; `paths.mjs` (`automationMode` env parser for `WB_AUTOMATION_MODE`); `consent.mjs` and `native/consent.cpp` (manual OS consent); `host.mjs status().capabilities`, `#revertToStandard`, `SENSITIVE_INPUT_REFUSED` check.
+- Keep: `requirements.md` C4, C5, C6 and `contracts.md` Authority and isolation / Observation and input / Native requests and permissions.
 
 ## R7 Profiles, data directories, connection lifetime
 

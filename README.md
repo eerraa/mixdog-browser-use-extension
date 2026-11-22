@@ -232,6 +232,42 @@ browse({ action: "close_session", sessionId: "ctx2" });
 창을 숨기거나 다시 보여주는 것만으로는 해제되지 않으며, 사용자가 툴바의
 **에이전트 재개**(Resume agent)나 `Resume automation`을 선택해야 다시 시작합니다.
 
+### 권한 상승 전체 자동화 모드 (`elevated`, 명시적 옵트인)
+
+기본 실행 모드는 `standard`입니다. `standard` 모드에서는 비밀번호·OTP·인증번호·카드 칸처럼
+민감한 입력 칸에 에이전트가 비어 있지 않은 값을 `fill`·`type`하려 하면 `SENSITIVE_INPUT_REFUSED`로
+거부되며, 사람이 `handoff`로 직접 로그인합니다(기존 값을 지우는 빈 `fill { text: "" }`만 허용).
+
+사용자가 로그인·비밀번호·OTP 입력까지 에이전트 자동화에 명시적으로 맡기려는 경우에만
+호스트 설정이나 정책 파일로 `elevated` 모드를 켤 수 있습니다. 에이전트가 MCP 인수로 이 모드를
+켜거나 바꿀 수는 없으며, 허용되지 않은 값(`standard`·`elevated` 외)을 주면 서버가 시작 시
+실패합니다.
+
+- **환경 변수로 옵트인**: MCP 서버 등록에 `WB_AUTOMATION_MODE=elevated`를 추가합니다(정책 파일보다 우선).
+- **정책 파일로 옵트인**: 등록 전 `browser-policy.json`에 `"automationMode": "elevated"`를 추가합니다(`disabled`·`manual`·`delegated` 정책 모두에 선택 필드로 지정 가능; 배포 기본 파일에는 들어 있지 않습니다).
+
+권한 상승 모드가 활성화된 동안의 동작과 안전 장치는 다음과 같습니다.
+
+- **명확한 상태 표시**: 모든 창 제목에 `[권한 상승]`(`[Elevated]`)이 붙고, 툴바에 주황색
+  **권한 상승 · 해제**(`Elevated · Revert`) 버튼이 표시되며, 보호막에도 주황색 테두리와 상태 문구가
+  표시됩니다. `status`와 `list_tabs` JSON 응답에도 `automationMode: "elevated"`가 노출됩니다.
+- **허용되는 작업**: 민감한 로그인·비밀번호·OTP 칸에 대한 `fill`·`type`·`click`·`observe`가 자동
+  `PRIVATE_HANDOFF` 없이 동작합니다. 또한 자동화가 정상 실행 중이고 보호막이 덮여 있는 동안에는
+  보호막 위 실수 클릭·키 입력으로 자동 인계(`shell-pointer-intervention`·`shell-keyboard-intervention`)가
+  발동하지 않습니다.
+- **유지되는 보호 장치**:
+  - 민감한 칸의 값은 스냅샷·diff·`read`·`find`·DevTools·`run` 보고서에서 계속 가려지며, 민감한 값이
+    들어 있는 동안 `evaluate`와 `console(expression)`도 계속 `SENSITIVE_PRESENT`로 거부됩니다.
+    (단, 호출자가 `fill.text`나 `run.script` 인수로 직접 전달한 문자열이나 `screenshot:true` 화면
+    픽셀 자체까지 끝단 간 암호화·은닉하는 경계는 아닙니다.)
+  - 보호막 밖 네이티브 선택창(날짜·색상·`select`·`datalist`) 조작 시 `unexpected-page-input` 안전
+    정지와 모든 fail-closed 보호는 그대로 유지됩니다.
+  - CAPTCHA나 사람 확인이 필요한 단계는 기존과 동일하게 수동 `handoff`와 반환 절차로 처리합니다.
+- **즉시 단방향 해제**: 툴바의 **권한 상승 · 해제** 버튼이나 창 메뉴(Alt)의
+  `Revert connection to standard mode`를 선택하면 해당 MCP 연결의 모든 탭·팝업·대기 작업과 실행 중인
+  `run` 스크립트의 다음 단계가 즉시 `standard` 모드로 내려갑니다. 이미 활성화된 Stop이나 직접 조작
+  상태는 그대로 유지되며, 같은 연결 안에서는 다시 `elevated`로 올릴 수 없습니다.
+
 ## 권한과 안전 경계
 
 - 자체 프로필만 사용하며 다른 브라우저나 Mixdog의 쿠키·계정·프로필을 복사하지 않습니다.

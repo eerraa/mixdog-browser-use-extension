@@ -8,7 +8,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrowserHost } from '../../src/browser/host.mjs';
-import { frameOf, menu, pageContents, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';
+import { clickToolbar, frameOf, menu, pageContents, presentationOf, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';
 
 const directory = process.argv[2];
 app.setPath('userData', path.join(directory, 'electron'));
@@ -409,6 +409,71 @@ async function run() {
       assert.match(text, /textbox "Email"/, text);
       assert.doesNotMatch(text, /Required|faded/, text);
       await call({ action: 'close_tab', tabId: page.tabId });
+    });
+
+    await check('elevated opt-in mode allows sensitive fill with masking, ignores stray shield input, supports manual handoff and immediate toolbar revert', async () => {
+      const elevatedHost = new BrowserHost({
+        dataDir: path.join(directory, 'elevated-profiles'),
+        consentHelperPath: fileURLToPath(new URL('../../build/native-consent.exe', import.meta.url)),
+        toolbarPreloadPath,
+        automationMode: 'elevated',
+        automationModeSource: 'env',
+        onRevokeConnection() { throw new Error('No revocation in this fixture'); },
+      });
+      const eCall = args => elevatedHost.execute(args, caller);
+      try {
+        const status = await eCall({ action: 'status' });
+        assert.equal(status.automationMode, 'elevated');
+        assert.equal(status.capabilities.automation.shieldAutoHandoff, false);
+        assert.equal(status.capabilities.automation.sensitiveInputAllowed, true);
+
+        const opened = await eCall({ action: 'open', url: `${origin}/login` });
+        const loginContents = pageContents(`${origin}/login`);
+        const { frame, toolbar, shield } = presentationOf(loginContents);
+        await until(() => toolbar.executeJavaScript('document.getElementById("elevated") && !document.getElementById("elevated").hidden'), 'elevated toolbar button visible');
+        assert.match(frame.getTitle(), /\[(?:Elevated|권한 상승)\]$/);
+
+        // Stray shield click + wheel do not interrupt elevated automation or leak to the page.
+        shield.sendInputEvent({ type: 'mouseDown', x: 50, y: 50, button: 'left', clickCount: 1 });
+        shield.sendInputEvent({ type: 'mouseUp', x: 50, y: 50, button: 'left', clickCount: 1 });
+        shield.sendInputEvent({ type: 'mouseWheel', x: 50, y: 50, deltaX: 0, deltaY: -120 });
+        await pause(200);
+        const tabState = (await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === opened.tabId);
+        assert.equal(tabState.mode, 'automation');
+        assert.equal(tabState.paused, null);
+        assert.equal(tabState.automationMode, 'elevated');
+
+        // Fill sensitive password field in elevated mode; value is written in DOM
+        // but withheld in snapshots, reads and find, and evaluate stays blocked.
+        const seen = rendered(await eCall({ action: 'observe', tabId: opened.tabId, mode: 'full' }));
+        const pwRef = seen.match(/(e\d+) textbox "Password"[^\n]*sensitive/)[1];
+        const filled = await eCall({ action: 'fill', tabId: opened.tabId, ref: pwRef, text: 'ELEVATED_SECRET_99' });
+        assert.equal(filled.disposition, 'executed');
+        assert.doesNotMatch(rendered(filled), /ELEVATED_SECRET_99/);
+        assert.equal(await loginContents.executeJavaScript('document.getElementById("pw").value'), 'ELEVATED_SECRET_99');
+        const readBack = rendered(await eCall({ action: 'read', tabId: opened.tabId, ref: pwRef }));
+        assert.match(readBack, /sensitive \(value withheld\)/);
+        assert.doesNotMatch(readBack, /ELEVATED_SECRET_99/);
+        const evalBlocked = await eCall({ action: 'evaluate', tabId: opened.tabId, expression: '1' }).catch(e => e);
+        assert.equal(evalBlocked.code, 'SENSITIVE_PRESENT');
+
+        // Manual handoff (e.g. CAPTCHA) still transitions cleanly and returns to elevated automation.
+        await eCall({ action: 'handoff', tabId: opened.tabId });
+        await until(async () => (await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === opened.tabId).mode === 'native-handoff', 'elevated manual handoff');
+        await menu(frame, 'Resume automation');
+        await until(async () => (await eCall({ action: 'list_tabs' })).tabs.find(t => t.tabId === opened.tabId).mode === 'automation', 'elevated manual return');
+
+        // Clicking the toolbar Revert button immediately downgrades to standard mode.
+        frame.focus();
+        toolbar.focus();
+        await clickToolbar(toolbar, '#elevated[data-action="revert-standard"]');
+        await until(async () => (await eCall({ action: 'status' })).automationMode === 'standard', 'toolbar revert to standard');
+        const obsAfter = rendered(await eCall({ action: 'observe', tabId: opened.tabId, mode: 'full' }));
+        const pwRefAfter = obsAfter.match(/(e\d+) textbox "Password"[^\n]*sensitive/)[1];
+        const refusedAfter = await eCall({ action: 'fill', tabId: opened.tabId, ref: pwRefAfter, text: 'SHOULD_BLOCK' }).catch(e => e);
+        assert.equal(refusedAfter.code, 'SENSITIVE_INPUT_REFUSED');
+        assert.equal(refusedAfter.requestedInputDispatched, false);
+      } finally { await elevatedHost.close(); }
     });
 
     await host.close(); anchor.destroy(); server.close();
