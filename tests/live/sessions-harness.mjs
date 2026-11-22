@@ -81,6 +81,24 @@ console.log('FRAME_PLANS '+window.planModel.identity);return window.planModel;};
       res.setHeader('Content-Type', 'text/html');
       return res.end('<!doctype html><button>Frame action</button><script src="/frame-script.js"></script>');
     }
+    if (url.pathname === '/nested-host') {
+      const port = server.address().port;
+      res.setHeader('Content-Type', 'text/html');
+      return res.end(`<!doctype html><title>Nested host</title><iframe src="http://localhost:${port}/nested-mid"></iframe>`);
+    }
+    if (url.pathname === '/nested-mid') {
+      const port = server.address().port;
+      res.setHeader('Content-Type', 'text/html');
+      return res.end(`<!doctype html><title>Nested mid</title><iframe src="http://127.0.0.1:${port}/nested-leaf"></iframe>`);
+    }
+    if (url.pathname === '/nested-leaf') {
+      res.setHeader('Content-Type', 'text/html');
+      return res.end('<!doctype html><title>Nested leaf</title><p>Leaf frame</p>');
+    }
+    if (url.pathname === '/oauth-form') {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end('<!doctype html><meta charset="utf-8"><title>OAuth Form</title><label>Work email <input id="email" type="email"></label><label>Private note <input id="note"></label><button id="next">Continue</button>');
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(`<!doctype html><meta charset="utf-8"><title>Session fixture</title>
 <h1>Session fixture</h1><p id="identity"></p>
@@ -360,6 +378,48 @@ document.querySelector('#alias').value='';document.querySelector('#identity').te
   assert.equal(await evaluate(b2.tabId, 'document.cookie'), '');
   assert.deepEqual(await stored(a.tabId), expected('A'));
   console.log('PASS manual sign-in/return/privacy and B logout preserve A; popups inherit B');
+
+  // Regression: two popups in the same session, one with a nested cross-origin
+  // OOPIF that navigates cross-origin, fills an input, and immediately enters
+  // handoff alongside the other popup; both enter native-handoff and return cleanly.
+  const otherOrigin = `http://localhost:${server.address().port}`;
+  const beforePopups = new Set((await call({ action: 'list_tabs' })).tabs.map(t => t.tabId));
+  await evaluate(a.tabId, '(window.open("/oauth-form", "oauth-1"), window.open("/nested-host", "oauth-2"), "opened")');
+  await until(async () => (await call({ action: 'list_tabs' })).tabs.filter(t => !beforePopups.has(t.tabId)).length === 2, 'two concurrent popups');
+  const openedPopups = (await call({ action: 'list_tabs' })).tabs.filter(t => !beforePopups.has(t.tabId));
+  const pop1 = openedPopups.find(t => t.url?.includes('/oauth-form')) ?? openedPopups[0];
+  const pop2 = openedPopups.find(t => t.tabId !== pop1.tabId);
+  const pop1Contents = pageContents(origin + '/oauth-form');
+  const pop2Contents = pageContents(origin + '/nested-host');
+  await until(async () => (await call({ action: 'observe', tabId: pop2.tabId, mode: 'full' })).text.includes('Leaf frame'), 'nested OOPIF loaded');
+  // Cross-origin navigation tears down the parent OOPIF and drops grandchild
+  // detach events in Chromium; fill + immediate handoff must still succeed.
+  await call({ action: 'navigate', tabId: pop2.tabId, url: otherOrigin + '/oauth-form' });
+  const pop2Obs = await call({ action: 'observe', tabId: pop2.tabId });
+  await call({ action: 'handoff', tabId: pop1.tabId });
+  await call({ action: 'fill', tabId: pop2.tabId, ref: refOf(pop2Obs, 'textbox', 'Work email'), text: 'user@example.test' });
+  const pop2Handoff = await call({ action: 'handoff', tabId: pop2.tabId });
+  assert.match(pop2Handoff.text, /mode native-handoff/, pop2Handoff.text);
+  let popStates = (await call({ action: 'list_tabs' })).tabs;
+  assert.equal(popStates.find(t => t.tabId === pop1.tabId).mode, 'native-handoff');
+  assert.equal(popStates.find(t => t.tabId === pop2.tabId).mode, 'native-handoff');
+  // Detached handoff + navigation + typing must conservatively privatize on return.
+  pop2Contents.debugger.detach();
+  await until(async () => !(await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === pop2.tabId).connected, 'pop2 detached during handoff');
+  await pop2Contents.loadURL(origin + '/oauth-form?detached=1');
+  await pop2Contents.executeJavaScript('document.getElementById("note").value="DETACHED_HUMAN_NOTE"; 1', true);
+  await Promise.all([menu(frameOf(pop1Contents), 'Resume automation'), menu(frameOf(pop2Contents), 'Resume automation')]);
+  await until(async () => {
+    const cur = (await call({ action: 'list_tabs' })).tabs;
+    return cur.find(t => t.tabId === pop1.tabId).mode === 'automation'
+      && cur.find(t => t.tabId === pop2.tabId).mode === 'automation';
+  }, 'both concurrent popups return cleanly to automation');
+  const pop2After = await call({ action: 'observe', tabId: pop2.tabId, mode: 'full' });
+  assert.doesNotMatch(pop2After.text, /DETACHED_HUMAN_NOTE/, 'fields on a document loaded while CDP was detached are conservatively masked on return');
+  assert.match(pop2After.text, /textbox "Private note"[^\n]*sensitive/, pop2After.text);
+  await call({ action: 'close_tab', tabId: pop1.tabId });
+  await call({ action: 'close_tab', tabId: pop2.tabId });
+  console.log('PASS concurrent popups with nested OOPIF cross-origin nav, fill-then-handoff, return and detached-handoff privacy');
 
   const closed = await call({ action: 'close_session', sessionId: b.sessionId });
   assert.equal(closed.cleanupComplete, true, JSON.stringify(closed));

@@ -162,11 +162,32 @@ function pageInstall(U) {
     typed.push(fresh);
     if (typed.length > 1000 && typed.length % 1000 === 0) typed = typed.filter(item => item.ref.deref());
   }, true);
-  state.privatize = since => {
+  state.privatize = (since, allNonEmpty = false) => {
     let marked = 0;
     for (const { ref, at } of typed) {
       const el = ref.deref();
       if (el && at >= since) { sticky.add(el); marked++; }
+    }
+    if (allNonEmpty) {
+      // CDP was detached during part of the human handoff, so documents loaded
+      // while detached may have missed the trusted-input listener. Conservatively
+      // privatize every non-empty editable field in this document.
+      const roots = [document];
+      let count = 0;
+      while (roots.length) {
+        const walker = document.createTreeWalker(roots.pop(), NodeFilter.SHOW_ELEMENT);
+        for (let el = walker.nextNode(); el; el = walker.nextNode()) {
+          if (++count > 100000) break;
+          if (el.shadowRoot) roots.push(el.shadowRoot);
+          const tag = el.localName;
+          const editable = el.isContentEditable && !el.parentElement?.isContentEditable;
+          if (tag !== 'input' && tag !== 'textarea' && tag !== 'select' && !editable) continue;
+          const type = String(el.type || '').toLowerCase();
+          if (tag === 'input' && NOT_TEXT.has(type)) continue;
+          const hasValue = editable ? Boolean((el.innerText || '').trim()) : Boolean(el.value);
+          if (hasValue && !sticky.has(el)) { sticky.add(el); marked++; }
+        }
+      }
     }
     return marked;
   };
@@ -691,7 +712,7 @@ export const resolveExpression = (id, documentId) => call(`return s.resolve(${Nu
 export const quietExpression = (ms, cap) => call(`return s.quiet(${Number(ms)}, ${Number(cap)});`);
 export const textIncludesExpression = text => call(`return { found: s.textIncludes(${JSON.stringify(String(text))}) };`);
 export const viewportExpression = () => call('return { documentId: s.documentId, w: innerWidth, h: innerHeight, x: scrollX, y: scrollY };');
-export const privatizeExpression = since => call(`return { marked: s.privatize(${Number(since)}) };`);
+export const privatizeExpression = (since, allNonEmpty = false) => call(`return { marked: s.privatize(${Number(since)}, ${Boolean(allNonEmpty)}) };`);
 export const sensitivePresentExpression = () => call('return { present: s.sensitivePresent() };');
 export const armGuardExpression = (id, type, documentId) => call(`return { armed: s.armGuard(${Number(id)}, ${JSON.stringify(type)}) };`, documentId);
 export const disarmGuardExpression = () => call('return { guard: s.disarmGuard() };');

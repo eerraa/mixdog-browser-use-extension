@@ -56,6 +56,7 @@ export class FrameDriver {
   #consoleEvents = new Map();
   #refreshFlight = null;
   #inputReady = new Set();
+  #attachmentGeneration = 0;
 
   constructor(page, invalidate) {
     this.page = page;
@@ -86,28 +87,57 @@ export class FrameDriver {
     });
     this.message = (_event, method, params, sessionId) => this.onMessage(method, params, sessionId);
     this.detached = () => {
+      this.#attachmentGeneration++;
       this.#retireTargets(true);
       this.page.connected = false;
       this.invalidate('debugger-disconnected');
     };
   }
 
+  isAttached() {
+    return typeof this.wc.debugger.isAttached === 'function' ? this.wc.debugger.isAttached() : !!this.page.connected;
+  }
+  hasPendingCleanup() {
+    return this.#dialogCleanup.size > 0 || this.pending.size > 0 || this.#startupCleanup.size > 0;
+  }
   async start() {
+    this.#attachmentGeneration++;
     this.wc.debugger.attach('1.3');
     this.wc.debugger.on('message', this.message);
     this.wc.debugger.on('detach', this.detached);
     await this.enable();
   }
-  async reconnect() {
+  async reconnect(force = false) {
     // Called only behind the original dispatch/cleanup fence, for a fresh
-    // observation or explicit navigation; never to replay an earlier input.
+    // observation, explicit navigation, or human return recovery; never to
+    // replay an earlier input.
     this.assertNoDialogCleanup();
-    if (!this.wc.debugger.isAttached()) this.wc.debugger.attach('1.3');
-    this.#retireTargets();
+    if (force && typeof this.wc.debugger.isAttached === 'function' && this.wc.debugger.isAttached()
+      && typeof this.wc.debugger.detach === 'function') {
+      this.wc.debugger.detach();
+    }
+    this.#attachmentGeneration++;
+    if (typeof this.wc.debugger.isAttached !== 'function' || !this.wc.debugger.isAttached()) this.wc.debugger.attach('1.3');
+    this.#retireTargets(true);
     this.pageWorlds.clear();
     this.page.frameFailure = null;
     this.treeDirty = true;
     await this.enable();
+  }
+  detachForRecovery() {
+    // Called only during an explicit human Take control escape when a wedged
+    // main CDP session cannot complete setNativeMode(true). Detaching clears
+    // Chromium's focus emulation and file-chooser interception; the next human
+    // return reconnects cleanly and conservatively privatizes fields.
+    this.assertNoDialogCleanup();
+    this.nativeMode = true;
+    this.#attachmentGeneration++;
+    if (typeof this.wc.debugger.isAttached === 'function' && this.wc.debugger.isAttached()
+      && typeof this.wc.debugger.detach === 'function') {
+      this.wc.debugger.detach();
+    }
+    this.#retireTargets(true);
+    this.page.connected = false;
   }
 
   send(method, params = {}, sessionId, signal = this.actorSignal, beforeDispatch) {
@@ -196,8 +226,14 @@ export class FrameDriver {
   // One round trip per recording session: once this settles, every event the
   // browser sent before the replies has reached the recorder.
   devtoolsFlush() {
-    return Promise.allSettled([undefined, ...this.targets.keys()].map(sessionId =>
-      this.devtoolsCommand('Runtime.getIsolateId', {}, sessionId, undefined, DEVTOOLS_LIMITS.flushMs)));
+    const generation = this.#attachmentGeneration;
+    const targets = [...this.targets.entries()];
+    return Promise.allSettled([
+      this.devtoolsCommand('Runtime.getIsolateId', {}, undefined, undefined, DEVTOOLS_LIMITS.flushMs),
+      ...targets.map(([sessionId, target]) =>
+        this.devtoolsCommand('Runtime.getIsolateId', {}, sessionId, undefined, DEVTOOLS_LIMITS.flushMs)
+          .catch(error => { this.#retireIfDead(sessionId, target, generation, error); throw error; })),
+    ]);
   }
   // DevTools reads beside the action lane: no input, no execution fence; the
   // only evaluation sent here uses V8's best-effort throwOnSideEffect
@@ -287,9 +323,59 @@ export class FrameDriver {
     // replays what the worker logged since its release.
     if (target.type !== 'iframe' && this.#currentTarget(target)) void this.#record(target.sessionId, target.type, !target.waitingForDebugger);
   }
+  #isSessionGoneError(error) {
+    const message = String(error?.message ?? error ?? '');
+    return /Session with given id not found|No target with given id|Target closed|Inspected target navigated or closed|Not attached to an active page/i.test(message);
+  }
+  #retireIfDead(sessionId, target, generation, error) {
+    if (!sessionId || generation !== this.#attachmentGeneration || !this.#isSessionGoneError(error)) return false;
+    if (this.targets.get(sessionId) !== target) return false;
+    const wasFrame = this.sessions.has(sessionId);
+    this.#retireTarget(sessionId, true);
+    this.treeDirty = true;
+    if (wasFrame) this.invalidate('frame-detached');
+    this.#probeDescendants(sessionId);
+    return true;
+  }
+  #probeTarget(childSessionId, childTarget, generation, retries = 1) {
+    if (!childSessionId || this.page.closed || !this.isAttached()) return;
+    if (generation !== this.#attachmentGeneration || this.targets.get(childSessionId) !== childTarget) return;
+    this.devtoolsCommand('Runtime.getIsolateId', {}, childSessionId, undefined, 500)
+      .catch(error => {
+        if (this.#retireIfDead(childSessionId, childTarget, generation, error)) return;
+        // A probe sent at the exact tick of parent detachment can enter a
+        // tearing-down session whose reply Chromium drops. One follow-up probe
+        // after teardown finishes gets Chromium's definitive session-gone reply.
+        if (retries > 0 && /timed out/i.test(String(error?.message ?? ''))) {
+          this.#probeTarget(childSessionId, childTarget, generation, retries - 1);
+        }
+      });
+  }
+  #probeDescendants(parentSessionId) {
+    if (!parentSessionId || this.page.closed || !this.isAttached()) return;
+    const generation = this.#attachmentGeneration;
+    // Chromium can tear down grandchild targets during a cross-origin main-frame
+    // navigation without emitting Target.detachedFromTarget for them. Never
+    // guess from parent metadata alone: probe each descendant directly and
+    // retire it only on Chromium's own definitive session-gone reply.
+    const children = [...this.targets.entries()].filter(([, target]) => target.parentSessionId === parentSessionId);
+    for (const [childSessionId, childTarget] of children) {
+      this.#probeTarget(childSessionId, childTarget, generation, 1);
+    }
+  }
+  #probeOrphans() {
+    if (this.page.closed || !this.isAttached()) return;
+    const generation = this.#attachmentGeneration;
+    for (const [childSessionId, childTarget] of [...this.targets.entries()]) {
+      if (childTarget.parentSessionId && !this.targets.has(childTarget.parentSessionId)) {
+        this.#probeTarget(childSessionId, childTarget, generation, 0);
+      }
+    }
+  }
   #retireTarget(sessionId, nativeEnded = false) {
     // Parent metadata is not proof that a descendant's native session ended.
-    // Each child remains owned/fenced until its own event or debugger detach.
+    // Each child remains owned/fenced until its own event, definitive
+    // session-gone reply, or debugger detach.
     const target = this.targets.get(sessionId);
     this.targets.delete(sessionId);
     if (target) this.pending.delete(target.task);
@@ -309,11 +395,25 @@ export class FrameDriver {
   }
   async setNativeMode(native) {
     this.nativeMode = native;
+    const generation = this.#attachmentGeneration;
     await this.send('Emulation.setFocusEmulationEnabled', { enabled: !native }, undefined, null);
     await this.send('Page.setInterceptFileChooserDialog', { enabled: !native }, undefined, null);
-    for (const sessionId of this.sessions.keys()) {
-      await this.send('Emulation.setFocusEmulationEnabled', { enabled: !native }, sessionId, null).catch(() => {});
-      await this.send('Page.setInterceptFileChooserDialog', { enabled: !native }, sessionId, null);
+    // Snapshot child sessions so newly attached targets (whose enable() already
+    // sees the updated nativeMode) are not configured before Page.enable runs.
+    for (const sessionId of [...this.sessions.keys()]) {
+      const target = this.targets.get(sessionId);
+      if (!target || target.failure || !this.sessions.has(sessionId)) continue;
+      let dead = false;
+      await this.send('Emulation.setFocusEmulationEnabled', { enabled: !native }, sessionId, null)
+        .catch(error => { dead = this.#retireIfDead(sessionId, target, generation, error); });
+      if (dead || this.targets.get(sessionId) !== target || !this.sessions.has(sessionId)) continue;
+      try {
+        await this.send('Page.setInterceptFileChooserDialog', { enabled: !native }, sessionId, null);
+      } catch (error) {
+        if (this.#retireIfDead(sessionId, target, generation, error)) continue;
+        if (this.targets.get(sessionId) !== target || !this.sessions.has(sessionId)) continue;
+        throw error;
+      }
     }
   }
 
@@ -353,7 +453,7 @@ export class FrameDriver {
         return;
       }
       const target = {
-        sessionId: child, type,
+        sessionId: child, type, parentSessionId: sessionId,
         waitingForDebugger: params.waitingForDebugger,
       };
       this.targets.set(child, target);
@@ -374,6 +474,7 @@ export class FrameDriver {
       const frame = this.sessions.has(params.sessionId);
       this.#retireTarget(params.sessionId, true);
       if (frame) this.invalidate('frame-detached');
+      this.#probeDescendants(params.sessionId);
     } else if (['Page.frameNavigated', 'Page.frameDetached', 'Page.navigatedWithinDocument', 'Runtime.executionContextsCleared'].includes(method)) {
       if (method === 'Runtime.executionContextsCleared') {
         for (const [id, frame] of this.frames) if (frame.sessionId === sessionId) this.frames.delete(id);
@@ -381,6 +482,7 @@ export class FrameDriver {
         // A same-document navigation keeps the document and its walker.
         this.frames.delete(params.frame?.id || params.frameId);
       }
+      if (method === 'Page.frameNavigated' && !sessionId && !params.frame?.parentId) this.#probeOrphans();
       this.invalidate(method);
     } else if (method === 'Page.javascriptDialogOpening') {
       this.page.dialog = { type: params.type, message: params.message ?? '', sessionId };
@@ -424,13 +526,16 @@ export class FrameDriver {
     // cannot be set up is an unavailable frame: observations report it and
     // carry on, and the next observation tries it again.
     add((await this.send('Page.getFrameTree')).frameTree, undefined);
-    for (const [sessionId, targetId] of this.sessions) {
+    const generation = this.#attachmentGeneration;
+    for (const [sessionId, targetId] of [...this.sessions]) {
       const parent = tree.get(targetId)?.parentId;
-      const failed = this.targets.get(sessionId)?.failure;
+      const target = this.targets.get(sessionId);
+      const failed = target?.failure;
       let subtree = null;
       if (!failed) {
-        try { subtree = (await this.send('Page.getFrameTree', {}, sessionId)).frameTree; } catch {
+        try { subtree = (await this.send('Page.getFrameTree', {}, sessionId)).frameTree; } catch (error) {
           this.actorSignal?.throwIfAborted();
+          if (this.#retireIfDead(sessionId, target, generation, error)) continue;
         }
       }
       if (subtree) add(subtree, sessionId, parent);
@@ -673,15 +778,23 @@ export class FrameDriver {
     return true;
   }
   // Marks fields typed by the person since `since` as sensitive in every frame.
-  async privatize(since) {
+  // When allNonEmpty is true (CDP was detached while private), conservatively
+  // marks every non-empty editable field so documents loaded while detached
+  // cannot leak human-entered values.
+  async privatize(since, allNonEmpty = false) {
     const frames = await this.refresh();
-    await Promise.all(frames.map(frame => this.evaluate(frame, privatizeExpression(since)).catch(() => null)));
+    await Promise.all(frames.map(frame => this.evaluate(frame, privatizeExpression(since, allNonEmpty)).catch(() => null)));
   }
   // Page code in one frame reaches every same-origin document of the page
   // (contentDocument, parent, named windows), so a filled secret in any of
   // them counts. A same-origin frame that cannot be checked counts too.
   async sensitivePresent(origin, refresh = true) {
-    const frames = refresh ? await this.refresh() : [...this.frames.values()];
+    let frames;
+    if (refresh || !this.frames.size) {
+      if (!this.page.connected) return true;
+      try { frames = await this.refresh(); } catch { return true; }
+    } else frames = [...this.frames.values()];
+    if (!frames.length) return true;
     const reachable = frames.filter(frame => !origin || !frame.origin || frame.origin === origin);
     const present = await Promise.all(reachable.map(frame => (frame.contextId === undefined ? true
       : this.evaluate(frame, sensitivePresentExpression()).then(result => result?.present !== false, () => true))));

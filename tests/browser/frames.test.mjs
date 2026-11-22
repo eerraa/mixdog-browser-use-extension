@@ -855,3 +855,97 @@ test('page-world evaluation is an explicit opt-in bound to the frame main world 
   await assert.rejects(driver.evaluationContext({ id: 'root' }, 'page'), error => error.code === 'STALE_FRAME');
   assert.equal(sent.length, 1);
 });
+
+test('setNativeMode skips failed iframes, retires dead grandchild sessions on native proof, and keeps live child targets', async () => {
+  const { driver, debuggerAPI, changes } = fixture();
+  debuggerAPI.isAttached = () => true;
+  const deadSessions = new Set();
+  const calls = [];
+  debuggerAPI.sendCommand = async (method, params, sessionId) => {
+    calls.push({ method, params, sessionId });
+    if (sessionId === 'failed-iframe') throw new Error('iframe setup rejected');
+    if (deadSessions.has(sessionId)) throw new Error('Session with given id not found.');
+    return {};
+  };
+  await driver.start();
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'live-iframe', targetInfo: { type: 'iframe', targetId: 'live-target' }, waitingForDebugger: true,
+  });
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'parent-iframe', targetInfo: { type: 'iframe', targetId: 'parent-target' }, waitingForDebugger: true,
+  });
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'failed-iframe', targetInfo: { type: 'iframe', targetId: 'failed-target' }, waitingForDebugger: true,
+  });
+  await driver.waitForIdle();
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'grandchild-iframe', targetInfo: { type: 'iframe', targetId: 'grand-target' }, waitingForDebugger: true,
+  }, 'parent-iframe');
+  await driver.waitForIdle();
+  assert.equal(driver.targets.get('failed-iframe')?.failure?.message, 'iframe setup rejected');
+
+  // Simulate Chromium dropping Target.detachedFromTarget for the grandchild
+  // while detaching parent-iframe after a cross-origin navigation.
+  deadSessions.add('grandchild-iframe');
+  calls.length = 0;
+  changes.length = 0;
+  await driver.setNativeMode(true);
+  await driver.setNativeMode(false);
+  assert.equal(driver.sessions.has('grandchild-iframe'), false, 'dead grandchild retired on native session-gone proof');
+  assert.equal(driver.targets.has('grandchild-iframe'), false);
+  assert.ok(changes.includes('frame-detached'), 'retirement invalidates like a real detach');
+  assert.equal(driver.sessions.has('live-iframe'), true, 'live child iframe remains attached');
+  assert.equal(calls.some(c => c.sessionId === 'failed-iframe'), false, 'failed iframe is never sent setNativeMode commands');
+  assert.deepEqual(
+    calls.filter(c => c.sessionId === 'live-iframe' && c.method === 'Page.setInterceptFileChooserDialog').map(c => c.params.enabled),
+    [false, true],
+  );
+});
+
+test('parent detach probes descendants: definitive session-gone retires an orphaned worker fence while a live worker stays fenced', async () => {
+  const { driver, debuggerAPI } = fixture();
+  debuggerAPI.isAttached = () => true;
+  let releaseLive, releaseDead;
+  const liveReply = new Promise(resolve => { releaseLive = resolve; });
+  const deadReply = new Promise(resolve => { releaseDead = resolve; });
+  let deadWorkerGone = false;
+  debuggerAPI.sendCommand = async (method, _params, sessionId) => {
+    if (method === 'Runtime.getIsolateId') {
+      if (sessionId === 'dead-worker' && deadWorkerGone) throw new Error('Session with given id not found.');
+      return { id: 'ok' };
+    }
+    if (method === 'Runtime.runIfWaitingForDebugger' && sessionId === 'live-worker') return liveReply;
+    if (method === 'Runtime.runIfWaitingForDebugger' && sessionId === 'dead-worker') return deadReply;
+    return {};
+  };
+  await driver.start();
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'parent-iframe', targetInfo: { type: 'iframe', targetId: 'p' }, waitingForDebugger: true,
+  });
+  await driver.waitForIdle();
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'live-worker', targetInfo: { type: 'worker', targetId: 'w1' }, waitingForDebugger: true,
+  }, 'parent-iframe');
+  driver.onMessage('Target.attachedToTarget', {
+    sessionId: 'dead-worker', targetInfo: { type: 'worker', targetId: 'w2' }, waitingForDebugger: true,
+  }, 'parent-iframe');
+  await new Promise(resolve => setImmediate(resolve));
+  deadWorkerGone = true;
+  driver.onMessage('Target.detachedFromTarget', { sessionId: 'parent-iframe' });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(driver.targets.has('dead-worker'), false, 'definitive session-gone proof retires orphaned dead worker');
+  assert.equal(driver.targets.has('live-worker'), true, 'live worker stays attached after parent detach');
+  assert.throws(() => driver.assertNoDialogCleanup(), error => error.code === 'TARGET_STARTUP_PENDING',
+    'live worker keeps its startup fence until its own reply or detach');
+  releaseLive({});
+  releaseDead({});
+  await driver.waitForIdle();
+  assert.doesNotThrow(() => driver.assertNoDialogCleanup());
+});
+
+test('sensitivePresent on an unobserved sibling frame cache fails closed when disconnected', async () => {
+  const { driver, page } = fixture();
+  page.connected = false;
+  assert.equal(driver.frames.size, 0);
+  assert.equal(await driver.sensitivePresent('https://app.test', false), true);
+});

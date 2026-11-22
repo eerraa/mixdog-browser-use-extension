@@ -377,23 +377,29 @@ export class PagePresentation {
     for (const resolve of this.releaseWaiters) resolve();
     this.releaseWaiters.clear();
   }
-  waitForRelease() {
+  waitForRelease(signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (!this.shieldKeys.size && !this.shieldButtons.size && !this.unknownGesture) return Promise.resolve();
-    return new Promise(resolve => this.releaseWaiters.add(resolve));
+    return new Promise((resolve, reject) => {
+      const onAbort = () => { this.releaseWaiters.delete(finish); reject(signal.reason); };
+      const finish = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
+      this.releaseWaiters.add(finish);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
-  // activate: false for an agent-requested handoff. The window then only
-  // flashes and never takes focus, so keystrokes the person meant for another
-  // app cannot reach it; the person activates it by clicking (D19).
+  // activate: false for an agent-requested or inherited handoff. The window
+  // then only flashes and never takes focus, so keystrokes the person meant
+  // for another app cannot reach it; the person activates it by clicking (D19).
   enterNative(generation, { activate = true } = {}) {
     if (this.closed || this.mode !== 'draining' || this.generation !== generation
       || this.shieldKeys.size || this.shieldButtons.size || this.unknownGesture) fail('HANDOFF_CHANGED', 'Handoff changed or initiating controls are still held');
-    this.mode = 'native-handoff';
-    this.notice = null;
-    this.addressError = false;
     if (activate && this.frame.isMinimized()) this.frame.restore();
     if (!this.frame.isVisible()) { if (activate) this.frame.show(); else this.frame.showInactive(); }
     this.shieldView.setVisible(false);
     if (this.shieldView.getVisible()) fail('HANDOFF_FAILED', 'Could not reveal the live page');
+    this.mode = 'native-handoff';
+    this.notice = null;
+    this.addressError = false;
     if (activate || this.frame.isFocused()) this.contents.focus();
     else {
       this.frame.flashFrame(true);

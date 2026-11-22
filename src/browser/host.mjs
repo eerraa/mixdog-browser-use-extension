@@ -143,6 +143,7 @@ export class BrowserHost {
   // not voided here: each one is validated against its own node at use (C7).
   #invalidate(p, reason) {
     if (reason === 'handoff-draining') this.#beginPrivate(p);
+    if (reason === 'debugger-disconnected' && p.presentation?.mode !== 'automation') p.detachedWhilePrivate = true;
     this.#devtoolsMode(p);
     if (reason === 'Page.frameDetached' || reason === 'frame-detached') this.permissions.prune(p);
     if (reason === 'debugger-disconnected' || (reason === 'logical-visibility' && !p.visible)) this.permissions.withdraw(p);
@@ -179,30 +180,63 @@ export class BrowserHost {
   endSession(sessionId) {
     this.#signals.end(sessionId);
   }
-  // agent: the agent's handoff action. The window then only flashes; it never
-  // takes focus, so keystrokes meant for another app cannot reach it (D19).
-  #handoff(p, reason, fromMenu = false, agent = false) {
+  // source: 'human' (toolbar Take control / menu Human handoff), 'shield',
+  // 'agent' (browse handoff), or 'inherited' (popup of a private parent).
+  // Agent and inherited handoffs only flash and never take focus (D19); only
+  // an explicit human Take control may escape a wedged CDP session by detaching.
+  #handoff(p, reason, { source = 'shield' } = {}) {
     if (this.#closed || this.#revoking || p.closed) return Promise.resolve();
     if (p.presentation.mode === 'native-handoff') return Promise.resolve();
-    const generation = p.presentation.beginDrain(fromMenu);
-    if (p.manualFlight) { p.presentation.releaseIfSafe(); return p.manualFlight; }
+    const clearWheel = source !== 'shield';
+    const wantsActivate = source === 'human' || source === 'shield';
+    const generation = p.presentation.beginDrain(clearWheel);
+    if (p.manualFlight) {
+      if (source === 'human') { p.manualSource = 'human'; p.manualActivate = true; }
+      p.presentation.releaseIfSafe();
+      return p.manualFlight;
+    }
+    p.manualSource = source;
+    p.manualActivate = wantsActivate;
     this.#pause(p, p.paused === 'explicit-stop' ? p.paused : reason);
     p.manualFlight = this.#queue.run(p.id, async signal => {
       await p.ready;
       signal.throwIfAborted();
       await p.driver.waitForIdle(signal);
-      await p.presentation.waitForRelease();
+      await p.presentation.waitForRelease(signal);
       signal.throwIfAborted();
       if (p.closed || this.#closed || this.#revoking) return;
-      await p.driver.setNativeMode(true);
+      if (!p.connected || !p.driver.isAttached()) {
+        p.driver.nativeMode = true;
+        p.detachedWhilePrivate = true;
+      } else {
+        try {
+          await p.driver.setNativeMode(true);
+        } catch (error) {
+          if (p.manualSource !== 'human' || signal.aborted) throw error;
+          // Human Take control escape: if main CDP is wedged while idle,
+          // detach so Chromium releases focus emulation and file interception.
+          // The next human return reconnects cleanly and conservatively masks.
+          p.driver.detachForRecovery();
+          p.detachedWhilePrivate = true;
+        }
+      }
+      // Targets spawned right after a preceding action (e.g. fill -> handoff)
+      // may attach while setNativeMode awaits; drain them cleanly (bounded)
+      // before the final synchronous guard right ahead of reveal.
+      for (let pass = 0; pass < 5 && p.driver.hasPendingCleanup(); pass++) {
+        signal.throwIfAborted();
+        await p.driver.waitForIdle(signal);
+      }
       signal.throwIfAborted();
       p.driver.assertNoDialogCleanup();
-      p.presentation.enterNative(generation, { activate: !agent });
+      p.presentation.enterNative(generation, { activate: p.manualActivate });
       this.#devtoolsMode(p);
       this.#signal(p, { kind: 'state', state: 'handoff' });
     }).catch(() => {
-      p.presentation.clear('drainFailed');
-    }).finally(() => { p.manualFlight = null; });
+      if (!p.closed && !this.#closed && !this.#revoking && p.paused !== 'explicit-stop' && p.presentation.mode === 'draining') {
+        p.presentation.clear('drainFailed');
+      }
+    }).finally(() => { p.manualFlight = null; p.manualSource = null; p.manualActivate = false; });
     return p.manualFlight;
   }
   async #resume(p) {
@@ -214,6 +248,7 @@ export class BrowserHost {
     const controller = new AbortController();
     p.returnController = controller;
     const attempt = ++p.returnAttempt;
+    const previousFailure = p.returnFailure;
     let stage = 'withdraw-requests';
     p.returnFailure = null;
     p.presentation.clear();
@@ -248,16 +283,27 @@ export class BrowserHost {
             if (!p.presentation.frame.isDestroyed()) p.presentation.frame.focus();
             p.presentation.toolbar.focus();
           }
-          // No configuration command can reach a detached debugger. Reconnect
-          // behind the actual-operation fence, before restoring automation mode.
-          if (!p.connected) await step('reconnect', async () => { await p.driver.reconnect(); p.connected = true; });
+          // No configuration command can reach a detached debugger, and a human
+          // retry after an automation-mode failure resets a wedged CDP attachment
+          // behind the actual-operation fence before restoring automation mode.
+          const forceReconnect = previousFailure?.stage === 'automation-mode';
+          if (!p.connected || !p.driver.isAttached() || forceReconnect) {
+            if (!p.connected || !p.driver.isAttached()) p.detachedWhilePrivate = true;
+            await step('reconnect', async () => {
+              p.connected = false;
+              await p.driver.reconnect(forceReconnect);
+              p.connected = true;
+            });
+          }
           await step('automation-mode', () => p.driver.setNativeMode(false));
           // The trusted return proves a presented frame and a readable root
           // document; it never captures an image.
           await step('presentation', () => p.driver.presented());
           // Whatever the person typed during the handoff stays theirs: those
           // fields are sensitive before the first agent-visible observation.
-          if (p.privateSince !== undefined) await step('privacy', () => p.driver.privatize(p.privateSince));
+          if (p.privateSince !== undefined) {
+            await step('privacy', () => p.driver.privatize(p.privateSince, !!p.detachedWhilePrivate));
+          }
           await step('observation', () => this.#perceive(p, null, signal, true));
           // Deliver every DevTools event queued during the handoff while
           // recording is still off, on every page sharing the profile.
@@ -265,6 +311,7 @@ export class BrowserHost {
           stage = 'commit';
           p.presentation.finishReturn(generation);
           p.privateSince = undefined;
+          p.detachedWhilePrivate = false;
           p.paused = null;
           this.#devtoolsMode(p);
           p.presentation.refresh();
@@ -619,7 +666,7 @@ export class BrowserHost {
     const p = {
       id: `t${++this.#tabSequence}`, owner, profile, view, contents: view.webContents, closed: false, connected: true, visible: false,
       paused: parent?.paused ?? null, model: null, base: null, shot: null, cursor: null,
-      dialog: null, downloads: [], permissionDocuments: new Map(), returnAttempt: 0, returnFailure: null,
+      dialog: null, downloads: [], permissionDocuments: new Map(), returnAttempt: 0, returnFailure: null, detachedWhilePrivate: false,
     };
     // Service and shared workers serve every page of the profile: their
     // events are private while any page of the profile is not in automation.
@@ -635,7 +682,7 @@ export class BrowserHost {
     const humanActions = {
       stop: () => this.#pause(p, 'explicit-stop'),
       resume: () => this.#resume(p),
-      handoff: () => this.#handoff(p, 'human-handoff', true),
+      handoff: () => this.#handoff(p, 'human-handoff', { source: 'human' }),
       acceptDialog: () => this.#humanDialog(p, true),
       dismissDialog: () => this.#humanDialog(p, false),
       revoke: () => { this.#revoke().catch(() => {}); },
@@ -643,7 +690,7 @@ export class BrowserHost {
     };
     p.presentation = new PagePresentation(view, {
       interrupt: reason => this.#pause(p, reason),
-      handoff: reason => { void this.#handoff(p, reason); },
+      handoff: reason => { void this.#handoff(p, reason, { source: 'shield' }); },
       invalidate: reason => this.#invalidate(p, reason),
       guardNativeInput: () => p.driver.assertNoDialogCleanup(),
       paused: () => p.paused,
@@ -717,7 +764,9 @@ export class BrowserHost {
         // Adopted contents do not inherit this preference; match owned pages.
         popupView.webContents.setBackgroundThrottling(false);
         const popup = this.#registerPage(owner, profile, popupView, p, {
-          width: options.width, height: options.height + TOOLBAR_HEIGHT, useContentSize: true,
+          width: options.width,
+          height: Number.isFinite(options.height) ? options.height + TOOLBAR_HEIGHT : undefined,
+          useContentSize: true,
         });
         popup.ready.catch(() => this.#invalidate(p, 'popup-failed'));
         this.#signal(p, { kind: 'popup', popupTabId: popup.id, title: '', url: details.url });
@@ -757,7 +806,7 @@ export class BrowserHost {
       p.ready.then(async () => {
         if (!inheritedManual && parent.presentation.mode === 'automation') return;
         await parent.manualFlight;
-        await this.#handoff(p, parent.paused || 'inherited-native-handoff', true);
+        await this.#handoff(p, parent.paused || 'inherited-native-handoff', { source: 'inherited' });
       }).catch(() => { /* Initialization closes its owned windows on failure. */ });
     }
     return p;
@@ -886,8 +935,10 @@ export class BrowserHost {
         + (args.action === 'hide' ? '; earlier refs and points of this tab are void (observe again after show)' : '; observe before acting'));
     }
     if (args.action === 'handoff') {
-      await this.#handoff(p, 'human-handoff', true, true);
-      return this.#plain(p, args.action, `mode ${p.presentation.mode}; the window flashes for the person. Only the person can return control in the browser window; no tool can resume`);
+      await this.#handoff(p, 'human-handoff', { source: 'agent' });
+      return this.#plain(p, args.action, p.presentation.mode === 'native-handoff'
+        ? `mode ${p.presentation.mode}; the window flashes for the person. Only the person can return control in the browser window; no tool can resume`
+        : `mode ${p.presentation.mode}; handoff did not finish entering native control; the person can use Take control or Resume in the browser window`);
     }
     if (['observe', 'read', 'downloads', 'requests'].includes(args.action) || devtoolsActions.has(args.action)) {
       await p.ready;

@@ -2596,6 +2596,139 @@ test('run executes a script through the same pipeline; steps keep the agent view
   } finally { send = async () => ({}); page.nodes = []; await host.close(); }
 });
 
+test('concurrent popups isolate handoff, fill-then-handoff drains late target startup, and automation-mode failure recovers via human retry or Take control escape', async () => {
+  page.nodes = [{ id: 1, p: 0, k: 'i', r: 'textbox', n: 'Email', s: [], b: [10, 10, 120, 20], vp: true, o: 1 }];
+  const { host, call, tabId, tab } = await setup();
+  const prevCallOn = callOn;
+  callOn = async (_frame, _obj, fn) => String(fn).includes('activeElement') ? true
+    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'email', multiple: false, editable: true };
+  const openPopup = url => {
+    const decision = tab.contents.windowOpenHandler({ url });
+    assert.equal(decision.action, 'allow');
+    const popupContents = new FixtureContents();
+    popupContents.url = url;
+    popupContents.mainFrame.url = url;
+    decision.createWindow({ webContents: popupContents, width: 600, height: 500 });
+    return tabFor(popupContents);
+  };
+  let driverB, origSetNative, origReconnect;
+  try {
+    const popA = openPopup('http://127.0.0.1:8000/oauth-hubspot');
+    const popB = openPopup('http://127.0.0.1:8000/oauth-klaviyo');
+    await tick();
+    const tabs = (await call({ action: 'list_tabs' })).tabs;
+    const tA = tabs.find(t => t.url === 'http://127.0.0.1:8000/oauth-hubspot');
+    const tB = tabs.find(t => t.url === 'http://127.0.0.1:8000/oauth-klaviyo');
+    assert.ok(tA && tB);
+    popA.toolbarAction('ready');
+    popB.toolbarAction('ready');
+
+    // Handoff popup A first, then immediately fill + handoff popup B while a
+    // late target attaches during setNativeMode(true).
+    await call({ action: 'handoff', tabId: tA.tabId });
+    assert.equal(popA.exposed(), true);
+    const seenB = await call({ action: 'observe', tabId: tB.tabId });
+    const emailRef = refIn(rendered(seenB), 'textbox "Email"');
+    await call({ action: 'fill', tabId: tB.tabId, ref: emailRef, text: 'owner@example.test' });
+
+    driverB = drivers.get(popB.contents);
+    origSetNative = driverB.setNativeMode;
+    origReconnect = driverB.reconnect;
+    let injectedPending = false;
+    driverB.setNativeMode = async function(native) {
+      if (native && !injectedPending) {
+        injectedPending = true;
+        const late = deferred();
+        this.pending.add(late.promise);
+        setTimeout(() => { this.pending.delete(late.promise); late.resolve(); }, 10);
+      }
+      return origSetNative.call(this, native);
+    };
+    const handoffB = await call({ action: 'handoff', tabId: tB.tabId });
+    assert.match(rendered(handoffB), /mode native-handoff/, 'late startup during setNativeMode drains instead of getting stuck in draining');
+    assert.equal(popB.exposed(), true);
+    assert.equal(popA.exposed(), true, 'popup B handoff never disturbs popup A');
+
+    // Popup A returns cleanly while popup B stays in native-handoff.
+    await popA.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    let current = (await call({ action: 'list_tabs' })).tabs;
+    assert.equal(current.find(t => t.tabId === tA.tabId).mode, 'automation');
+    assert.equal(current.find(t => t.tabId === tB.tabId).mode, 'native-handoff');
+
+    // Simulate an unexpected automation-mode failure on attempt 1 of popup B's
+    // return; human Retry return forces a clean CDP reconnect before retry.
+    let failOnce = true;
+    const reconnectForces = [];
+    driverB.reconnect = async function(force) {
+      reconnectForces.push(!!force);
+      return origReconnect.call(this, force);
+    };
+    driverB.setNativeMode = async function(native) {
+      if (!native && failOnce) { failOnce = false; throw new Error('Simulated wedged CDP session'); }
+      return origSetNative.call(this, native);
+    };
+    await popB.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    const failedB = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === tB.tabId);
+    assert.deepEqual([failedB.mode, failedB.paused, failedB.returnFailure?.stage, failedB.returnFailure?.code],
+      ['draining', 'return-failed', 'automation-mode', 'RETURN_FAILED']);
+
+    // Human Take control can escape even if main CDP setNativeMode(true) throws,
+    // by detaching safely and conservatively privatizing on return.
+    driverB.setNativeMode = async function(native) {
+      if (native) throw new Error('Wedged main CDP on Take control');
+      return origSetNative.call(this, native);
+    };
+    const privatizeCalls = [];
+    const prevPrivatize = FrameDriver.prototype.privatize;
+    FrameDriver.prototype.privatize = async (since, allNonEmpty) => { privatizeCalls.push({ since, allNonEmpty }); };
+    try {
+      await popB.frame.menu.items.find(item => item.label === 'Human handoff').click();
+      const escaped = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === tB.tabId);
+      assert.equal(escaped.mode, 'native-handoff', 'human Take control escapes draining even with wedged CDP');
+      assert.equal(escaped.connected, false, 'escape detached wedged CDP cleanly');
+      await popB.frame.menu.items.find(item => item.label === 'Resume automation').click();
+      const recovered = (await call({ action: 'list_tabs' })).tabs.find(t => t.tabId === tB.tabId);
+      assert.deepEqual([recovered.mode, recovered.paused, recovered.connected, recovered.returnFailure],
+        ['automation', null, true, null]);
+      assert.deepEqual(reconnectForces, [true], 'retry after automation-mode failure forced a clean reconnect');
+      assert.equal(privatizeCalls.at(-1)?.allNonEmpty, true, 'detached handoff conservatively privatized fields on return');
+    } finally { FrameDriver.prototype.privatize = prevPrivatize; }
+  } finally {
+    if (driverB) { driverB.setNativeMode = origSetNative; driverB.reconnect = origReconnect; }
+    callOn = prevCallOn; page.nodes = [];
+    await host.close();
+  }
+});
+
+test('Stop during a shield-held drain unblocks the lane immediately; agent handoff never gains human detach authority', async () => {
+  const { host, call, tabId, tab } = await setup();
+  const driver = drivers.get(tab.contents), origSetNative = driver.setNativeMode;
+  try {
+    // Hold a shield key so drain waits in waitForRelease, then Stop: lane must
+    // unblock without hanging for 25 s.
+    tab.shield.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', code: 'KeyA', key: 'a' });
+    await tick();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].busy, true);
+    tab.frame.menu.items.find(item => item.label === 'Stop automation').click();
+    await tick();
+    const afterStop = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(afterStop.paused, 'explicit-stop');
+    assert.equal(afterStop.busy, false, 'Stop aborted waitForRelease and freed the tab lane');
+    tab.shield.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyUp', code: 'KeyA', key: 'a' });
+    await tab.frame.menu.items.find(item => item.label === 'Resume automation').click();
+    assert.equal((await call({ action: 'list_tabs' })).tabs[0].mode, 'automation');
+
+    // Agent handoff must NOT detach a failing main CDP session (only explicit
+    // human Take control has detach-escape authority) and reports draining honestly.
+    driver.setNativeMode = async () => { throw new Error('Main CDP failed'); };
+    const result = await call({ action: 'handoff', tabId });
+    assert.match(rendered(result), /mode draining; handoff did not finish entering native control/);
+    const stuck = (await call({ action: 'list_tabs' })).tabs[0];
+    assert.equal(stuck.mode, 'draining');
+    assert.equal(stuck.connected, true, 'agent handoff never detached CDP');
+  } finally { driver.setNativeMode = origSetNative; await host.close(); }
+});
+
 test.after(() => {
   for (const [key, value] of Object.entries(original)) FrameDriver.prototype[key] = value;
 });

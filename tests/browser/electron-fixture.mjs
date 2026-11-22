@@ -34,6 +34,10 @@ export class FixtureContents extends EventEmitter {
     super();
     this.id = ++nextWC;
     this.debugger = new EventEmitter();
+    this.debugger.attached = true;
+    this.debugger.isAttached = () => this.debugger.attached;
+    this.debugger.attach = () => { this.debugger.attached = true; };
+    this.debugger.detach = () => { this.debugger.attached = false; this.debugger.emit('detach'); };
     this.ipc = new EventEmitter();
     this.mainFrame = { url: 'about:blank', processId: 1, routingId: this.id, owner: this };
     this.sent = [];
