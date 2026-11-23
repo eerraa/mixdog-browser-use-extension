@@ -11,8 +11,11 @@ dependencies:
 # Independent Browser
 
 Use this plugin to complete interactive web tasks and verify implemented apps,
-including when built-in Browser Use is disabled. It owns its windows, profiles,
-native requests and cancellation; it does not use a built-in bridge.
+including when built-in Browser Use is disabled. It runs Camoufox (patched
+Firefox 158) by default with its own windows, profiles, native requests and
+cancellation, and keeps an explicit Electron 44.9.1 fallback (`WB_ENGINE=electron`
+or `browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB workflows; it
+does not use a built-in bridge.
 
 ## Boundary
 
@@ -61,10 +64,13 @@ blocker, not permission to edit it or operate a human approval surface.
    `respond` with its `requestRef` and one
    current `optionRef`, explicit `files`, or `cancel:true`. Native requests can be resolved while their initiating
    click/evaluation is still waiting; do not repeat that initiating operation.
-   A click that opens an `alert`/`confirm` answers `uncertain … code=DIALOG_OPEN`
-   with the request: answer the request, never repeat the click.
+   A click that opens an `alert`/`confirm`/`prompt` answers `uncertain … code=DIALOG_OPEN`
+   with the request: answer the request (pass `text` in `respond` or `promptText`
+   in `handle_dialog` for `prompt`), never repeat the click.
    Check the next observation for the site's actual result.
-5. Click device-authentication buttons through the normal input path. Select
+5. Click device-authentication buttons through the normal input path (WebHID/WebUSB
+   require `WB_ENGINE=electron` or `browser-policy.json` `"engine": "electron"`,
+   since Firefox/Camoufox does not implement WebHID/WebUSB). Select
    the intended exact offered HID/USB device from task evidence and complete
    connection without handoff or repeated consent. Never guess from list order
    or select an unrelated device just because it is the only offer. If identity
@@ -262,16 +268,21 @@ image, never change refs, and answer even while an action is running.
   `since` to get only new rows. A first call without `since` returns the
   newest rows; `omitted` then counts older kept rows, which only `since:0`
   pages through from the oldest. Following `next` never returns them.
-- `network`: rows `id`, `m` (non-GET), `u`, `ty`, `s` status, `mt`, `sz`
-  bytes, `ms`, `err`, `c` cache source, `st` (`run`, `incomplete`). Filter with
-  `status:4xx`, `status:404`, `type:fetch`, `method:POST`, `is:failed`,
-  `is:running`, or URL words. `id` gives redacted headers, initiator and the
-  request body; add `body:true` only when the response content matters
-  (8 KB default, `limit` up to 65536; binary returns size and type only).
+- `network`: rows `id`, `m` (non-GET, `WS` for WebSockets), `u`, `ty` (`fetch`, `xhr`,
+  `document`, `iframe`, `websocket`, …), `s` status, `mt`, `sz` bytes, `ms`, `err`, `c`
+  cache/SW source, `st` (`run`, `incomplete`), `in` (`iframe`, `worker`, `service_worker`).
+  Filter with `status:4xx`, `status:404`, `type:fetch`, `type:websocket`, `method:POST`,
+  `is:failed`, `is:running`, `is:cached`, or URL words. `id` gives redacted headers, timing
+  breakdown (`dnsMs`/`tcpMs`/`tlsMs`/`ttfbMs`), TLS details, redirect chain links
+  (`redirectFrom`/`redirectTo`), initiator, request body, and recent WebSocket frame
+  summary; add `body:true` only when the response content (or full redacted WebSocket
+  frame transcript for `type:websocket`) matters (8 KB default, `limit` up to 65536;
+  binary returns size and type only).
 - `console` with `expression`: a page-world JavaScript read, like typing in
-  the DevTools Console. It sees page globals that `evaluate` cannot. V8
-  refuses detected side effects (`SIDE_EFFECT`), but this is a best-effort
-  check: page code such as getters or overridden built-ins still runs. Treat
+  the DevTools Console. It sees page globals that `evaluate` cannot. Firefox RDP
+  `eager: true` (Camoufox) or V8 `throwOnSideEffect` (Electron) refuses detected
+  side effects (`SIDE_EFFECT`), as a best-effort check: page code such as getters
+  or overridden built-ins may still run. Treat
   the result as page-reported. Objects return a short preview; read the
   specific properties you need. It is refused while the tab is paused,
   including after Stop. A read running over 2 s is stopped (`SCRIPT_TIMEOUT`).
@@ -332,10 +343,15 @@ closes when control returns.
   requires physical wheel gestures needs human handoff, not synthetic retries.
 - A terminated/revoked connection requires the user's explicit reconnection;
   do not edit plugin settings or silently replace it.
-- Real `alert`/`confirm` dialogs are supported. This Electron runtime throws
-  `prompt() is not supported.` before native `window.prompt()` creates a request.
-  Report a prompt-dependent app as blocked by that capability, not verified;
-  handoff, waiting or sending a dialog response cannot repair the missing API.
+- On Camoufox (default), real `alert`, `confirm` and `prompt` dialogs are all
+  supported natively (pass `promptText` in `handle_dialog` or `text` in `respond`).
+  Under `WB_ENGINE=electron`, Electron 44.9.1 throws `prompt() is not supported.`
+  before native `window.prompt()` creates a request; report a prompt-dependent app
+  under Electron as blocked by that capability, not verified.
+- On Camoufox, human takeover, return, Stop, one-way Elevated revert and Revoke
+  live in the floating Win32 Control Bar (`bin/control-bar.exe`) so Firefox windows
+  stay native without DOM overlays, while the isolated-world `__wbTrustedInput`
+  guard still pauses automation on out-of-band trusted input.
 
 ## Verification
 

@@ -2,8 +2,10 @@
 
 Mixdog의 빌트인 Browser Use와 별개로 실행되는 Windows 브라우저 플러그인입니다.
 같은 배포 폴더를 Claude Code에 일반 MCP 서버로 등록해 쓸 수도 있습니다.
-배포 폴더에는 Electron 런타임과 실행기가 포함되므로 사용자는 Node.js 설치나
-수동 빌드를 하지 않습니다.
+기본 브라우저 엔진은 **Camoufox (패치된 Firefox 158)**이며, WebHID·WebUSB 장치 연결이
+필요한 워크플로우에서는 `WB_ENGINE=electron`(또는 `browser-policy.json` `"engine": "electron"`)으로
+내장 Electron 44.9.1 엔진을 명시적으로 선택할 수 있습니다.
+배포 폴더에는 실행기와 런타임 구성이 포함되어 있어 사용자는 Node.js 설치나 수동 빌드를 하지 않습니다.
 
 ## 에이전트에게 제공되는 도구
 
@@ -52,9 +54,11 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 `status`·`list_tabs`·`create_session`·`list_sessions`·`close_session`·`requests`·`respond`·`permissions`·`downloads`·`revoke`와
 개발자 도구 action은 짧은 JSON으로 답합니다.
 
-개발자 도구 action은 Chrome 개발자 도구 화면을 조작하지 않고 페이지의 콘솔 메시지·오류,
-네트워크 요청(상태·헤더·응답 본문), 요소의 계산된 스타일·적용된 CSS 규칙, 성능 지표를
-짧은 JSON으로 돌려줍니다. 화면 캡처나 페이지 관측을 붙이지 않으므로 토큰을 적게 쓰며,
+개발자 도구 action은 브라우저 개발자 도구 화면을 조작하지 않고 페이지·iframe·워커의 콘솔 메시지·오류,
+네트워크 요청(HTTP/HTTPS 상태·리다이렉트 체인·요청/응답 헤더·POST 본문·응답 본문·타이밍·TLS·서비스 워커·WebSocket 프레임),
+요소의 계산된 스타일·적용된 CSS 규칙(소스 파일·줄 번호)·DOM 이벤트 리스너, 성능 지표를
+짧은 JSON으로 돌려줍니다. Camoufox에서는 Juggler 파이프와 로컬 읽기 전용 Firefox DevTools RDP를
+결합해 동작하며, Electron 폴백에서는 CDP로 동작합니다. 화면 캡처나 페이지 관측을 붙이지 않으므로 토큰을 적게 쓰며,
 에이전트의 다른 동작이 진행 중이어도 바로 응답합니다. 쿠키·인증 헤더, 토큰·인증 코드가
 담긴 URL 값, `Bearer` 인증 값, 요청·응답 본문의 비밀번호·토큰 항목처럼 이름이나 형태로
 알아볼 수 있는 값은 `[redacted]`로 가립니다. 다만 이 가림은 최선 노력 방식이라, 알아보기
@@ -138,7 +142,18 @@ MCP 호스트에는 버전마다 바뀌는 폴더 대신 고정 경로 하나만
 ```text
 C:\설치루트\win-browser                               ← 호스트에 등록하는 경로(정션)
 C:\설치루트\win-browser-versions\v<버전>\win-browser   ← 버전별 설치
+C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 Camoufox 158 런타임(1회 배치)
 ```
+
+- **엔진 선택 (`WB_ENGINE`)**: 기본 엔진은 `camoufox`(Firefox 158)입니다. WebHID·WebUSB
+  장치 연결이 필요할 때는 MCP 등록 환경 변수에 `WB_ENGINE=electron`을 지정하거나 등록 전
+  `browser-policy.json`에 `"engine": "electron"`을 추가합니다(`camoufox`·`electron` 외 값은
+  시작 시 거부). Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` →
+  공유 `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
+- **Camoufox 제어 막대**: Camoufox 창에는 DOM 오버레이를 주입하지 않고 별도의 포커스 비탈취
+  Win32 Control Bar(`bin/control-bar.exe`)로 **직접 조작 / 에이전트에게 돌려주기 / 에이전트 중지 /
+  권한 상승 · 해제 / 연결 회수**를 제공합니다. Camoufox에서는 `window.prompt()`까지 네이티브로
+  지원하며, `WB_ENGINE=electron`에서는 기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따릅니다.
 
 - 새 버전은 옆 폴더에 풀고 정션만 바꿉니다. 실행 중인 폴더는 덮어쓰지 않습니다.
 - 이미 실행 중인 연결은 시작할 때의 버전을 끝까지 쓰고, 다음 연결(새 세션, `/mcp` 재연결,

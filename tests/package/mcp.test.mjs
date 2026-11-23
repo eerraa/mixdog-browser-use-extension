@@ -170,14 +170,14 @@ async function fixture(t) {
       res.end(`<!doctype html><meta charset="utf-8"><title>Packaged app verification</title>
         <button id="attach">Attach local fixture</button><input id="file" type="file" hidden>
         <button id="prompt">App confirmation</button><button id="alert">App alert</button>
-        <button id="unsupported">Native prompt limitation</button><button id="permission">Test notifications</button><output></output>
+        <button id="unsupported">Native prompt</button><button id="permission">Test notifications</button><output></output>
         <script>
         const done=value=>{document.querySelector('output').textContent=value;navigator.sendBeacon('/native-result?result='+encodeURIComponent(value),'x')};
         document.querySelector('#attach').onclick=()=>document.querySelector('#file').click();
         document.querySelector('#file').onchange=e=>done(e.target.files[0].name);
         document.querySelector('#prompt').onclick=()=>done(confirm('Packaged fixture approval')?'agent confirmed':'agent dismissed');
         document.querySelector('#alert').onclick=()=>{alert('Packaged fixture alert');done('alert returned')};
-        document.querySelector('#unsupported').onclick=()=>{try{prompt('Native prompt')}catch(error){done(error.message)}};
+        document.querySelector('#unsupported').onclick=()=>{try{done('prompt:' + prompt('Native prompt', 'fallback'))}catch(error){done(error.message)}};
         document.querySelector('#permission').onclick=async()=>done(await Notification.requestPermission());
         </script>`);
       return;
@@ -300,15 +300,16 @@ test('packaged folder: standard SDK, hook admission, real page, replay/ownership
   assert.equal((await second.status()).state, 'connection-ended');
 });
 
-test('packaged agent tool resolves real file, dialog and permission requests without human steps', { timeout: 60000 }, async t => {
+test('packaged agent tool (default Camoufox): resolves real file, alert, confirm and prompt requests without human steps', { timeout: 60000 }, async t => {
   const context = await environment(t);
   const page = await fixture(t);
   const connection = await sdk(t, context);
-  const owner = 'autonomous-app-owner';
-  const capabilities = (await connection.status()).capabilities;
+  const owner = 'autonomous-camoufox-owner';
+  const status = await connection.status();
+  assert.equal(status.engine, 'camoufox');
+  const capabilities = status.capabilities;
   assert.equal(capabilities.delegation.mode, 'delegated');
-  assert.deepEqual(capabilities.javascriptDialogs.supported, ['alert', 'confirm']);
-  assert.match(capabilities.javascriptDialogs.unsupported.prompt, /Electron 44.9.1/);
+  assert.deepEqual(capabilities.javascriptDialogs.supported, ['alert', 'confirm', 'prompt']);
   assert.deepEqual(new Set(capabilities.filePickers.supported), new Set(['html-file-input']));
   assert.deepEqual(new Set(capabilities.filePickers.unsupported),
     new Set(['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker']));
@@ -334,17 +335,13 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
     { button: 'App alert', kind: 'javascript-dialog',
       response: request => ({ optionRef: request.options.find(option => option.label === 'Accept').optionRef }),
       resolution: 'resolved', expected: 'alert returned' },
-    { button: 'Test notifications', kind: 'notifications',
-      response: request => ({ optionRef: request.options.find(option => option.label === 'Allow').optionRef }),
-      resolution: 'allowed', expected: 'granted' },
+    { button: 'Native prompt', kind: 'javascript-dialog',
+      response: request => ({ optionRef: request.options.find(option => option.label === 'Accept').optionRef, text: 'camoufox-ok' }),
+      resolution: 'resolved', expected: 'prompt:camoufox-ok' },
   ]) {
     const click = await connection.call(owner, { action: 'click', tabId, target: { name: scenario.button, exact: true } });
-    // A JS dialog blocks the renderer before the click is acknowledged: the
-    // outcome is unknown (uncertain, never replayed). A file chooser or a
-    // permission prompt leaves the renderer running: the click is executed.
     if (scenario.kind === 'javascript-dialog') {
-      assert.equal(click.isError, true, textOf(click));
-      assert.match(textOf(click), /^uncertain click e\d+ tab=t\d+ code=DIALOG_OPEN replaySafe=false session=ctx\d+ name="Default"\n[\s\S]*\nrequest \S+ javascript-dialog/, textOf(click));
+      assert.match(textOf(click), /code=DIALOG_OPEN[\s\S]*request \S+ javascript-dialog/, textOf(click));
     } else assert.equal(click.isError, false, textOf(click));
     const requests = await connection.call(owner, { action: 'requests', tabId });
     assert.equal(requests.isError, false, JSON.stringify(dataOf(requests)));
@@ -363,7 +360,50 @@ test('packaged agent tool resolves real file, dialog and permission requests wit
     assert.equal((await connection.call(owner, { action: 'respond', tabId, requestRef: request.requestRef,
       response: scenario.response(request) })).isError, true);
   }
-  const unsupported = await connection.call(owner, { action: 'click', tabId, target: { name: 'Native prompt limitation', exact: true } });
+});
+
+test('packaged WB_ENGINE=electron fallback: preserves Electron 44.9.1 runtime, notifications and WebHID/WebUSB delegation', { timeout: 60000 }, async t => {
+  const context = await environment(t);
+  context.env.WB_ENGINE = 'electron';
+  const page = await fixture(t);
+  const connection = await sdk(t, context);
+  const owner = 'autonomous-electron-owner';
+  const capabilities = (await connection.status()).capabilities;
+  assert.equal(capabilities.delegation.mode, 'delegated');
+  assert.deepEqual(capabilities.delegation.permissions, ['hid', 'usb', 'notifications', 'geolocation']);
+  assert.deepEqual(capabilities.javascriptDialogs.supported, ['alert', 'confirm']);
+  assert.match(capabilities.javascriptDialogs.unsupported.prompt, /Electron 44.9.1/);
+  const opened = await connection.call(owner, { action: 'open', url: page.url + 'autonomous' });
+  assert.equal(opened.isError, false, textOf(opened));
+  const tabId = tabOf(opened);
+  const fixturePath = path.join(context.directory, 'electron-attachment.txt');
+  await writeFile(fixturePath, 'explicit electron test input');
+  for (const scenario of [
+    { button: 'Attach local fixture', kind: 'file-picker', response: () => ({ files: [fixturePath] }),
+      resolution: 'selected', expected: 'electron-attachment.txt' },
+    { button: 'App confirmation', kind: 'javascript-dialog',
+      response: request => ({ optionRef: request.options.find(option => option.label === 'Accept').optionRef }),
+      resolution: 'resolved', expected: 'agent confirmed' },
+    { button: 'Test notifications', kind: 'notifications',
+      response: request => ({ optionRef: request.options.find(option => option.label === 'Allow').optionRef }),
+      resolution: 'allowed', expected: 'granted' },
+  ]) {
+    const click = await connection.call(owner, { action: 'click', tabId, target: { name: scenario.button, exact: true } });
+    if (scenario.kind === 'javascript-dialog') {
+      assert.equal(click.isError, true, textOf(click));
+      assert.match(textOf(click), /code=DIALOG_OPEN[\s\S]*request \S+ javascript-dialog/, textOf(click));
+    } else assert.equal(click.isError, false, textOf(click));
+    const requests = await connection.call(owner, { action: 'requests', tabId });
+    const pending = dataOf(requests).pending.filter(request => request.kind === scenario.kind);
+    assert.equal(pending.length, 1);
+    const request = pending[0];
+    const response = await connection.call(owner, { action: 'respond', tabId, requestRef: request.requestRef,
+      response: scenario.response(request) });
+    assert.equal(response.isError, false, JSON.stringify(dataOf(response)));
+    assert.equal(dataOf(response).request.resolution, scenario.resolution, JSON.stringify(dataOf(response)));
+    await until(() => page.state.nativeResults.includes(scenario.expected), 'actual site result: ' + scenario.expected);
+  }
+  const unsupported = await connection.call(owner, { action: 'click', tabId, target: { name: 'Native prompt', exact: true } });
   assert.equal(unsupported.isError, false, textOf(unsupported));
   await until(() => page.state.nativeResults.includes('prompt() is not supported.'), 'actual unsupported native prompt');
   assert.equal(dataOf(await connection.call(owner, { action: 'requests', tabId })).pending.length, 0);
@@ -591,6 +631,9 @@ test('a launcher reached through a junction runs its process tree from the resol
 
 for (const requestId of [0, 17]) test(`JSON-RPC cancellation id ${requestId} aborts browser execution without a reply or input replay`, { timeout: 45000 }, async t => {
   const context = await environment(t);
+  // Electron V8 supports Runtime.terminateExecution for synchronous busy loops;
+  // this verifies both the pinned MCP SDK requestId=0 cancellation patch and immediate JS termination.
+  context.env.WB_ENGINE = 'electron';
   const page = await fixture(t);
   const connection = await raw(t, context);
   const tools = await connection.request('tools', 'tools/list', {});
@@ -789,6 +832,7 @@ test('a server without a valid authority and data root refuses to start and spaw
     [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: 'relative-data' }, /WB_DATA_DIR must be an absolute directory/],
     [{ ...base, WB_AUTHORITY: 'hooks', WB_DATA_DIR: data, MIXDOG_PLUGIN_DATA: data }, /WB_AUTHORITY must be hook or connection/],
     [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: data, WB_AUTOMATION_MODE: 'admin' }, /WB_AUTOMATION_MODE must be standard or elevated/],
+    [{ ...base, WB_AUTHORITY: 'connection', WB_DATA_DIR: data, WB_ENGINE: 'chromium' }, /WB_ENGINE must be camoufox or electron/],
   ]) {
     const child = spawn(executable, ['--mcp'], { env, cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';

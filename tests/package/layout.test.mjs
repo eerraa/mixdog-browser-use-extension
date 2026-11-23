@@ -29,13 +29,14 @@ test('folder includes its launch/runtime/skill/hook dependencies and original re
   assert.deepEqual(server.args, ['--mcp']);
   assert.equal(server.cwd, '${MIXDOG_PLUGIN_ROOT}');
   for (const relative of [
-    'bin/bridge.exe', 'bin/native-consent.exe', 'runtime/electron.exe',
+    'bin/bridge.exe', 'bin/native-consent.exe', 'bin/control-bar.exe', 'runtime/electron.exe',
     'runtime/LICENSE', 'runtime/LICENSES.chromium.html', 'runtime/resources.pak',
     'runtime/resources/default_app.asar',
-    'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
+    'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/companion-camoufox.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
     'skills/independent-browser/SKILL.md', 'hooks/hooks.json',
     'LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/mixdog/LICENSE', 'licenses/mixdog/NOTICE.md', 'licenses/mixdog/provenance.json',
-    'sources/native/bridge.cpp', 'sources/native/consent.cpp',
+    'licenses/camoufox/NOTICE.md', 'licenses/camoufox/provenance.json',
+    'sources/native/bridge.cpp', 'sources/native/consent.cpp', 'sources/native/control-bar.cpp',
   ]) await present(relative);
   const native = await json('licenses/native/provenance.json');
   assert.ok(native.compiler);

@@ -13,7 +13,8 @@ or notice section changes.
 | --- | --- | --- |
 | Platform | Windows x64 | guard in `scripts/build-native.mjs` |
 | Node.js | ≥ 22.19.0 | `package.json` `engines` |
-| Electron (shipped runtime) | 44.9.1 | `package.json` `devDependencies`, `allowScripts` |
+| Camoufox (default engine) | 158.0.1-beta.41 (Firefox 158, MPL-2.0) | `third_party/camoufox/provenance.json` |
+| Electron (Node runtime + fallback engine) | 44.9.1 | `package.json` `devDependencies`, `allowScripts` |
 | esbuild | 0.28.2 | `package.json` |
 | MCP SDK (bundled, patched) | 1.32.1 | `package.json`; `scripts/sdk-adapter.mjs` |
 | Mixdog fork point (not tracked) | 1.3.4 at `968ee08965e75c3fa1999ab8d18d20e45229fc89` | `third_party/mixdog/provenance.json` |
@@ -27,8 +28,8 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 | --- | --- | --- |
 | deps | `npm ci` | `node_modules/` |
 | runtime | `node node_modules/electron/install.js` (when install scripts were skipped) | `node_modules/electron/dist/` |
-| bundle | `npm run build` | `build/app/{mcp,hook,companion}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
-| native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/licenses/native/*` |
+| bundle | `npm run build` | `build/app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
+| native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/control-bar.exe`, `build/licenses/native/*` |
 | package | `npm run package` | a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | clean package | `npm run package:clean -- "<abs licenses dir>"` | native, bundle and package in a temp copy of the working tree (Clean package build); a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | release folder | `npm run package:clean -- "<abs licenses dir>" --release` | the same from the committed `HEAD`: `dist/releases/v<ver>/` (Release) |
@@ -75,6 +76,7 @@ One stable path per machine is the only registration of MCP hosts (D29). `npm ru
 | --- | --- |
 | `<root>\win-browser` | directory junction to the current version; the path every host registers |
 | `<root>\win-browser-versions\v<ver>\win-browser` | one verified install per version; never overwritten |
+| `<root>\win-browser-runtime\camoufox` | shared Camoufox 158 runtime installed once and reused across upgrades |
 
 1. Verify the release folder's `win-browser/` against `win-browser-v<ver>-files.sha256`: exactly the listed files, each with its sha256.
 2. Copy it to a staging folder beside the versions, verify again, rename to `v<ver>`. An existing `v<ver>` is reused only when it verifies; it may be running, so it is never replaced.

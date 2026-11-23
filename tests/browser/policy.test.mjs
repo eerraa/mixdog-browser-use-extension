@@ -82,3 +82,30 @@ test('browser-policy.json supports optional explicit automationMode while keepin
     }
   }
 });
+
+test('browser-policy.json supports optional explicit engine while defaulting to camoufox and failing closed on unknown engines', () => {
+  const shipped = new BrowserPolicy(delegated());
+  assert.equal(shipped.engine, 'camoufox');
+  assert.equal(shipped.explicitEngine, false);
+  assert.equal(shipped.describe().engine, 'camoufox');
+
+  for (const base of [delegated(), { version: 1, mode: 'manual' }, { version: 1, mode: 'disabled' }]) {
+    const elec = new BrowserPolicy({ ...base, engine: 'electron' });
+    assert.equal(elec.mode, base.mode);
+    assert.equal(elec.engine, 'electron');
+    assert.equal(elec.explicitEngine, true);
+    assert.equal(elec.describe().engine, 'electron');
+
+    const cfx = new BrowserPolicy({ ...base, engine: 'camoufox' });
+    assert.equal(cfx.mode, base.mode);
+    assert.equal(cfx.engine, 'camoufox');
+    assert.equal(cfx.explicitEngine, true);
+
+    for (const bad of ['Camoufox', 'firefox', true, null, '']) {
+      const rejected = new BrowserPolicy({ ...base, engine: bad });
+      assert.equal(rejected.mode, 'disabled');
+      assert.equal(rejected.engine, 'camoufox');
+      assert.equal(rejected.explicitEngine, false);
+    }
+  }
+});

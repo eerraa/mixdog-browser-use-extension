@@ -12,7 +12,7 @@ Read order for a task: this file (Edit table) → the `change-map.md` steps → 
 | --- | --- |
 | Product | Independent Windows Browser (`win-browser`): one packaged folder, registered as a Mixdog folder plugin or as a plain MCP stdio server in Claude Code (`claude mcp add`), Codex or DSH, at one stable install path (`build-release.md` Local install) |
 | Agent surface | MCP tool `browse` (32 actions, including isolated browser sessions, DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs). Mixdog: `mcp__plugin-win-browser__browse`, skill `independent-browser`, host hooks (auth and lifecycle only). Claude Code: `mcp__win-browser__browse` under connection authority, server instructions instead of the skill, no hooks |
-| Runtime | Own Electron 44.9.1 companion per MCP connection; one window per page (toolbar + live page + input shield) |
+| Runtime | Default Camoufox 158.0.1-beta.41 (patched Firefox 158, pure-Node Juggler pipe + local read-only Firefox RDP + Win32 Control Bar `bin/control-bar.exe`); Electron 44.9.1 stays bundled as the Node runtime (`ELECTRON_RUN_AS_NODE=1`) and explicit fallback engine (`WB_ENGINE=electron` or `browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
 | Version | `0.5.3`. Version locations and releases: `build-release.md` |
@@ -32,7 +32,7 @@ with Owns, Not here and Update when.
 | `docs/agents/change-map.md` | symbol-level edit steps, rules to keep and extra steps per Edit table ID | which files, tests and docs | implementing a request |
 | `docs/agents/testing.md` | suites, prerequisites, expected counts, Electron substitute, live harnesses, where to add tests, real-device check procedure, test rules | criteria and their status, build steps | verifying a change |
 | `docs/agents/build-release.md` | pins, build and package pipeline, clean package build, versioning, release, licensing upkeep | notice texts, verification | building, packaging, upgrading, releasing |
-| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D29) | the rules themselves | proposing a design change; "why not X?" |
+| `docs/agents/decisions.md` | rationale, rejected alternatives, revisit triggers (D1–D31) | the rules themselves | proposing a design change; "why not X?" |
 | `README.md` | end-user install, usage, safety (Korean, shipped) | maintainer detail | user-visible behavior changes |
 | `skills/independent-browser/SKILL.md` | how agents use the tool (shipped); its essentials also travel as `CONNECTION_INSTRUCTIONS` in `src/mcp/tool.mjs` | implementation | tool behavior or usage changes |
 | `THIRD_PARTY_NOTICES.md` | third-party provenance and licenses (shipped) | when to update it (`build-release.md` Licensing) | pins, derived Mixdog files or patches change |
@@ -61,20 +61,20 @@ Doc rules:
 | --- | --- |
 | `src/mcp/` | MCP stdio server, `browse` schema, result text and connection-authority instructions, gateway that spawns and owns the companion and issues tickets under connection authority |
 | `src/hook/` | host hook process: lease injection, lifecycle fan-out |
-| `src/companion/` | Electron main per connection: pipe server, role and method auth, termination |
-| `src/browser/` | browser engine: pages, dispatch and handoff (`host.mjs`), CDP and frames, window presentation, permissions, dialogs, DevTools |
+| `src/companion/` | Companion entry points per connection: `camoufox-main.mjs` (default pure-Node Camoufox companion) and `main.mjs` (Electron fallback); pipe server, role and method auth, termination |
+| `src/browser/` | Browser engines: `camoufox/` (default Camoufox Juggler + Firefox RDP driver, host, presentation/Control Bar, hardened runner) and root Electron engine (`host.mjs`, CDP `frames.mjs`, `presentation.mjs`, `permissions.mjs`, `dialogs.mjs`); shared `devtools.mjs`, `policy.mjs`, `requests.mjs`, `queue.mjs`, `signals.mjs`, `settle.mjs` |
 | `src/browser/perception/` | walker source and the pure text projection: model, refs, render, `find` |
-| `src/browser/runner/` | `run`: sandbox window, op bridge, script API |
-| `src/shared/` | modules of more than one process, without Electron: browse contract, authority, RPC, paths, async |
-| `native/` | `bridge.cpp` launcher (Job object), `consent.cpp` Windows consent helper |
-| `scripts/` | `build.mjs` bundles, `build-native.mjs`, `package.mjs`, `clean-package.mjs` clean package build and release folder, `install-local.mjs` stable local install, `sdk-adapter.mjs` SDK patch |
+| `src/browser/runner/` | `run`: sandbox window (Electron) or hardened headless Camoufox sandbox (`camoufox/runner-sandbox.mjs`), op bridge, script API |
+| `src/shared/` | modules of more than one process, without Electron: browse contract, authority, RPC, paths (`engineMode`, `camoufoxExecutable`), async |
+| `native/` | `bridge.cpp` launcher (`--mcp`, `--hook`, `--browser`, `--browser-electron`, Job object), `consent.cpp` Windows consent/idle helper, `control-bar.cpp` Win32 Control Bar |
+| `scripts/` | `build.mjs` bundles, `build-native.mjs`, `package.mjs`, `clean-package.mjs` clean package build and release folder, `install-local.mjs` stable local install + shared Camoufox runtime, `sdk-adapter.mjs` SDK patch |
 | `tests/shared/`, `tests/companion/`, `tests/scripts/` | core unit tests (`npm test`) |
-| `tests/browser/` | engine unit tests on an Electron fixture (`test:browser`) |
+| `tests/browser/` | engine unit tests on Electron & Camoufox fixtures (`test:browser`) |
 | `tests/native/` | native helper test (`test:native`) |
-| `tests/live/` | real Electron harnesses (`test:live`) |
-| `tests/package/` | packaged folder and MCP end to end (`test:package`) |
+| `tests/live/` | real Electron harnesses (11 tests) and real Camoufox 158 tests (2 tests) (`test:live`) |
+| `tests/package/` | packaged folder and MCP end to end (`test:package`, default Camoufox + `WB_ENGINE=electron`) |
 | `plugin.json`, `hooks/`, `skills/`, `browser-policy.json` | shipped plugin surface and policy |
-| `third_party/mixdog/` | Mixdog fork record `provenance.json`, Mixdog `LICENSE` and `NOTICE.md` |
+| `third_party/mixdog/`, `third_party/camoufox/` | Mixdog fork record/notices and Camoufox MPL-2.0 provenance/notices |
 | `THIRD_PARTY_NOTICES.md`, `LICENSE` | shipped notices; project license |
 | `docs/agents/` | this doc system; not shipped |
 
@@ -130,7 +130,8 @@ R16 and R20 need none). Harnesses are in `tests/live/`; `mcp.test.mjs` and
 | R18 | Script runner (`run`): script API, ops, sandbox, run report | `src/browser/runner/*`, `src/browser/host.mjs`, `src/companion/main.mjs`, `scripts/build.mjs`; arguments as R1 | `tests/browser/runner.test.mjs` (API, allowlist, outcomes, seal, deadline, report), run test in `host.test.mjs`, `tests/shared/contract.test.mjs`; `runner-harness.mjs` (no Node, no network, forged nonce and ops, form flow, seal, Stop, handoff, CPU-loop deadline); run test in `mcp.test.mjs` | `contracts.md` Script runner, `SKILL.md` Scripts section, `README.md` action table |
 | R19 | Claude Code registration and guidance: server instructions, schema without `_channel` and `_lease` | `src/mcp/tool.mjs` (`CONNECTION_INSTRUCTIONS`, `browserTool`), `src/mcp/main.mjs` | `tests/shared/contract.test.mjs` (schema, instruction length); connection-authority tests in `mcp.test.mjs` | `README.md` Claude Code 등록, `build-release.md` Release, `SKILL.md` (same guidance) |
 | R20 | Clean package build, release folder, local install | `scripts/clean-package.mjs`, `scripts/install-local.mjs`, `package.json` `scripts` | `tests/scripts/install-local.test.mjs`; `test:package` on its package; for `--release`, also on the extracted ZIP | `build-release.md` Clean package build, Release and Local install |
-| R21 | Browser sessions: create, select, list, close, storage isolation and labels | `src/browser/host.mjs`, `src/shared/contract.mjs`, `src/mcp/tool.mjs`, `src/browser/presentation.mjs`, `src/browser/toolbar-preload.cjs` | `tests/shared/contract.test.mjs`, `tests/browser/host.test.mjs`; `sessions-harness.mjs`, toolbar check in `scenarios.mjs`, `devtools-harness.mjs`; session tests in `mcp.test.mjs` | `contracts.md` Browser sessions, `architecture.md` Page model, Window composition and Data layout, `requirements.md` AC22, `README.md`, `SKILL.md`, `CONNECTION_INSTRUCTIONS` |
+| R21 | Browser sessions: create, select, list, close, storage isolation and labels | `src/browser/host.mjs`, `src/browser/camoufox/host.mjs`, `src/shared/contract.mjs`, `src/mcp/tool.mjs`, `src/browser/presentation.mjs`, `src/browser/toolbar-preload.cjs` | `tests/shared/contract.test.mjs`, `tests/browser/host.test.mjs`, `tests/browser/camoufox.test.mjs`; `sessions-harness.mjs`, `camoufox.test.mjs`, toolbar check in `scenarios.mjs`, `devtools-harness.mjs`; session tests in `mcp.test.mjs` | `contracts.md` Browser sessions, `architecture.md` Page model, Window composition and Data layout, `requirements.md` AC22, `README.md`, `SKILL.md`, `CONNECTION_INSTRUCTIONS` |
+| R22 | Camoufox engine, Juggler/Firefox RDP, Win32 Control Bar, engine routing | `src/browser/camoufox/*`, `src/companion/camoufox-main.mjs`, `src/browser/devtools.mjs`, `src/shared/paths.mjs`, `src/browser/policy.mjs`, `src/mcp/gateway.mjs`, `native/bridge.cpp`, `native/control-bar.cpp` | `tests/browser/camoufox.test.mjs`, `tests/shared/paths.test.mjs`, `tests/browser/policy.test.mjs`; `tests/live/camoufox.test.mjs`; `tests/package/layout.test.mjs`, `tests/package/mcp.test.mjs` | `architecture.md`, `contracts.md`, `decisions.md` D31, `build-release.md`, `testing.md`, `THIRD_PARTY_NOTICES.md`, `README.md`, `SKILL.md`, `CONNECTION_INSTRUCTIONS` |
 | — | Not listed | the module's row in `architecture.md` Module map, then the nearest row above | as that row | as that row; add a row here |
 
 ## Done criteria

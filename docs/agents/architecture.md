@@ -11,11 +11,16 @@ package path is added, moved, renamed or removed.
 
 ```text
 Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (connection authority)
-├─ MCP (stdio)  bin/bridge.exe --mcp     → runtime/electron.exe app/mcp.cjs        ELECTRON_RUN_AS_NODE=1
-│    └─ gateway bin/bridge.exe --browser → runtime/electron.exe app/companion.cjs  Electron main
+├─ MCP (stdio)  bin/bridge.exe --mcp              → runtime/electron.exe app/mcp.cjs                ELECTRON_RUN_AS_NODE=1
+│    ├─ gateway (default Camoufox)
+│    │          bin/bridge.exe --browser          → runtime/electron.exe app/companion-camoufox.cjs ELECTRON_RUN_AS_NODE=1
+│    │             ├─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
+│    │             └─ bin/control-bar.exe (floating Win32 Control Bar, non-focus-stealing, stdin/stdout JSON)
+│    └─ gateway (WB_ENGINE=electron fallback for WebHID/WebUSB)
+│               bin/bridge.exe --browser-electron → runtime/electron.exe app/companion.cjs          Electron main
 │                  ⇅ named pipe, newline JSON (RpcPeer), role "gateway"
 │                  ⇅ connection authority only: same pipe, role "hook", the gateway's ticket issuer
-└─ hooks        bin/bridge.exe --hook    → runtime/electron.exe app/hook.cjs       ELECTRON_RUN_AS_NODE=1
+└─ hooks        bin/bridge.exe --hook             → runtime/electron.exe app/hook.cjs               ELECTRON_RUN_AS_NODE=1
    (hook authority only)  ⇅ same pipe, role "hook", one short connection per event
 ```
 
@@ -45,7 +50,15 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/mcp/tool.mjs` | tool schema (action enum from contract; `_lease` only under hook authority); result shaping and the status line; connection-authority server instructions | `browserTool`, `toolResult`, `errorResult`, `statusLine`, `CONNECTION_INSTRUCTIONS` |
 | `src/mcp/gateway.mjs` | spawn and own the companion, endpoint.json (hook authority), connection-authority tickets over its own hook-role connection, reconnect for new calls only, revoke confirmation | `createGateway`, `CONNECTION_CALLER` |
 | `src/hook/main.mjs` | lease injection for this tool only; lifecycle fan-out | `main`, `deliver` |
-| `src/companion/main.mjs` | Electron main per connection; pipe server; role and method auth; termination | `terminate`, `sameKey` |
+| `src/companion/camoufox-main.mjs` | Default pure-Node Camoufox companion per connection (`ELECTRON_RUN_AS_NODE=1`); pipe server, role/method auth, termination | `terminate`, `sameKey` |
+| `src/companion/main.mjs` | Electron fallback main per connection (`WB_ENGINE=electron`); pipe server, role and method auth, termination | `terminate`, `sameKey` |
+| `src/browser/camoufox/juggler.mjs` | Pure-Node NUL-delimited Juggler pipe transport & `CamoufoxProcess` lifecycle (`-wait-for-browser`, `CAMOU_CONFIG_*`, `CAMOU_PREFS_*`, ephemeral loopback RDP port) | `CamoufoxProcess`, `JugglerTransport`, `chunkCamouEnv`, `defaultCamouConfig`, `defaultCamouPrefs` |
+| `src/browser/camoufox/rdp.mjs` | Narrow local Firefox DevTools RDP client: `eagerRead` (`console(expression)`), `pageEvaluate` (`world:"page"`), `inspectNode` (matched CSS rules with stylesheet URL/line + DOM event listeners), worker/SW `network-event` + `stylesheet` watching & lazy header/body fetch | `FirefoxRdpTransport`, `FirefoxRdpClient` |
+| `src/browser/camoufox/driver.mjs` | Camoufox frame driver over Juggler + RDP: isolated walker/eval/devtools worlds, `__wbTrustedInput`, per-parent iframe owner mapping, parallel per-frame snapshots, `pointFor`, `hitChain`, `armGuard`, `inspectElement`, `performanceSnapshot`, `handleDialog` (`alert`/`confirm`/`prompt`) | `CamoufoxFrameDriver`, `FRAME_CAP`, `INPUT_BINDING` |
+| `src/browser/camoufox/presentation.mjs` | Camoufox handoff/Stop/return state machine and `ControlBarClient` stdin/stdout JSON bridge to `bin/control-bar.exe` | `CamoufoxPresentation`, `ControlBarClient` |
+| `src/browser/camoufox/runner-sandbox.mjs` | Dedicated hardened headless Camoufox sandbox per `run` (WebRTC off, dead proxy `127.0.0.1:9`, request interception abort-all, CSP `default-src 'none'`, nonce-checked isolated bridge binding) | `createCamoufoxRunnerSandboxFactory`, `CAMOUFOX_BOOTSTRAP_URL` |
+| `src/browser/camoufox/host.mjs` | Camoufox-backed 32-action host matching `BrowserHost` contract (perception, refs, diffs, signals, full Juggler/WS/RDP DevTools with privacy windows, Firefox BrowserContext sessions, elevated mode + one-way Control Bar revert, native `prompt` dialogs) | `CamoufoxHost` |
+| `native/control-bar.cpp` | Floating non-focus-stealing Win32 Control Bar (`bin/control-bar.exe`): tab selector, Take control / Return / Resume / Retry return, Stop agent, amber Elevated · Revert, Revoke, `FlashWindowEx` | `wWinMain` |
 | `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
 | `src/shared/paths.mjs` | caller authority of the registration, automation mode env parsing (`WB_AUTOMATION_MODE`), data root per authority, connection directory, pipe name | `authorityMode`, `automationMode`, `pluginData`, `connectionPaths`, `validChannel` |
@@ -150,10 +163,8 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 ## Package layout
 
 `npm run package` → `dist/win-browser-XXXXXX/win-browser/`:
-`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist), `app/{mcp,hook,companion}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and the fork record `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
+`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `bin/control-bar.exe`, `runtime/` (Electron dist for bundled Node & `WB_ENGINE=electron`), `app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and `provenance.json`), `licenses/camoufox/` (`NOTICE.md`, `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
-Mixdog derives the registry stem from the folder basename, so it must stay `win-browser` (server `plugin-win-browser`). Claude Code uses no file of the folder's plugin surface: it runs `bin/bridge.exe --mcp` by absolute path under the server name its registration gives (`win-browser` → `mcp__win-browser__browse`).
-
-Installed copies (`build-release.md` Local install): `<root>\win-browser` is a junction to `<root>\win-browser-versions\v<ver>\win-browser`, one package folder per version.
+Shared-runtime local install (`build-release.md` Local install): `<root>\win-browser` is a junction to `<root>\win-browser-versions\v<ver>\win-browser`, and the ~1.3 GB Camoufox 158 runtime is stored once at `<root>\win-browser-runtime\camoufox\` (also resolvable via `camoufox/` inside the package, `WB_CAMOUFOX_PATH`, or local Camoufox cache).
 
 `npm run package:clean` (`scripts/clean-package.mjs`) runs the three build steps in a temp copy and keeps only this folder; with `--release` it lays out `dist/releases/v<ver>/`: `win-browser/`, `win-browser-v<ver>-windows-x64.zip`, its `.sha256`, `win-browser-v<ver>-files.sha256` (one sha256 per packaged file) and `release.json` (version, source commit, ZIP digest).

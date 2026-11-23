@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { STABLE, VERSIONS, install } from '../../scripts/install-local.mjs';
+import { RUNTIME, STABLE, VERSIONS, install } from '../../scripts/install-local.mjs';
 
 // A release folder as `package:clean --release` lays it out, with a few files.
 async function release(parent, version, files = { 'bin/bridge.exe': `bridge ${version}`, 'plugin.json': `{"version":"${version}"}` }) {
@@ -83,4 +83,22 @@ test('a real folder at the stable path is never replaced', async t => {
   await writeFile(path.join(root, STABLE, 'keep.txt'), 'user data');
   await assert.rejects(install({ root, release: await release(directory, '1.0.0'), running: idle }), /not a junction/);
   assert.equal(await readFile(path.join(root, STABLE, 'keep.txt'), 'utf8'), 'user data');
+});
+
+test('optional shared Camoufox runtime installs once beside versions and is reused across version upgrades', async t => {
+  const { directory, root } = await workspace(t);
+  const cfxSrc = path.join(directory, 'camoufox-src');
+  await mkdir(cfxSrc, { recursive: true });
+  await writeFile(path.join(cfxSrc, 'camoufox.exe'), 'cfx-bin');
+  await writeFile(path.join(cfxSrc, 'version.json'), JSON.stringify({ version: '158.0.1', build: 'beta.41' }));
+
+  const first = await install({ root, release: await release(directory, '1.0.0'), running: idle, camoufoxSource: cfxSrc });
+  assert.equal(first.sharedCamoufox, path.join(root, RUNTIME, 'camoufox'));
+  assert.equal(await readFile(path.join(root, RUNTIME, 'camoufox', 'camoufox.exe'), 'utf8'), 'cfx-bin');
+
+  // Upgrading to 1.0.1 reuses the single shared runtime without touching the verified version folder.
+  const second = await install({ root, release: await release(directory, '1.0.1'), running: idle, camoufoxSource: cfxSrc });
+  assert.equal(second.sharedCamoufox, path.join(root, RUNTIME, 'camoufox'));
+  assert.deepEqual(second.pruned, ['v1.0.0']);
+  assert.equal(await readFile(path.join(root, RUNTIME, 'camoufox', 'camoufox.exe'), 'utf8'), 'cfx-bin');
 });
