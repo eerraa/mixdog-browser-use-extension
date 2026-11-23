@@ -14,7 +14,7 @@ import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, plu
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
-const authority = authorityMode();
+const authMode = authorityMode();
 const dataRoot = pluginData();
 const envAutomationMode = automationMode();
 const paths = connectionPaths(dataRoot, channel);
@@ -60,7 +60,7 @@ async function main() {
   const headless = process.env.WB_HEADLESS === '1' || process.env.WB_HEADLESS === 'true';
   const persistentPref = process.env.WB_PERSISTENT_PROFILE;
   const usePersistent = persistentPref === '1' || persistentPref === 'true'
-    || (authority === 'connection' && persistentPref !== '0' && persistentPref !== 'false');
+    || (authMode === 'connection' && persistentPref !== '0' && persistentPref !== 'false');
   const persistentProfileDir = usePersistent ? path.join(dataRoot, 'profiles', 'camoufox-default') : null;
 
   host = new CamoufoxHost({
