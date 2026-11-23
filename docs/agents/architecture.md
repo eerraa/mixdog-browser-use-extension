@@ -61,6 +61,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/camoufox/host.mjs` | Camoufox-backed multi-runtime host matching the `browse` contract (perception, refs, diffs, signals, full Juggler/WS/RDP DevTools with privacy windows, per-profile `CamoufoxProcess` runtimes for named persistent profiles + temporary `BrowserContext` sessions, elevated mode + persisted preference + one-way Revert, native `prompt` dialogs) | `CamoufoxHost` |
 | `src/shared/policy.mjs` | `browser-policy.json` loader, validator, immutable snapshot serialization, `describe(effectiveEngine)`, shared Electron cold/live capability & `list_profiles` metadata (re-exported by `src/browser/policy.mjs`) | `BrowserPolicy`, `ELECTRON_LIST_PROFILES`, `electronCapabilities` |
 | `src/shared/preferences.mjs` | Out-of-band `<dataRoot>/user-preferences.json` atomic load/save, shared startup `automationMode` precedence (`env > policy > user-preferences > standard`), and internal protected-path upload filter | `PREFERENCES_FILE`, `loadUserPreferences`, `saveUserPreferences`, `resolveAutomationMode`, `isProtectedInternalPath` |
+| `src/shared/ui-strings.mjs` | Shared en/ko Agent Control toolbar & Disconnect confirmation strings (single source of truth for Camoufox `#nav-bar` and Electron toolbar/dialog) | `CONTROL_STRINGS`, `controlStrings` |
 | `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
 | `src/shared/paths.mjs` | caller authority of the registration, automation mode env parsing (`WB_AUTOMATION_MODE`), data root per authority, connection directory, pipe name | `authorityMode`, `automationMode`, `pluginData`, `connectionPaths`, `validChannel` |
@@ -93,7 +94,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/permissions.mjs` | Chromium permission and device handlers → broker, requests, consent; policy gating | `BrowserPermissions` |
 | `src/browser/policy.mjs` | `browser-policy.json` loader and validator | `BrowserPolicy` |
 | `src/browser/dialogs.mjs` | JS dialog adapter: wraps `dialog.showMessageBox`, pairs CDP events | `BrowserDialogs`, `showManualMessageBox` |
-| `src/browser/consent.mjs` | `native-consent.exe` prompt surface; native page menu | `ConsentSurface`, `installPageMenu` |
+| `src/browser/consent.mjs` | `native-consent.exe` prompt surface; native page menu; native Disconnect confirmation dialog | `ConsentSurface`, `confirmDisconnectDialog`, `installPageMenu` |
 | `src/browser/user-agent.mjs` | removes `IndependentWindowsBrowser/` and `Electron/` UA tokens | `configureBrowserIdentity` |
 | `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; final-path package root; child created in its Job | `wmain`, `packageRoot` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
@@ -143,9 +144,9 @@ BrowserWindow "frame"  default 1120×820; its own webContents is the toolbar (da
 
 - Chrome documents (toolbar, shield): private in-memory partition per window, CSP `default-src 'none'`, sandboxed.
 - Script runner (`runner/sandbox.mjs`): a separate hidden, unfocusable `BrowserWindow` per run on a `data:` bootstrap page with `runner-preload.cjs`, the shared in-memory partition `wb-runner` (every other request cancelled, a dead fixed proxy, cleared after each run), CSP `default-src 'none'`; IPC `wb-runner:op (nonce, op, args)` handled by `routeOp`. `run.mjs` compile-checks the script in main (`node:vm`, compile only) before any sandbox exists.
-- IPC: toolbar → main `independent-browser:toolbar {action, value?}`; main → toolbar `independent-browser:state` (url, secure, editable, canGoBack, canGoForward, loading, notice, chip, primary, secondary, elevated).
-- Toolbar actions: `ready`, `back`, `forward`, `reload`, `stop-loading`, `navigate`, `take-control`, `resume`, `stop-automation`, `revert-standard`.
-- Native menu (`consent.mjs installPageMenu`): Stop automation, Resume automation, Human handoff, Revert connection to standard mode (enabled only while elevated), Accept and Dismiss pending page dialog, Open DevTools (while you have control), Revoke permissions and close connection.
+- IPC: toolbar → main `independent-browser:toolbar {action, value?, trusted?}`; main → toolbar `independent-browser:state` (url, secure, editable, canGoBack, canGoForward, loading, notice, chip, primary, returnAll, secondary, elevate, elevated, disconnect).
+- Toolbar actions: `ready`, `back`, `forward`, `reload`, `stop-loading`, `navigate`, `take-control`, `resume`, `resume-all`, `resume-other`, `stop-automation`, `elevate` (`trusted:true` required), `revert-standard`, `disconnect` (`trusted:true` + native `confirmDisconnectDialog` required).
+- Native menu (`consent.mjs installPageMenu`): Stop automation, Resume automation, Human handoff, Elevate automation (enabled when unpinned and not reverted), Revert connection to standard mode (enabled only while elevated), Accept and Dismiss pending page dialog, Open DevTools (while you have control), Revoke permissions and close connection (guarded by `confirmDisconnectDialog`).
 - Locale: `app.getLocale()` starting with `ko` selects `STRINGS.ko`, otherwise `STRINGS.en`.
 - Session identity: the host passes `{id, name, temporary}` as `browserSession`; toolbar state/preload render `name (ctx<n>)` through `textContent`, and the window title appends the same label. Page code cannot change that trusted session label.
 

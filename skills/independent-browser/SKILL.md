@@ -94,8 +94,9 @@ blocker, not permission to edit it or operate a human approval surface.
      log or supply the person's password, PIN, OTP or biometric data.
    - **Elevated mode (explicit out-of-band opt-in only: `WB_AUTOMATION_MODE=elevated`,
      `browser-policy.json` `"automationMode": "elevated"`, or user-saved
-     `<dataRoot>/user-preferences.json` toggled by a human click in the `#nav-bar`
-     when unpinned)**: `fill`/`type`/`click`/`observe` on sensitive login, password
+     `<dataRoot>/user-preferences.json` toggled by a trusted human click on the
+     toolbar **Elevate / 권한 상승** button in either Camoufox or Electron when
+     unpinned)**: `fill`/`type`/`click`/`observe` on sensitive login, password
      and OTP fields are allowed without automatic handoff, and stray clicks or keys
      on the live input shield are ignored while automation runs. Sensitive field
      values still stay masked in snapshots, diffs, `read`, `find`, DevTools and
@@ -106,6 +107,15 @@ blocker, not permission to edit it or operate a human approval surface.
      for this connection) from the amber toolbar **Revert / 권한 해제** button or
      native menu, or pause with **Stop / 중지** / **Take control / 직접 조작**;
      never try to bypass a downgrade or pause.
+   - **Window visibility & Disconnect (both engines)**: browser windows on both
+     Camoufox and Electron open visibly in the background (not always-on-top)
+     without stealing keyboard focus and highlight the taskbar on first top-level
+     open or explicit `show`. Both engines share the same toolbar controls
+     (**Take control / 직접 조작**, **Return to agent / 에이전트에게 돌려주기**,
+     **Return all / 모두 반환**, **Stop / 중지**, **Elevate / 권한 상승**,
+     **Revert / 권한 해제**, **Disconnect / 연결 종료**); clicking **Disconnect /
+     연결 종료** asks for explicit native confirmation (default Cancel) before
+     closing the whole connection.
    - **Handoff & return (both modes)**: on `handoff`, the window flashes without
      taking focus; tell the person which window needs them and ask them to finish
      (e.g. submit the login or solve the CAPTCHA) before returning control. Page
