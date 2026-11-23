@@ -8,7 +8,8 @@ import path from 'node:path';
 import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus } from '../../src/browser/camoufox/presentation.mjs';
-import { CamoufoxHost } from '../../src/browser/camoufox/host.mjs';
+import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
+import { deflateSync } from 'node:zlib';
 import { acquireProfileLock, releaseProfileLock } from '../../src/browser/camoufox/profile-lock.mjs';
 import { loadUserPreferences } from '../../src/shared/preferences.mjs';
 import { DevToolsRecorder, PrivacyWindows, responseBody } from '../../src/browser/devtools.mjs';
@@ -360,6 +361,20 @@ test('CamoufoxHost with mock Juggler+RDP enforces standard vs elevated mode, one
           }
           if (expr.includes('getBoundingClientRect') || expr.includes('targetPoint')) {
             return { result: { value: { x: 50, y: 25 } } };
+          }
+          if (expr.includes('inspectTarget(')) {
+            const isBtn = expr.includes('inspectTarget(2)');
+            return {
+              result: {
+                value: {
+                  described: isBtn ? { role: 'button', name: 'Ask' } : { role: 'textbox', name: 'Password' },
+                  view: { inView: true, proxied: false },
+                  info: isBtn
+                    ? { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'file', multiple: false, editable: false, sensitive: false }
+                    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'password', multiple: false, editable: false, sensitive: true },
+                },
+              },
+            };
           }
           if (expr.includes('describe(')) {
             const isBtn = expr.includes('(2,');
@@ -884,6 +899,20 @@ test('CamoufoxHost persisted #nav-bar elevation toggle, pinned-standard ceiling,
               },
             };
           }
+          if (expr.includes('inspectTarget(')) {
+            const isFile = expr.includes('inspectTarget(2)');
+            return {
+              result: {
+                value: {
+                  described: isFile ? { role: 'button', name: 'File' } : { role: 'textbox', name: 'Password' },
+                  view: { inView: true, proxied: false },
+                  info: isFile
+                    ? { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'file', multiple: false, editable: false, sensitive: false }
+                    : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'password', multiple: false, editable: false, sensitive: true },
+                },
+              },
+            };
+          }
           if (expr.includes('describe(')) {
             const isFile = expr.includes('describe(2)');
             return { result: { value: { described: isFile ? { role: 'button', name: 'File' } : { role: 'textbox', name: 'Password' } } } };
@@ -987,5 +1016,168 @@ test('CamoufoxHost persisted #nav-bar elevation toggle, pinned-standard ceiling,
     await pinned.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function makeSolidPng(width, height, rgba, mutate = null) {
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = buf => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const out = Buffer.alloc(12 + data.length);
+    out.writeUInt32BE(data.length, 0);
+    out.write(type, 4, 'ascii');
+    data.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + data.length)), 8 + data.length);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 4 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const p = row + 1 + x * 4;
+      const col = mutate?.(x, y) ?? rgba;
+      raw[p] = col[0]; raw[p + 1] = col[1]; raw[p + 2] = col[2]; raw[p + 3] = col[3];
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+test('Camoufox latency optimizations: in-view click skips resolveObject/disposeObject, scopes pointerdown disarm, matches iframes in parallel, and verifies clipped 32x32 PNG tiles', async () => {
+  const basePng = makeSolidPng(100, 100, [10, 20, 30, 255], (x, y) => (x === 45 && y === 45 ? [200, 100, 50, 255] : null));
+  const okClip = makeSolidPng(32, 32, [10, 20, 30, 255], (x, y) => (x === 15 && y === 15 ? [200, 100, 50, 255] : null));
+  const mutatedClip = makeSolidPng(32, 32, [10, 20, 30, 255], (x, y) => (x === 15 && y === 15 ? [201, 100, 50, 255] : null));
+  assert.equal(pngClipMatchesTile(basePng, okClip, 100, 100, 30, 30, 32, 32), true);
+  assert.equal(pngClipMatchesTile(basePng, mutatedClip, 100, 100, 30, 30, 32, 32), false);
+
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-opt-unit-'));
+  try {
+    const sent = [];
+    let inflightDescribe = 0;
+    let maxConcurrentDescribe = 0;
+    const proc = new EventEmitter();
+    proc.closed = false;
+    proc.rdpPort = 0;
+    proc.start = async () => proc;
+    proc.send = async (method, params = {}, sessionId) => {
+      sent.push({ method, params, sessionId });
+      if (method === 'Browser.newPage') {
+        queueMicrotask(() => {
+          proc.emit('message', 'Browser.attachedToTarget', { sessionId: 's-opt', targetInfo: { targetId: 't-opt' } });
+          proc.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, 's-opt');
+          proc.emit('message', 'Page.frameAttached', { frameId: 'f-child-1', parentFrameId: 'f-root' }, 's-opt');
+          proc.emit('message', 'Page.frameAttached', { frameId: 'f-child-2', parentFrameId: 'f-root' }, 's-opt');
+        });
+        return { targetId: 't-opt' };
+      }
+      if (method === 'Page.setInitScripts') {
+        for (const fid of ['f-root', 'f-child-1', 'f-child-2']) {
+          for (const sc of params.scripts) {
+            proc.emit('message', 'Runtime.executionContextCreated', {
+              executionContextId: `c-${fid}-${sc.worldName}`, auxData: { frameId: fid, name: sc.worldName },
+            }, sessionId);
+          }
+        }
+        return {};
+      }
+      if (method === 'Page.navigate') {
+        proc.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+        proc.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+        return {};
+      }
+      if (method === 'Page.describeNode') {
+        inflightDescribe++;
+        maxConcurrentDescribe = Math.max(maxConcurrentDescribe, inflightDescribe);
+        await new Promise(r => setTimeout(r, 10));
+        inflightDescribe--;
+        return { contentFrameId: params.objectId === 'obj-f1' ? 'f-child-1' : 'f-child-2' };
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        const isRoot = String(params.executionContextId ?? '').includes('f-root');
+        if (expr.includes('snapshot(')) {
+          return {
+            result: {
+              value: isRoot
+                ? {
+                  url: 'https://opt.test/', title: 'Opt', scrollHeight: 800,
+                  checkpoint: { documentId: 'doc-r', revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [
+                    { id: 1, k: 'i', r: 'button', n: 'Fast', v: '', s: [], b: [10, 10, 80, 30], vp: true, o: 1 },
+                    { id: 2, k: 'f', r: 'iframe', n: 'One', v: '', s: [], b: [10, 50, 80, 30], vp: true, o: 2 },
+                    { id: 3, k: 'f', r: 'iframe', n: 'Two', v: '', s: [], b: [10, 90, 80, 30], vp: true, o: 3 },
+                  ],
+                  texts: [], gone: [], renamed: [],
+                }
+                : {
+                  url: 'https://opt.test/child', title: 'Child', scrollHeight: 100,
+                  checkpoint: { documentId: `doc-${params.executionContextId}`, revision: 1, x: 0, y: 0, w: 80, h: 30 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+            },
+          };
+        }
+        if (expr.includes('resolve(2)')) return { result: { objectId: 'obj-f1' } };
+        if (expr.includes('resolve(3)')) return { result: { objectId: 'obj-f2' } };
+        if (expr.includes('inspectTarget(1)')) {
+          return {
+            result: {
+              value: {
+                described: { role: 'button', name: 'Fast' },
+                view: { inView: true, proxied: false },
+                info: { connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'button', multiple: false, editable: false, sensitive: false },
+              },
+            },
+          };
+        }
+        if (expr.includes('getBoundingClientRect') || expr.includes('targetPoint')) return { result: { value: { x: 40, y: 25 } } };
+        if (expr.includes('armGuard')) return { result: { value: { armed: true } } };
+        if (expr.includes('disarmGuard')) return { result: { value: { guard: { fired: true, inside: true } } } };
+        if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+        return { result: { value: 0 } };
+      }
+      return {};
+    };
+    proc.sendRaw = proc.send;
+    proc.close = async () => { proc.closed = true; };
+
+    const host = new CamoufoxHost({
+      dataDir, executablePath: 'C:\\fake\\camoufox.exe', headless: true, enableRdp: false,
+      createProcess: () => proc, onRevokeConnection: () => {},
+    });
+    const caller = makeCaller('u-opt');
+    const opened = await host.execute({ action: 'open', url: 'https://opt.test/' }, caller);
+    assert.equal(maxConcurrentDescribe, 2, 'iframe owners in a parent frame must resolve in parallel');
+
+    sent.length = 0;
+    const clicked = await host.execute({ action: 'click', tabId: opened.tabId, ref: 'e1' }, caller);
+    assert.equal(clicked.disposition, 'executed');
+    // Before snapshot after click, verify the click phase itself never called resolve(1) or separate describe(1)/inView(1)
+    const clickPhase = sent.slice(0, sent.findIndex(s => s.method === 'Runtime.evaluate' && String(s.params.expression).includes('snapshot(')));
+    assert.equal(clickPhase.some(s => String(s.params?.expression ?? '').includes('resolve(1)')), false, 'in-view click skips resolveObject');
+    assert.equal(clickPhase.some(s => String(s.params?.expression ?? '').includes('inView(1)')), false, 'in-view click uses combined inspectTarget');
+    assert.equal(clickPhase.filter(s => String(s.params?.expression ?? '').includes('disarmGuard')).length, 1, 'pointerdown click disarms target frame only');
+
+    await host.close();
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });

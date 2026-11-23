@@ -572,6 +572,26 @@ function pageInstall(U) {
     if (style.position === 'fixed') return { role: 'toast', name: '' };
     return { role, name: nameOf(el, tag, 'img') };
   };
+  // Combined read-only target validation: role/name, live viewport visibility,
+  // and control metadata in one isolated-world evaluation (saves serial RPCs).
+  state.inspectTarget = id => {
+    const el = state.resolve(id);
+    if (!el) return { described: null, view: null, info: null };
+    return {
+      described: state.describe(id),
+      view: state.inView(id),
+      info: {
+        connected: el.isConnected,
+        disabled: !!el.disabled,
+        readOnly: !!el.readOnly,
+        tag: el.tagName,
+        type: el.type,
+        multiple: !!el.multiple,
+        editable: el.isContentEditable,
+        sensitive: state.sensitive(el),
+      },
+    };
+  };
   // Exposes one validated element to the ref-point expression (target-point.mjs).
   state.target = id => {
     const el = state.actionTarget(id);
@@ -708,6 +728,7 @@ const call = (body, documentId, staleValue = "{ stale: 'document' }") => `(() =>
   ${body} })()`;
 export const snapshotExpression = (options = {}) => call(`return s.snapshot(${JSON.stringify(options)});`);
 export const describeExpression = (id, documentId) => call(`return { described: s.describe(${Number(id)}) };`, documentId);
+export const inspectTargetExpression = (id, documentId) => call(`return s.inspectTarget(${Number(id)});`, documentId);
 export const resolveExpression = (id, documentId) => call(`return s.resolve(${Number(id)});`, documentId, 'null');
 export const quietExpression = (ms, cap) => call(`return s.quiet(${Number(ms)}, ${Number(cap)});`);
 export const textIncludesExpression = text => call(`return { found: s.textIncludes(${JSON.stringify(String(text))}) };`);

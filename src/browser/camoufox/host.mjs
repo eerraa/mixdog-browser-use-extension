@@ -40,6 +40,7 @@ const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 4
 const clipText = (value, max) => { const text = String(value ?? ''); return text.length > max ? `${text.slice(0, max - 1)}…` : text; };
 const WAIT_POLL_MS = 100;
 const SHORT_SETTLE = new Set(['scroll', 'evaluate']);
+const SHORT_PROBE_ACTIONS = new Set(['scroll', 'fill', 'type', 'select', 'upload']);
 const MIN_POINT_OPACITY = 0.1;
 const TILE = 32;
 const MAX_SESSION_TABS = 32;
@@ -104,8 +105,8 @@ function decodePngPixels(buf) {
   return { width, height, bpp, pixels };
 }
 
-function pngTilesEqual(aBuf, bBuf, w, h, x, y) {
-  const a = decodePngPixels(aBuf), b = decodePngPixels(bBuf);
+function pngTilesEqual(aBuf, bBuf, w, h, x, y, aDecoded = null) {
+  const a = aDecoded ?? decodePngPixels(aBuf), b = decodePngPixels(bBuf);
   if (!a || !b) return aBuf.equals(bBuf);
   if (a.width !== b.width || a.height !== b.height || a.bpp !== b.bpp) return false;
   const sx = a.width / w, sy = a.height / h;
@@ -120,6 +121,34 @@ function pngTilesEqual(aBuf, bBuf, w, h, x, y) {
     const start = row * stride + x0 * a.bpp;
     const end = row * stride + x1 * a.bpp;
     if (!a.pixels.subarray(start, end).equals(b.pixels.subarray(start, end))) return false;
+  }
+  return true;
+}
+
+export function pngClipMatchesTile(baseBuf, clipBuf, baseW, baseH, left, top, tileW, tileH, baseDecoded = null) {
+  const a = baseDecoded ?? decodePngPixels(baseBuf);
+  const b = decodePngPixels(clipBuf);
+  if (!a || !b) return baseBuf.equals(clipBuf);
+  if (a.bpp !== b.bpp) return false;
+  // Fallback when a full-viewport screenshot was returned instead of a clipped tile.
+  if (b.width === a.width && b.height === a.height) {
+    return pngTilesEqual(baseBuf, clipBuf, baseW, baseH, left + tileW / 2, top + tileH / 2, a);
+  }
+  const sx = a.width / baseW, sy = a.height / baseH;
+  const x0 = Math.max(0, Math.round(left * sx));
+  const y0 = Math.max(0, Math.round(top * sy));
+  const cmpW = Math.min(b.width, a.width - x0);
+  const cmpH = Math.min(b.height, a.height - y0);
+  if (cmpW <= 0 || cmpH <= 0) return false;
+  const aStride = a.width * a.bpp;
+  const bStride = b.width * b.bpp;
+  const rowBytes = cmpW * a.bpp;
+  for (let row = 0; row < cmpH; row++) {
+    const aStart = (y0 + row) * aStride + x0 * a.bpp;
+    const bStart = row * bStride;
+    if (!a.pixels.subarray(aStart, aStart + rowBytes).equals(b.pixels.subarray(bStart, bStart + rowBytes))) {
+      return false;
+    }
   }
   return true;
 }
@@ -1156,8 +1185,7 @@ export class CamoufoxHost {
       actor: caller.requestOwner ?? { caller, signal },
     });
     await p.driver.start();
-    for (let i = 0; i < 40 && !p.driver.rootFrame(); i++) await pause(50, signal);
-    const root = p.driver.rootFrame();
+    const root = await p.driver.waitForRootFrame(2000, signal);
     if (!root) fail('ROOT_UNAVAILABLE', 'Camoufox root frame failed to initialize');
     // Attach Firefox RDP watcher BEFORE initial navigation so worker/SW
     // network resources and eager console reads are active from the first load.
@@ -1175,7 +1203,7 @@ export class CamoufoxHost {
     return p;
   }
 
-  async #navigatePage(p, url, signal) {
+  async #navigatePage(p, url, signal, { settleFollows = false } = {}) {
     const root = p.driver.rootFrame();
     if (!root) fail('ROOT_UNAVAILABLE', 'Root frame unavailable');
     let dclResolve;
@@ -1184,7 +1212,7 @@ export class CamoufoxHost {
     try {
       await p.driver.send('Page.navigate', { frameId: root.frameId, url }, signal);
       await bounded(dclPromise, 15000, 'Page navigation', signal).catch(() => {});
-      await pause(80, signal);
+      if (!settleFollows) await pause(80, signal);
     } finally {
       p.onDomContentLoaded = null;
     }
@@ -1503,8 +1531,15 @@ export class CamoufoxHost {
     if (now?.documentId !== shot.documentId || now.w !== shot.w || now.h !== shot.h || now.x !== shot.x || now.y !== shot.y) {
       fail('STALE_COORDINATES', 'The document, viewport or scroll changed since the screenshot');
     }
-    const current = await p.driver.screenshot(signal);
-    if (!pngTilesEqual(shot.buffer, current.buffer, shot.w, shot.h, x, y)) {
+    const left = Math.max(0, Math.min(shot.w - TILE, Math.floor(x - TILE / 2)));
+    const top = Math.max(0, Math.min(shot.h - TILE, Math.floor(y - TILE / 2)));
+    const tileW = Math.max(1, Math.min(TILE, shot.w - left));
+    const tileH = Math.max(1, Math.min(TILE, shot.h - top));
+    const current = typeof p.driver.screenshotClip === 'function'
+      ? await p.driver.screenshotClip({ x: now.x + left, y: now.y + top, width: tileW, height: tileH }, signal)
+      : await p.driver.screenshot(signal);
+    shot.decoded ??= decodePngPixels(shot.buffer);
+    if (!pngClipMatchesTile(shot.buffer, current.buffer, shot.w, shot.h, left, top, tileW, tileH, shot.decoded)) {
       fail('STALE_COORDINATES', 'The pixels around the point changed since the screenshot');
     }
     const chain = await p.driver.hitChain({ x, y }, signal);
@@ -1991,7 +2026,7 @@ export class CamoufoxHost {
           this.#owned(p.id, caller, laneSignal, true, true);
           armed = this.#arm(p);
           markSent();
-          await this.#navigatePage(p, pageURL(args.url), laneSignal);
+          await this.#navigatePage(p, pageURL(args.url), laneSignal, { settleFollows: true });
           state.acked = true;
         } else if (args.action === 'evaluate') {
           const frameId = args.frame ? this.#frameOf(p, args.frame).frameId : undefined;
@@ -2040,6 +2075,7 @@ export class CamoufoxHost {
         const interrupt = new Promise(resolve => { p.settleInterrupt = resolve; });
         await settle({
           armed, signal: laneSignal, interrupt, short: SHORT_SETTLE.has(args.action),
+          bounds: SHORT_PROBE_ACTIONS.has(args.action) ? { probeMs: 20 } : undefined,
           quiet: (ms, cap) => p.driver.quiet(state.frameId ? [state.frameId] : [], ms, cap, laneSignal),
           pendingRequests: () => p.devtools.running(state.wall),
         }).catch(err => { if (laneSignal.aborted) throw err; });
@@ -2169,32 +2205,48 @@ export class CamoufoxHost {
     const frame = p.driver.frames.get(entry.frameId);
     if (!frame) this.#staleRef(p, entry, 'is in a frame that is gone');
     await p.driver.inputReady(frame.frameId, signal);
-    const described = await p.driver.describe(frame.frameId, entry.id, entry.documentId, signal);
-    if (described?.stale || described?.missing) {
+    const inspected = await p.driver.inspectTarget(frame.frameId, entry.id, entry.documentId, signal);
+    if (inspected?.stale || inspected?.missing) {
       this.#refs.retireDocument(p.id, entry.frameId, null);
       this.#staleRef(p, entry, 'belongs to a replaced document');
     }
-    if (!described?.described) {
+    if (!inspected?.described) {
       this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]);
       this.#staleRef(p, entry, 'was removed');
     }
-    if (described.described.role !== entry.role || described.described.name !== entry.name) {
+    if (inspected.described.role !== entry.role || inspected.described.name !== entry.name) {
       this.#staleRef(p, entry, 'changed its role or name');
     }
-    const resolved = await p.driver.resolveObject(frame.frameId, entry.id, entry.documentId, signal);
+    const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
+    const now = inspected.view ?? await p.driver.inView(frame.frameId, entry.id, entry.documentId, signal);
+    const needsScroll = !now.inView || (frame.parentId && !item?.inView);
+    const keepObject = args.action !== 'click';
+    let resolved = null;
+    if (needsScroll || keepObject) {
+      resolved = await p.driver.resolveObject(frame.frameId, entry.id, entry.documentId, signal);
+    }
     try {
-      const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
-      const now = await p.driver.inView(frame.frameId, entry.id, entry.documentId, signal);
-      if (!now.inView || (frame.parentId && !item?.inView)) {
+      if (needsScroll) {
         await p.driver.prepare(frame.frameId, resolved.objectId, () => onPreparation('scrolled'),
           now.proxied ? { id: entry.id, documentId: entry.documentId } : null, signal);
+        if (!keepObject) {
+          p.driver.disposeObject(resolved.frame, resolved.objectId);
+          resolved = null;
+        }
       }
       this.#owned(p.id, caller, signal, true);
       const point = await p.driver.pointFor(frame.frameId, entry.id, entry.documentId, signal);
       this.#owned(p.id, caller, signal, true);
-      return { frame: resolved.frame, entry, ref: entry.ref, objectId: resolved.objectId, point };
+      return {
+        frame: resolved?.frame ?? frame,
+        entry,
+        ref: entry.ref,
+        objectId: resolved?.objectId ?? null,
+        point,
+        info: inspected.info ?? null,
+      };
     } catch (error) {
-      p.driver.disposeObject(resolved.frame, resolved.objectId);
+      if (resolved?.objectId) p.driver.disposeObject(resolved.frame, resolved.objectId);
       throw error;
     }
   }
@@ -2207,7 +2259,7 @@ export class CamoufoxHost {
       if (!armed?.armed) fail('STALE_REF', `${entry.ref} was replaced before dispatch`);
       let outcome;
       try { await send(); } finally {
-        outcome = await p.driver.disarmGuard(frame.frameId).catch(() => null);
+        outcome = await p.driver.disarmGuard(frame.frameId, type !== 'pointerdown').catch(() => null);
       }
       return outcome;
     };
@@ -2240,7 +2292,7 @@ export class CamoufoxHost {
       return;
     }
 
-    const info = await p.driver.callOn(frame, objectId, `function() {
+    const info = target.info ?? await p.driver.callOn(frame, objectId, `function() {
       const s = globalThis.__independentState;
       return { connected: this.isConnected, disabled: !!this.disabled, readOnly: !!this.readOnly,
         tag: this.tagName, type: this.type, multiple: !!this.multiple, editable: this.isContentEditable,
@@ -2282,10 +2334,13 @@ export class CamoufoxHost {
     };
     assertSensitiveInputAllowed();
 
-    // Focus the validated element cleanly before keyboard input.
-    await p.driver.callOn(frame, objectId, 'function(){ this.focus({ preventScroll: true }); }', [], true, signal);
+    // Focus and verify the validated element in one RPC before keyboard input.
     const ensureFocused = async () => {
-      const stillLive = await p.driver.callOn(frame, objectId, 'function(){return this.isConnected&&!this.disabled&&!this.readOnly&&this.getRootNode().activeElement===this}', [], true, signal);
+      const stillLive = await p.driver.callOn(frame, objectId, `function(){
+        if (!this.isConnected || this.disabled || this.readOnly) return false;
+        if (this.getRootNode().activeElement !== this) this.focus({ preventScroll: true });
+        return this.isConnected && !this.disabled && !this.readOnly && this.getRootNode().activeElement === this;
+      }`, [], true, signal);
       if (!stillLive) {
         await p.driver.dispatchClick(point.x, point.y, { beforeDown: markSent, signal });
       }

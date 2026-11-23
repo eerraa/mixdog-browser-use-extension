@@ -12,7 +12,7 @@ import { DEVTOOLS_LIMITS, INSPECT_ELEMENT, clip, redactURL } from '../devtools.m
 import { quote as quoteText } from '../perception/render.mjs';
 import {
   actionTargetExpression, armGuardExpression, coveringExpression, describeExpression, disarmGuardExpression, hitExpression,
-  inViewExpression, privatizeExpression, quietExpression, resolveExpression, sensitivePresentExpression,
+  inViewExpression, inspectTargetExpression, privatizeExpression, quietExpression, resolveExpression, sensitivePresentExpression,
   snapshotExpression, targetPointExpression, textIncludesExpression, viewportExpression, walkerInstallSource,
 } from '../perception/walker.mjs';
 
@@ -89,6 +89,8 @@ export class CamoufoxFrameDriver {
   #inflight = new Set();
   #inputReady = new Set();
   #worlds = new Map(); // frameId → Map<worldName, executionContextId>
+  #worldWaiters = new Set();
+  #rootFrameWaiters = new Set();
   #pendingDialog = null;
 
   constructor({ page, process: proc, sessionId, rdp, invalidate }) {
@@ -126,6 +128,57 @@ export class CamoufoxFrameDriver {
       else if (name === this.evaluationWorldName) frame.evalContextId = contextId;
       else if (name === this.devtoolsWorldName) frame.devtoolsContextId = contextId;
     }
+    for (const waiter of [...this.#worldWaiters]) {
+      if (waiter.frameId === frameId && waiter.name === name) waiter.resolve(contextId);
+    }
+  }
+
+  #wakeRootFrame() {
+    const root = this.rootFrame();
+    if (!root || !this.#rootFrameWaiters.size) return;
+    for (const waiter of [...this.#rootFrameWaiters]) waiter.resolve(root);
+  }
+
+  #waitForWorld(frameId, name, timeoutMs, signal) {
+    const existing = this.#worlds.get(frameId)?.get(name);
+    if (existing) return Promise.resolve(existing);
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.#worldWaiters.delete(entry);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => { cleanup(); reject(signal.reason); };
+      const entry = {
+        frameId,
+        name,
+        resolve: ctx => { cleanup(); resolve(ctx); },
+      };
+      const timer = setTimeout(() => { cleanup(); resolve(this.#worlds.get(frameId)?.get(name) ?? null); }, timeoutMs);
+      timer.unref?.();
+      this.#worldWaiters.add(entry);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  waitForRootFrame(timeoutMs = 2000, signal = this.actorSignal) {
+    const existing = this.rootFrame();
+    if (existing) return Promise.resolve(existing);
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.#rootFrameWaiters.delete(entry);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => { cleanup(); reject(signal.reason); };
+      const entry = { resolve: root => { cleanup(); resolve(root); } };
+      const timer = setTimeout(() => { cleanup(); resolve(this.rootFrame()); }, timeoutMs);
+      timer.unref?.();
+      this.#rootFrameWaiters.add(entry);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   #dropContext(contextId) {
@@ -163,7 +216,7 @@ export class CamoufoxFrameDriver {
       };
       frame.parentId = params.parentFrameId || null;
       this.frames.set(params.frameId, frame);
-      if (!frame.parentId) this.rootFrameId = params.frameId;
+      if (!frame.parentId) { this.rootFrameId = params.frameId; this.#wakeRootFrame(); }
       const worlds = this.#worlds.get(params.frameId);
       if (worlds) {
         frame.contextId = worlds.get(this.worldName) ?? frame.contextId;
@@ -198,6 +251,7 @@ export class CamoufoxFrameDriver {
       this.frames.set(params.frameId, frame);
       if (!frame.parentId) {
         this.rootFrameId = params.frameId;
+        this.#wakeRootFrame();
         this.page.currentUrl = frame.url;
         this.invalidate('Page.frameNavigated');
         this.page.onNavigated?.(frame.url);
@@ -318,12 +372,10 @@ export class CamoufoxFrameDriver {
 
   async #ensureWalkerContext(frame, signal) {
     if (frame.contextId) return frame.contextId;
-    for (let i = 0; i < 25 && !frame.contextId; i++) {
-      signal?.throwIfAborted();
-      const cached = this.#worlds.get(frame.frameId)?.get(this.worldName);
-      if (cached) { frame.contextId = cached; return cached; }
-      await pause(40, signal);
-    }
+    const cached = this.#worlds.get(frame.frameId)?.get(this.worldName);
+    if (cached) { frame.contextId = cached; return cached; }
+    const waited = await this.#waitForWorld(frame.frameId, this.worldName, 1000, signal);
+    if (waited) frame.contextId = waited;
     return frame.contextId;
   }
 
@@ -425,31 +477,33 @@ export class CamoufoxFrameDriver {
 
     const byId = new Map(captures.map(item => [item.frame.frameId, item]));
     this.owners.clear();
-    const usedByParent = new Map(); // parentFrameId → Set<ownerLocalId>
+    const childByParent = new Map(); // parentFrameId → Set<childFrameId>
     for (const item of captures) {
       if (!item.frame.parentId) continue;
       const parent = byId.get(item.frame.parentId);
       if (!parent?.snapshot) continue;
-      let used = usedByParent.get(parent.frame.frameId);
-      if (!used) { used = new Set(); usedByParent.set(parent.frame.frameId, used); }
+      let children = childByParent.get(parent.frame.frameId);
+      if (!children) { children = new Set(); childByParent.set(parent.frame.frameId, children); }
+      children.add(item.frame.frameId);
+    }
+    await Promise.all([...childByParent.entries()].map(async ([parentFrameId, childSet]) => {
+      const parent = byId.get(parentFrameId);
       const emittedIframes = (parent.snapshot.nodes ?? []).filter(n => n.k === 'f');
-      let matchedId = null;
-      for (const n of emittedIframes) {
-        if (used.has(n.id)) continue;
+      if (!emittedIframes.length) return;
+      const resolved = await Promise.all(emittedIframes.map(async n => {
         const obj = await this.evaluate(parent.frame, resolveExpression(n.id, parent.snapshot.checkpoint.documentId), false, signal).catch(() => null);
-        if (!obj?.objectId) continue;
+        if (!obj?.objectId) return null;
         try {
           const desc = await this.send('Page.describeNode', { frameId: parent.frame.frameId, objectId: obj.objectId }, signal).catch(() => null);
-          if (desc?.contentFrameId === item.frame.frameId) { matchedId = n.id; break; }
+          return desc?.contentFrameId && childSet.has(desc.contentFrameId) ? [desc.contentFrameId, n.id] : null;
         } finally {
           this.disposeObject(parent.frame, obj.objectId);
         }
+      }));
+      for (const pair of resolved) {
+        if (pair && !this.owners.has(pair[0])) this.owners.set(pair[0], pair[1]);
       }
-      if (matchedId !== null) {
-        used.add(matchedId);
-        this.owners.set(item.frame.frameId, matchedId);
-      }
-    }
+    }));
 
     const activeOut = captures.map(({ frame, snapshot, error }) => ({
       frameId: frame.frameId,
@@ -484,6 +538,12 @@ export class CamoufoxFrameDriver {
     const frame = this.frames.get(frameId);
     if (!frame) return { missing: true };
     return this.evaluate(frame, describeExpression(id, documentId), true, signal);
+  }
+
+  async inspectTarget(frameId, id, documentId, signal = this.actorSignal) {
+    const frame = this.frames.get(frameId);
+    if (!frame) return { missing: true };
+    return this.evaluate(frame, inspectTargetExpression(id, documentId), true, signal);
   }
 
   async resolveObject(frameId, id, documentId, signal = this.actorSignal) {
@@ -636,13 +696,19 @@ export class CamoufoxFrameDriver {
     return targetRes ?? { armed: false };
   }
 
-  async disarmGuard(frameId) {
+  async disarmGuard(frameId, allFrames = true) {
+    const targets = allFrames
+      ? [...this.frames.values()].filter(f => f.contextId)
+      : [this.frames.get(frameId)].filter(f => f?.contextId);
+    if (!targets.length) return null;
+    const replies = await Promise.all(targets.map(frame =>
+      this.evaluate(frame, disarmGuardExpression(), true, null)
+        .then(res => ({ frameId: frame.frameId, guard: res?.guard ?? null }))
+        .catch(() => ({ frameId: frame.frameId, guard: null }))));
     let result = null;
-    for (const frame of this.frames.values()) {
-      if (!frame.contextId) continue;
-      const res = await this.evaluate(frame, disarmGuardExpression(), true, null).catch(() => null);
-      if (frame.frameId === frameId) result = res?.guard ?? null;
-      else if (res?.guard?.fired) result = { ...(result ?? {}), fired: true, inside: false };
+    for (const item of replies) {
+      if (item.frameId === frameId) result = item.guard;
+      else if (item.guard?.fired) result = { ...(result ?? {}), fired: true, inside: false };
     }
     return result;
   }
@@ -677,13 +743,11 @@ export class CamoufoxFrameDriver {
   }
 
   async privatize(since, allNonEmpty = false, signal = this.actorSignal) {
-    let total = 0;
-    for (const frame of this.frames.values()) {
-      if (!frame.contextId) continue;
-      const res = await this.evaluate(frame, privatizeExpression(since, allNonEmpty), true, signal).catch(() => null);
-      if (typeof res?.marked === 'number') total += res.marked;
-    }
-    return total;
+    const targets = [...this.frames.values()].filter(f => f.contextId);
+    if (!targets.length) return 0;
+    const results = await Promise.all(targets.map(frame =>
+      this.evaluate(frame, privatizeExpression(since, allNonEmpty), true, signal).catch(() => null)));
+    return results.reduce((sum, res) => sum + (typeof res?.marked === 'number' ? res.marked : 0), 0);
   }
 
   async textIncludes(text, signal = this.actorSignal) {
@@ -713,6 +777,18 @@ export class CamoufoxFrameDriver {
     return { data: reply.data, buffer: Buffer.from(reply.data, 'base64'), width, height };
   }
 
+  async screenshotClip(clip, signal = this.actorSignal) {
+    const width = Math.max(1, Math.round(clip.width));
+    const height = Math.max(1, Math.round(clip.height));
+    const reply = await this.send('Page.screenshot', {
+      mimeType: 'image/png',
+      clip: { x: Math.max(0, Math.round(clip.x)), y: Math.max(0, Math.round(clip.y)), width, height },
+      omitDeviceScaleFactor: true,
+    }, signal);
+    if (!reply?.data) fail('CAPTURE_FAILED', 'Browser image capture failed; observe again without replaying input');
+    return { data: reply.data, buffer: Buffer.from(reply.data, 'base64'), width, height };
+  }
+
   async evaluationContext(frameId, world = 'isolated', signal = this.actorSignal) {
     const frame = frameId ? this.frames.get(frameId) : this.rootFrame();
     if (!frame) fail('STALE_FRAME', 'The frame is not available; observe again');
@@ -722,10 +798,9 @@ export class CamoufoxFrameDriver {
       return { frame, contextId: ctx };
     }
     let ctx = frame.evalContextId ?? this.#worlds.get(frame.frameId)?.get(this.evaluationWorldName);
-    for (let i = 0; i < 20 && !ctx; i++) {
-      signal?.throwIfAborted();
-      await pause(30, signal);
-      ctx = frame.evalContextId ?? this.#worlds.get(frame.frameId)?.get(this.evaluationWorldName);
+    if (!ctx) {
+      ctx = await this.#waitForWorld(frame.frameId, this.evaluationWorldName, 600, signal);
+      if (ctx) frame.evalContextId = ctx;
     }
     if (!ctx) fail('FRAME_UNAVAILABLE', 'Isolated evaluation world is unavailable; never falling back to page world');
     return { frame, contextId: ctx };

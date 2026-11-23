@@ -589,13 +589,15 @@ export class FirefoxRdpClient extends EventEmitter {
         delete globalThis[${JSON.stringify(slot)}];
         return b.payload;
       })()`;
+      let pollMs = 5;
       while (parsed?.pending) {
         signal?.throwIfAborted();
         if (Date.now() >= deadline) {
           await this.#evalConsole(target.consoleActor, `delete globalThis[${JSON.stringify(slot)}]`, { eager: false, timeoutMs: 1000 }).catch(() => {});
           fail('SCRIPT_TIMEOUT', `Page-world evaluation exceeded ${timeoutMs} ms`);
         }
-        await new Promise(r => setTimeout(r, 20));
+        await new Promise(r => setTimeout(r, pollMs));
+        pollMs = Math.min(20, pollMs * 2);
         const next = await this.#evalConsole(target.consoleActor, pollExpr, { eager: false, timeoutMs: Math.max(500, deadline - Date.now()), signal });
         if (next.hasException) fail('PAGE_SCRIPT_ERROR', 'Page script failed (details withheld to avoid exposing secrets)');
         raw = await readString(next.result);
