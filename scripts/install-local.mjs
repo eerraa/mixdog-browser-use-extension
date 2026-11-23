@@ -161,10 +161,10 @@ export async function install({ root, release, running = runningImages, camoufox
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const [root, release] = process.argv.slice(2);
-  if (!root || !path.isAbsolute(root)) throw new Error('Usage: node scripts/install-local.mjs <absolute install root> [<release dir>]');
+  const [root, release, camoufoxSource] = process.argv.slice(2);
+  if (!root || !path.isAbsolute(root)) throw new Error('Usage: node scripts/install-local.mjs <absolute install root> [<release dir>] [<camoufox dir>]');
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const { version } = JSON.parse(await readFile(path.join(repo, 'package.json'), 'utf8'));
-  const source = release ? path.resolve(release) : path.join(repo, 'dist', 'releases', `v${version}`);
-  console.log(JSON.stringify(await install({ root, release: source }), null, 2));
+  const source = release && release !== '-' ? path.resolve(release) : path.join(repo, 'dist', 'releases', `v${version}`);
+  console.log(JSON.stringify(await install({ root, release: source, camoufoxSource: camoufoxSource ? path.resolve(camoufoxSource) : null }), null, 2));
 }
