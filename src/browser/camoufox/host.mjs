@@ -2413,8 +2413,9 @@ export class CamoufoxHost {
       ...this.#runtimeStartFlights.values(),
       ...this.#profileBindFlights.values(),
     ]);
-    await Promise.allSettled(
-      [...this.#runtimes.values()].map(runtime => this.#disposeRuntime(runtime)),
-    );
+    await Promise.allSettled([
+      ...this.#runtimes.values().map(runtime => this.#disposeRuntime(runtime)),
+      Promise.resolve(this.createRunnerSandbox?.close?.()),
+    ]);
   }
 }

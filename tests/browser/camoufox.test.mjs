@@ -9,6 +9,7 @@ import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs 
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
+import { CAMOUFOX_BOOTSTRAP_URL, createCamoufoxRunnerSandboxFactory } from '../../src/browser/camoufox/runner-sandbox.mjs';
 import { deflateSync } from 'node:zlib';
 import { acquireProfileLock, releaseProfileLock } from '../../src/browser/camoufox/profile-lock.mjs';
 import { loadUserPreferences } from '../../src/shared/preferences.mjs';
@@ -1180,4 +1181,99 @@ test('Camoufox latency optimizations: in-view click skips resolveObject/disposeO
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('createCamoufoxRunnerSandboxFactory pre-warms at most one unused spare, leases exclusively, isolates concurrent runs, enforces exact bootstrap URL, and expires idle spares', async () => {
+  const created = [];
+  const makeRunnerProc = () => {
+    const id = created.length + 1;
+    const p = new EventEmitter();
+    p.id = id;
+    p.closed = false;
+    p.forceClosed = false;
+    p.bindings = [];
+    p.evals = [];
+    p.start = async () => p;
+    p.send = async (method, params = {}, sessionId) => {
+      if (method === 'Browser.createBrowserContext') return { browserContextId: `bc-${id}` };
+      if (method === 'Browser.newPage') {
+        queueMicrotask(() => {
+          p.emit('message', 'Browser.attachedToTarget', { sessionId: `s-${id}`, targetInfo: { browserContextId: `bc-${id}` } });
+          p.emit('message', 'Page.frameAttached', { frameId: `f-${id}` }, `s-${id}`);
+        });
+        return { targetId: `t-${id}` };
+      }
+      if (method === 'Page.navigate') {
+        queueMicrotask(() => {
+          p.emit('message', 'Page.navigationCommitted', { frameId: `f-${id}`, url: params.url }, sessionId);
+          p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${id}`, auxData: { frameId: `f-${id}`, name: '' } }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: `f-${id}`, name: 'load' }, sessionId);
+        });
+        return {};
+      }
+      if (method === 'Page.addBinding') { p.bindings.push(params.name); return {}; }
+      if (method === 'Runtime.evaluate') { p.evals.push(params.expression); return { result: { value: { status: 'ok', procId: id } } }; }
+      return {};
+    };
+    p.sendRaw = p.send;
+    p.close = async (opts = {}) => { p.closed = true; if (opts.force) p.forceClosed = true; return { exited: true }; };
+    created.push(p);
+    return p;
+  };
+
+  const factory = createCamoufoxRunnerSandboxFactory({
+    executablePath: 'C:\\fake\\camoufox.exe',
+    createProcess: makeRunnerProc,
+    enableWarmSpare: true,
+    spareIdleMs: 120,
+  });
+
+  // Zero process before first run
+  assert.equal(created.length, 0);
+  assert.equal(factory.hasWarmSpare(), false);
+
+  // First run cold-starts proc #1 and asynchronously replenishes unused blank spare #2
+  const run1 = await factory({ onOp: async () => ({ ok: true }) });
+  assert.equal(created[0].bindings.length, 1, 'leased proc gets fresh per-run binding');
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(created.length, 2, 'one unused spare is pre-warmed in background');
+  assert.equal(created[1].bindings.length, 0, 'unused spare holds no binding, nonce, or caller state');
+  assert.equal(factory.hasWarmSpare(), true);
+
+  // Concurrent second run takes unused spare #2 and replenishes #3; destroying run1 hard-kills ONLY #1
+  const run2 = await factory({ onOp: async () => ({ ok: true }) });
+  run1.destroy();
+  assert.equal(created[0].forceClosed, true, 'destroyed run force-kills its own process tree');
+  assert.equal(created[1].closed, false, 'concurrent run2 process stays completely untouched');
+
+  // Verify run2 never reuses proc #1 and runs on its own exclusive proc #2
+  const res2 = await run2.evaluate('1+1');
+  assert.equal(res2.procId, 2);
+
+  // Wait for spare #3 to warm, then verify exact bootstrap URL check rejects a spoofed data: URL even with the real nonce
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(created.length, 3);
+  const opsAfterSpoof = [];
+  const run3 = await factory({ onOp: async op => { opsAfterSpoof.push(op); return { ok: true }; } });
+  const realNonce = created[2].evals[0]?.match(/nonce: "([^"]+)"/)?.[1];
+  assert.ok(realNonce && realNonce.length >= 32);
+  assert.equal((await run3.evaluate('2+2')).procId, 3);
+  // Simulate navigation away from exact CAMOUFOX_BOOTSTRAP_URL to another data:text/html URL
+  created[2].emit('message', 'Page.navigationCommitted', { frameId: 'f-3', url: 'data:text/html,<h1>spoof</h1>' }, 's-3');
+  created[2].emit('message', 'Page.bindingCalled', { name: '__wbRunnerOp', payload: JSON.stringify({ id: 1, nonce: realNonce, op: 'tabs' }) }, 's-3');
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(opsAfterSpoof.length, 0, 'spoofed data: URL must never reach onOp even with the real nonce');
+
+  run2.destroy();
+  run3.destroy();
+  assert.equal(created[1].forceClosed, true);
+  assert.equal(created[2].forceClosed, true);
+
+  // Unused spare #4 automatically expires after spareIdleMs
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(factory.hasWarmSpare(), false, 'idle unused spare shuts down automatically after TTL');
+  assert.ok(created.every(p => p.closed), 'all spawned runner processes are cleanly terminated');
+
+  await factory.close();
+  assert.ok(CAMOUFOX_BOOTSTRAP_URL.startsWith('data:text/html;charset=utf-8,'));
 });

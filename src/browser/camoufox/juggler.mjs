@@ -1,12 +1,23 @@
 // Pure-Node Juggler pipe transport for Camoufox (patched Firefox 158).
 // Talks directly to `camoufox.exe -juggler-pipe -silent` over stdio fds 3/4
 // using NUL-delimited JSON-RPC, with zero Python or Playwright dependencies.
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import net from 'node:net';
 import { bounded } from '../../shared/async.mjs';
+
+function killProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve();
+  if (process.platform === 'win32') {
+    return new Promise(resolve => {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 4000 }, () => resolve());
+    });
+  }
+  try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+  return Promise.resolve();
+}
 
 const READY_MARKER = 'Juggler listening to the pipe';
 const MAX_FRAME_BYTES = 64 * 1024 * 1024;
@@ -193,8 +204,10 @@ export class JugglerTransport extends EventEmitter {
 export class CamoufoxProcess extends EventEmitter {
   #child = null;
   #transport = null;
-  #exited = null;
+  #exited = Promise.resolve({ code: 0, signal: null });
   #closing = false;
+  #closeFlight = null;
+  #processExited = false;
   #rdpPort = null;
 
   constructor({ executablePath, profileDir, headless = false, enableRdp = true, hardenedRunner = false,
@@ -217,11 +230,14 @@ export class CamoufoxProcess extends EventEmitter {
   get transport() { return this.#transport; }
   get rdpPort() { return this.#rdpPort; }
   get pid() { return this.#child?.pid ?? null; }
-  get closed() { return this.#closing || !this.#transport || this.#transport.closed; }
+  get exited() { return this.#processExited; }
+  get closed() { return this.#closing || this.#processExited || !this.#transport || this.#transport.closed; }
 
-  async start() {
+  async start(signal = null) {
+    signal?.throwIfAborted();
     mkdirSync(this.profileDir, { recursive: true });
     this.#rdpPort = this.enableRdp ? await allocateLoopbackPort() : null;
+    signal?.throwIfAborted();
     const args = ['-no-remote', ...(process.platform === 'win32' ? ['-wait-for-browser'] : []), '-profile', this.profileDir, '-juggler-pipe', '-silent'];
     if (this.#rdpPort) args.push('--start-debugger-server', String(this.#rdpPort));
     if (this.headless) args.push('-headless');
@@ -247,12 +263,19 @@ export class CamoufoxProcess extends EventEmitter {
       windowsHide: this.headless,
     });
     this.#child = child;
+    this.#processExited = false;
 
     let stdout = '', stderr = '';
     const exit = new Promise(resolve => {
       let settled = false;
-      const done = info => { if (!settled) { settled = true; resolve(info); } };
-      child.once('exit', (code, signal) => done({ code, signal }));
+      const done = info => {
+        if (!settled) {
+          settled = true;
+          this.#processExited = true;
+          resolve(info);
+        }
+      };
+      child.once('exit', (code, sig) => done({ code, signal: sig }));
       child.once('error', error => done({ code: null, signal: null, error: error?.message }));
     });
     this.#exited = exit;
@@ -264,9 +287,9 @@ export class CamoufoxProcess extends EventEmitter {
 
     const ready = new Promise((resolve, reject) => {
       child.once('error', reject);
-      child.once('exit', (code, signal) => {
+      child.once('exit', (code, sig) => {
         if (!rdpResolved) { rdpResolved = true; resolveRdp?.(false); }
-        reject(new Error(`Camoufox exited before Juggler ready (${code ?? signal})${stderr ? `\n${stderr}` : ''}`));
+        reject(new Error(`Camoufox exited before Juggler ready (${code ?? sig})${stderr ? `\n${stderr}` : ''}`));
       });
       child.stdout.on('data', chunk => {
         stdout += chunk.toString('utf8');
@@ -280,25 +303,26 @@ export class CamoufoxProcess extends EventEmitter {
     });
 
     try {
-      await bounded(ready, STARTUP_TIMEOUT_MS, 'Camoufox Juggler startup', undefined, () => {
+      await bounded(ready, STARTUP_TIMEOUT_MS, 'Camoufox Juggler startup', signal ?? undefined, () => {
+        killProcessTree(child.pid).catch(() => {});
         try { child.kill(); } catch { /* ignore */ }
       });
       const transport = new JugglerTransport(child.stdio[3], child.stdio[4]);
       this.#transport = transport;
       transport.on('message', (method, params, sessionId) => this.emit('message', method, params, sessionId));
       transport.on('close', error => this.emit('close', error));
-      child.once('exit', (code, signal) => {
-        transport.close(new Error(`Camoufox process exited (${code ?? signal})`));
-        this.emit('exit', { code, signal });
+      child.once('exit', (code, sig) => {
+        transport.close(new Error(`Camoufox process exited (${code ?? sig})`));
+        this.emit('exit', { code, signal: sig });
       });
-      this.info = await transport.send('Browser.getInfo');
-      await transport.send('Browser.enable', { attachToDefaultContext: true });
+      this.info = await transport.send('Browser.getInfo', {}, undefined, signal ? { signal } : undefined);
+      await transport.send('Browser.enable', { attachToDefaultContext: true }, undefined, signal ? { signal } : undefined);
       if (rdpMarker && !rdpResolved) {
-        await bounded(rdpReady, 2000, 'Camoufox RDP listener startup').catch(() => false);
+        await bounded(rdpReady, 2000, 'Camoufox RDP listener startup', signal ?? undefined).catch(() => false);
       }
       return this;
     } catch (error) {
-      await this.close();
+      await this.close({ force: true });
       throw error;
     }
   }
@@ -313,22 +337,34 @@ export class CamoufoxProcess extends EventEmitter {
     return this.#transport.sendRaw(method, params, sessionId, timeoutMs);
   }
 
-  async close() {
-    if (this.#closing) return this.#exited;
+  async close({ force = false } = {}) {
+    if (force && this.#child && !this.#processExited) {
+      this.#transport?.close('Camoufox process force-closing');
+      killProcessTree(this.#child.pid).catch(() => {});
+      try { this.#child.kill('SIGKILL'); } catch { try { this.#child.kill(); } catch { /* ignore */ } }
+    }
+    if (this.#closeFlight) return this.#closeFlight;
     this.#closing = true;
-    try {
-      if (this.#transport && !this.#transport.closed) {
-        await this.#transport.send('Browser.close', {}, undefined, { timeoutMs: 2500 }).catch(() => {});
-      }
-    } finally {
-      this.#transport?.close('Camoufox process closing');
-      if (this.#child && this.#child.exitCode === null && !this.#child.killed) {
-        const done = await bounded(this.#exited, 3000, 'Camoufox graceful exit').catch(() => null);
-        if (!done) {
-          try { this.#child.kill('SIGKILL'); } catch { try { this.#child.kill(); } catch { /* ignore */ } }
+    this.#closeFlight = (async () => {
+      try {
+        if (!force && this.#transport && !this.#transport.closed) {
+          await this.#transport.send('Browser.close', {}, undefined, { timeoutMs: 2500 }).catch(() => {});
+        }
+      } finally {
+        this.#transport?.close('Camoufox process closing');
+        if (this.#child && !this.#processExited) {
+          const graceful = force
+            ? null
+            : await bounded(this.#exited, 3000, 'Camoufox graceful exit').catch(() => null);
+          if (!graceful && !this.#processExited) {
+            await killProcessTree(this.#child.pid);
+            try { this.#child.kill('SIGKILL'); } catch { try { this.#child.kill(); } catch { /* ignore */ } }
+            await bounded(this.#exited, 2500, 'Camoufox forced exit').catch(() => null);
+          }
         }
       }
-    }
-    return this.#exited;
+      return { exited: this.#processExited || !this.#child };
+    })();
+    return this.#closeFlight;
   }
 }

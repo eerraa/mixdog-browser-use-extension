@@ -156,17 +156,33 @@ export async function runScript({ script, tabId, timeoutMs = RUN_LIMITS.defaultM
     consoleLines.push(line);
   };
   const syntax = syntaxError(script, tabId);
-  let sandbox = null;
-  if (!syntax) {
-    try {
-      sandbox = await createSandbox({ onOp: (op, args) => bridge.handle(op, args), onConsole });
-    } catch (error) {
-      caller.signal.removeEventListener('abort', forward);
-      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { code: error?.code ?? 'RUNNER_UNAVAILABLE', requestedInputDispatched: false });
-    }
-  }
   const timers = [];
   let finished = false;
+  let deadlineFired = false;
+  const deadline = new Promise(resolve => timers.push(setTimeout(() => {
+    deadlineFired = true;
+    stop('deadline');
+    resolve({ kind: 'deadline' });
+  }, timeoutMs)));
+  const cancelled = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ kind: 'abort' }), { once: true }));
+  let sandbox = null;
+  let startupOutcome = null;
+  if (!syntax) {
+    try {
+      sandbox = await createSandbox({ onOp: (op, args) => bridge.handle(op, args), onConsole, signal: controller.signal });
+    } catch (error) {
+      if (deadlineFired) {
+        startupOutcome = { kind: 'deadline' };
+      } else if (controller.signal.aborted) {
+        startupOutcome = { kind: 'abort' };
+      } else {
+        finished = true;
+        for (const timer of timers) clearTimeout(timer);
+        caller.signal.removeEventListener('abort', forward);
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { code: error?.code ?? 'RUNNER_UNAVAILABLE', requestedInputDispatched: false });
+      }
+    }
+  }
   const watch = new Promise(resolve => {
     const tick = async () => {
       if (finished || bridge.sealed || controller.signal.aborted) return;
@@ -182,13 +198,13 @@ export async function runScript({ script, tabId, timeoutMs = RUN_LIMITS.defaultM
     };
     timers.push(setTimeout(tick, watchMs));
   });
-  const deadline = new Promise(resolve => timers.push(setTimeout(() => resolve({ kind: 'deadline' }), timeoutMs)));
-  const cancelled = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ kind: 'abort' }), { once: true }));
-  const outcome = syntax ? { kind: 'syntax', message: syntax } : await Promise.race([
-    Promise.resolve().then(() => sandbox.evaluate(runnerSource(script, tabId))).then(value => ({ kind: 'done', value }),
-      error => ({ kind: 'crashed', error })),
-    bridge.ended.then(sealed => ({ kind: 'sealed', sealed })), watch, deadline, cancelled,
-  ]);
+  const outcome = syntax ? { kind: 'syntax', message: syntax }
+    : startupOutcome ? startupOutcome
+      : await Promise.race([
+        Promise.resolve().then(() => sandbox.evaluate(runnerSource(script, tabId))).then(value => ({ kind: 'done', value }),
+          error => ({ kind: 'crashed', error })),
+        bridge.ended.then(sealed => ({ kind: 'sealed', sealed })), watch, deadline, cancelled,
+      ]);
   finished = true;
   for (const timer of timers) clearTimeout(timer);
   caller.signal.removeEventListener('abort', forward);
