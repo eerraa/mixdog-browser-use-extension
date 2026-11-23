@@ -24,7 +24,7 @@ const { loadUserPreferences } = await import('../../src/shared/preferences.mjs')
 // checks, permission callback policy, registry and trusted native menu routing.
 const original = {};
 const stubbed = ['start', 'snapshot', 'quiet', 'refresh', 'presented', 'inputReady', 'evaluationContext', 'evaluateUser', 'reconnect', 'send',
-  'describe', 'resolveObject', 'pointFor', 'viewport', 'textIncludes', 'callOn', 'prepare', 'release'];
+  'describe', 'inspectTarget', 'resolveObject', 'pointFor', 'viewport', 'textIncludes', 'callOn', 'prepare', 'release'];
 for (const key of stubbed) original[key] = FrameDriver.prototype[key];
 const drivers = new WeakMap();
 FrameDriver.prototype.start = async function() {
@@ -56,6 +56,11 @@ FrameDriver.prototype.describe = async (_frame, id, documentId) => {
   if (documentId !== page.document) return { stale: 'document' };
   const node = page.nodes.find(value => value.id === id && !page.removed.has(id));
   return { described: node ? { role: node.r, name: node.n } : null };
+};
+FrameDriver.prototype.inspectTarget = async function(frame, id, documentId) {
+  const res = await this.describe(frame, id, documentId);
+  if (res?.stale || res?.missing || !res?.described) return res;
+  return { described: res.described, view: await this.inView(frame, id, documentId), info: null };
 };
 FrameDriver.prototype.resolveObject = async (_frame, id) => `node-${id}`;
 FrameDriver.prototype.pointFor = async (_frame, id) => ({ x: 20, y: 12 + id * 12 });
@@ -3027,6 +3032,38 @@ test('Electron toolbar parity: 1-click persisted elevation, return-all across ha
     assert.equal(host.status().state, 'terminating-revocation');
   } finally {
     dialog.showMessageBox = originalDialog;
+    await host.close();
+  }
+});
+
+test('BrowserHost uses single-RPC inspectTarget to skip resolveObject on in-view click and clears settleInterrupt', async () => {
+  const { host, tab, tabId, call } = await setup();
+  const prevInspect = FrameDriver.prototype.inspectTarget;
+  const prevResolve = FrameDriver.prototype.resolveObject;
+  let inspectCalls = 0, resolveCalls = 0;
+  try {
+    page.nodes = [button(1, 'Submit')];
+    const observed = await call({ action: 'observe', tabId });
+    const ref = observed.text.match(/\b(e\d+)\s+button\s+"Submit"/)?.[1];
+    assert.ok(ref, 'button ref observed');
+    FrameDriver.prototype.inspectTarget = async (frame, id, documentId) => {
+      inspectCalls++;
+      const res = await FrameDriver.prototype.describe(frame, id, documentId);
+      return {
+        described: res.described,
+        view: { inView: true, proxied: false },
+        info: { connected: true, disabled: false, readOnly: false, tag: 'BUTTON', type: 'button', multiple: false, editable: false, sensitive: false },
+      };
+    };
+    FrameDriver.prototype.resolveObject = async (...args) => { resolveCalls++; return prevResolve.apply(this, args); };
+    const clicked = await call({ action: 'click', tabId, ref });
+    assert.equal(clicked.disposition, 'executed');
+    assert.equal(inspectCalls, 1, 'validate uses a single inspectTarget RPC');
+    assert.equal(resolveCalls, 0, 'in-view click skips resolveObject completely');
+    assert.equal(drivers.get(tab.contents).page.settleInterrupt, null, 'settleInterrupt is cleared after settle');
+  } finally {
+    FrameDriver.prototype.inspectTarget = prevInspect;
+    FrameDriver.prototype.resolveObject = prevResolve;
     await host.close();
   }
 });

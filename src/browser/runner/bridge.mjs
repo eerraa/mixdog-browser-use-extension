@@ -32,10 +32,10 @@ const plain = value => value !== null && typeof value === 'object' && !Array.isA
 const str = (value, max, min = 1) => typeof value === 'string' && value.length >= min && value.length <= max;
 const invalid = message => { throw Object.assign(new Error(message), { code: 'INVALID_RUNNER_OP' }); };
 
-function locator(loc, frameOnly = false) {
+function locator(loc) {
   if (!plain(loc)) invalid('loc must be { ref } or { target }');
   const keys = Object.keys(loc);
-  if (keys.length === 1 && keys[0] === 'ref' && !frameOnly) {
+  if (keys.length === 1 && keys[0] === 'ref') {
     if (!REF.test(loc.ref)) invalid('ref must be e<n>');
     return { ref: loc.ref };
   }

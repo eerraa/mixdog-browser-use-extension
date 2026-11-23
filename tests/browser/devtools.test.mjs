@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEVTOOLS_LIMITS, DevToolsRecorder, PrivacyWindows, pageRead, redactBody, redactHeaders, redactURL, responseBody,
 } from '../../src/browser/devtools.mjs';
+import { redactURL as pureRedactURL } from '../../src/browser/redact.mjs';
 
 function recorder(types = {}) {
   const state = { mode: 'automation' };
@@ -467,6 +468,7 @@ test('style sheets are forgotten with their session and the oldest goes first at
 });
 
 test('result signals count console errors and failed requests since a cursor', () => {
+  assert.equal(redactURL, pureRedactURL, 'devtools.mjs delegates redaction to pure redact.mjs');
   const { devtools } = recorder();
   log(devtools, 'old', { type: 'error' });
   const { cursor } = devtools.since({});

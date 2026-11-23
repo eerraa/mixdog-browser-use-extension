@@ -565,6 +565,9 @@ export class PagePresentation {
     const elevated = !message && this.#isElevated();
     const className = message ? 'blocked' : elevated ? 'elevated' : 'agent';
     const text = message ?? (elevated ? this.text.elevatedBadge : this.text.badge);
+    if (this._lastShieldClass === className && this._lastShieldText === text) return;
+    this._lastShieldClass = className;
+    this._lastShieldText = text;
     void this.shield.executeJavaScript(`document.body.className=${JSON.stringify(className)};`
       + `document.getElementById('message').textContent=${JSON.stringify(text)}`)
       .catch(() => { /* A lost shield already blocks all admissions. */ });
@@ -602,7 +605,7 @@ export class PagePresentation {
       ? [{ text: t.chipUser, tone: 'user', title: t.userHint }, { text: t.returnControl, action: 'resume' }, null]
       : this.mode === 'returning' ? [{ text: t.chipReturning, tone: 'wait' }, null, null]
         : this.mode === 'draining' ? [{ text: t.chipSwitching, tone: 'wait' }, take, resume]
-          : paused ? [{ text: paused === 'explicit-stop' ? t.chipStopped : t.chipPaused, tone: 'stop', title: paused }, take, resume]
+          : paused ? [{ text: t.chipPaused, tone: 'stop', title: paused }, take, resume]
             : elevated
               ? [{ text: t.chipElevated, tone: 'elevated', title: t.elevatedHint }, take, stopBtn]
               : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, stopBtn];

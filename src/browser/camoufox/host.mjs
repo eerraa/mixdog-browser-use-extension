@@ -8,8 +8,7 @@
 // alert/confirm/prompt dialogs, standard vs elevated automation mode with
 // persisted user preference, native Firefox #nav-bar Agent Control toolbar,
 // and hardened Camoufox `run` sandboxes.
-import { createHash } from 'node:crypto';
-import { mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { FenceQueue } from '../queue.mjs';
@@ -17,38 +16,32 @@ import { bounded, pause } from '../../shared/async.mjs';
 import { BrowserPolicy, camoufoxCapabilities } from '../policy.mjs';
 import { BrowserRequests } from '../requests.mjs';
 import { DEVTOOLS_LIMITS, DevToolsRecorder, PrivacyWindows, responseBody } from '../devtools.mjs';
-import { rankBrowserSemanticMatch } from '../perception/match.mjs';
 import { composeModel } from '../perception/model.mjs';
 import { RefRegistry } from '../perception/refs.mjs';
-import { quote, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from '../perception/render.mjs';
+import { quote } from '../perception/render.mjs';
 import { armNavigation, settle } from '../settle.mjs';
-import { CONTROL_SIGNALS, formatSignals, SignalQueue } from '../signals.mjs';
+import { CONTROL_SIGNALS, SignalQueue } from '../signals.mjs';
 import { runScript } from '../runner/run.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
 } from '../../shared/contract.mjs';
-import { isProtectedInternalPath, saveUserPreferences } from '../../shared/preferences.mjs';
+import { saveUserPreferences } from '../../shared/preferences.mjs';
+import { acquireProfileLock, inspectProfiles, releaseProfileLock, slugFromDirName } from '../../shared/profile-lock.mjs';
+import {
+  assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, classifyRunError, clipText,
+  drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS, MAX_TEMPORARY_SESSIONS,
+  MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, presentModel, resolveFrameRef, retirePerceivedRefs,
+  RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError, TILE, validateUploadFiles,
+  waitForCondition,
+} from '../host-common.mjs';
 import { CamoufoxProcess } from './juggler.mjs';
 import { FirefoxRdpClient } from './rdp.mjs';
 import { CamoufoxFrameDriver } from './driver.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient } from './presentation.mjs';
 import { createCamoufoxRunnerSandboxFactory } from './runner-sandbox.mjs';
-import { acquireProfileLock, inspectProfiles, releaseProfileLock, slugFromDirName } from './profile-lock.mjs';
 
-const hash = value => createHash('sha256').update(value).digest('hex');
-const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
-const clipText = (value, max) => { const text = String(value ?? ''); return text.length > max ? `${text.slice(0, max - 1)}…` : text; };
-const WAIT_POLL_MS = 100;
-const SHORT_SETTLE = new Set(['scroll', 'evaluate']);
-const SHORT_PROBE_ACTIONS = new Set(['scroll', 'fill', 'type', 'select', 'upload']);
-const MIN_POINT_OPACITY = 0.1;
-const TILE = 32;
-const MAX_SESSION_TABS = 32;
-const MAX_TEMPORARY_SESSIONS = 16;
 const MAX_PERSISTENT_PROFILES = 8;
 const DEFAULT_IDLE_PROFILE_TIMEOUT_MS = 120000;
-const RETURN_TIMEOUT_MS = 25000;
-const NATIVE_REQUEST_ACK_GRACE_MS = 250;
 const L = DEVTOOLS_LIMITS;
 
 // Minimal zero-dependency PNG decoder (8-bit RGB/RGBA non-interlaced) used to
@@ -349,6 +342,21 @@ export class CamoufoxHost {
     });
   }
 
+  async #replayPermissionGrants(profile, runtime) {
+    const grantPrefix = `${profile.owner}\0${profile.id}\0`;
+    for (const [k, state] of this.#permissionGrants) {
+      if (state !== 'allow' || !k.startsWith(grantPrefix)) continue;
+      const rest = k.slice(grantPrefix.length);
+      const sep = rest.lastIndexOf('\0');
+      if (sep < 0) continue;
+      const origin = rest.slice(0, sep);
+      const kind = rest.slice(sep + 1);
+      const mapped = mapPermissionKind(kind);
+      if (!mapped || !this.policy.permits(kind)) continue;
+      await runtime.proc.send('Browser.grantPermissions', { origin, permissions: [mapped] }).catch(() => {});
+    }
+  }
+
   async #withProfileRuntime(profile, fn) {
     const coord = profile?.coord;
     if (!coord) {
@@ -371,18 +379,7 @@ export class CamoufoxHost {
           profile.persistence = freshRt.persistence;
           profile.profileSlug = freshRt.profileSlug;
           profile.runtimeState = 'running';
-          const grantPrefix = `${profile.owner}\0${profile.id}\0`;
-          for (const [k, state] of this.#permissionGrants) {
-            if (state !== 'allow' || !k.startsWith(grantPrefix)) continue;
-            const rest = k.slice(grantPrefix.length);
-            const sep = rest.lastIndexOf('\0');
-            if (sep < 0) continue;
-            const origin = rest.slice(0, sep);
-            const kind = rest.slice(sep + 1);
-            const mapped = mapPermissionKind(kind);
-            if (!mapped || !this.policy.permits(kind)) continue;
-            await freshRt.proc.send('Browser.grantPermissions', { origin, permissions: [mapped] }).catch(() => {});
-          }
+          await this.#replayPermissionGrants(profile, freshRt);
           return fn(freshRt);
         }
       }
@@ -416,18 +413,7 @@ export class CamoufoxHost {
         profile.runtimeState = 'running';
         coord.runtimeGen++;
         // Replay only permission grants scoped to this exact owner, profile, and active policy.
-        const grantPrefix = `${profile.owner}\0${profile.id}\0`;
-        for (const [k, state] of this.#permissionGrants) {
-          if (state !== 'allow' || !k.startsWith(grantPrefix)) continue;
-          const rest = k.slice(grantPrefix.length);
-          const sep = rest.lastIndexOf('\0');
-          if (sep < 0) continue;
-          const origin = rest.slice(0, sep);
-          const kind = rest.slice(sep + 1);
-          const mapped = mapPermissionKind(kind);
-          if (!mapped || !this.policy.permits(kind)) continue;
-          await woken.proc.send('Browser.grantPermissions', { origin, permissions: [mapped] }).catch(() => {});
-        }
+        await this.#replayPermissionGrants(profile, woken);
         return woken;
       });
       return await fn(rt);
@@ -750,7 +736,6 @@ export class CamoufoxHost {
     if (!p || p.closed) return false;
     if (action === 'stop-automation') {
       this.#pause(p, 'explicit-stop');
-      p.presentation.pauseInAutomation('explicit-stop');
       this.#signal(p, { kind: 'state', state: 'stopped' });
       return true;
     }
@@ -775,7 +760,6 @@ export class CamoufoxHost {
       this.#automationModeSource = 'revoked-by-user';
       for (const q of this.#pages.values()) {
         if (q.closed) continue;
-        q.presentation.refresh();
         this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
       }
       this.#syncControlBar();
@@ -802,7 +786,6 @@ export class CamoufoxHost {
     this.#automationPreferenceReason = null;
     for (const q of this.#pages.values()) {
       if (q.closed) continue;
-      q.presentation.refresh();
       this.#signal(q, { kind: 'state', state: 'automation mode elevated by person (saved)' });
     }
     this.#syncControlBar();
@@ -810,14 +793,7 @@ export class CamoufoxHost {
   }
 
   #assertCaller(caller, signal) {
-    if (!caller || typeof caller.sessionId !== 'string' || !caller.sessionId || typeof caller.callId !== 'string'
-      || !caller.callId || typeof caller.assertLive !== 'function' || !caller.signal) {
-      fail('UNAUTHENTICATED_CALLER', 'Authenticated live host caller is required');
-    }
-    caller.assertLive();
-    caller.signal.throwIfAborted();
-    signal?.throwIfAborted();
-    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
+    assertLiveCaller(caller, signal, this.#closed || this.#revoking);
   }
 
   #owned(tabId, caller, signal, input = false, allowDisconnected = false, dialogCleanup = false) {
@@ -867,11 +843,12 @@ export class CamoufoxHost {
   #pause(p, reason) {
     if (p.closed) return;
     p.paused = reason;
-    if (p.presentation.mode === 'automation' && p.presentation.pausedReason !== reason) {
+    const syncedByPresentation = p.presentation.mode === 'automation' && p.presentation.pausedReason !== reason;
+    if (syncedByPresentation) {
       p.presentation.pauseInAutomation(reason);
     }
     this.#invalidate(p, reason);
-    this.#syncControlBar(p.runtime);
+    if (!syncedByPresentation) this.#syncControlBar(p.runtime);
   }
 
   #ownerPages(owner) { return [...this.#pages.values()].filter(p => !p.closed && p.owner === owner); }
@@ -923,7 +900,7 @@ export class CamoufoxHost {
       browserContextId,
       downloadDir,
       downloadSetupError: dlRes?.error ?? null,
-      downloads: [],
+      activeDownloads: new Set(),
       closeFlight: null,
       devtoolsPrivacy: new PrivacyWindows(() => this.#ownerPages(owner).filter(p => p.profile === profile)
         .every(p => p.presentation.mode === 'automation')),
@@ -1115,6 +1092,8 @@ export class CamoufoxHost {
       return;
     }
     if (method === 'Browser.detachedFromTarget') {
+      if (params.sessionId) runtime.earlyMessages.delete(params.sessionId);
+      if (params.targetId) runtime.bufferedAttaches.delete(params.targetId);
       const p = runtime.bySessionId.get(params.sessionId) ?? runtime.byTargetId.get(params.targetId);
       if (p && !p.closed) this.#closePageRecord(p);
       return;
@@ -1131,9 +1110,9 @@ export class CamoufoxHost {
         state: 'progressing', receivedBytes: 0, totalBytes: 0, private: isPrivate,
       };
       runtime.downloadsByUuid.set(params.uuid, { item, page: p });
+      p.profile.activeDownloads.add(item);
       if (!isPrivate) {
         p.downloads.push(item);
-        p.profile.downloads.push(item);
         this.#signal(p, { kind: 'download', id: item.id, name: safeName, state: 'started', bytes: 0 });
       }
       return;
@@ -1141,7 +1120,9 @@ export class CamoufoxHost {
     if (method === 'Browser.downloadFinished') {
       const record = runtime.downloadsByUuid.get(params.uuid);
       if (!record) return;
+      runtime.downloadsByUuid.delete(params.uuid);
       const { item, page: p } = record;
+      p.profile.activeDownloads.delete(item);
       item.state = params.canceled ? 'cancelled' : params.error ? 'interrupted' : 'completed';
       if (params.error) item.error = params.error;
       if (!item.private && !p.closed) {
@@ -1170,7 +1151,7 @@ export class CamoufoxHost {
       visible: true, connected: true, closed: false, closedByAgent: false,
       paused: null, actorGeneration: null, privateSince: null,
       model: null, base: null, shot: null, cursor: null,
-      dialog: null, dialogRecord: null, downloads: [], returnAttempt: 0, returnFailure: null,
+      dialog: null, downloads: [], returnAttempt: 0, returnFailure: null,
       onDomContentLoaded: null, dialogOpened: null, nativeRequestOpened: null, settleInterrupt: null,
       navListeners,
       emitNavigation: event => { for (const fn of navListeners) fn(event); },
@@ -1346,34 +1327,15 @@ export class CamoufoxHost {
     p.runtime?.rdp?.detachTab(p.id);
     this.nativeRequests.withdrawPage(p);
     this.#refs.retireTab(p.id);
-    p.presentation.destroy();
     p.runtime?.bySessionId.delete(p.sessionId);
     p.runtime?.byTargetId.delete(p.targetId);
     this.#queue.abort(p.id, new BrowserHostError('CLOSED_TAB', 'Tab closed'));
-    this.#syncControlBar(p.runtime);
+    p.presentation.destroy();
     this.#scheduleProfileIdle(p.profile);
   }
 
-  async #validateFiles(files, multiple) {
-    if (!Array.isArray(files) || !files.length || files.length > 32 || (!multiple && files.length !== 1)) {
-      fail('INVALID_UPLOAD_FILE', 'File selection must match the input multiplicity');
-    }
-    const local = file => typeof file === 'string' && !file.includes('\0') && /^[a-zA-Z]:[\\/]/.test(file);
-    const refuse = () => fail('INVALID_UPLOAD_FILE', 'Upload requires existing local regular files with drive-letter paths; network and device paths are refused');
-    const real = [];
-    for (const file of files) {
-      if (!local(file)) refuse();
-      let resolved, info;
-      try { resolved = await realpath(file); } catch { refuse(); }
-      if (!local(resolved)) refuse();
-      if (isProtectedInternalPath(resolved, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir })) {
-        fail('INVALID_UPLOAD_FILE', 'Uploading internal browser profile, preference, or connection control files is refused');
-      }
-      try { info = await stat(resolved); } catch { refuse(); }
-      if (!info.isFile()) refuse();
-      real.push(resolved);
-    }
-    return real;
+  #validateFiles(files, multiple) {
+    return validateUploadFiles(files, multiple, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir });
   }
 
   async #createPage(caller, profile, url, signal) {
@@ -1468,15 +1430,7 @@ export class CamoufoxHost {
     signal?.throwIfAborted();
     p.presentation.assertObservable(returning);
     if (p.presentation.generation !== generation) fail('PRESENTATION_CHANGED', 'Presentation changed during observation');
-    this.#refs.retireGeneration(p.id, generation);
-    for (const frame of model.frames.values()) {
-      if (!frame.documentId) continue;
-      this.#refs.retireDocument(p.id, frame.frameId, frame.documentId);
-      this.#refs.gone(p.id, frame.frameId, frame.documentId, frame.gone, frame.renamed);
-    }
-    for (const frameId of p.model?.frames.keys() ?? []) {
-      if (!model.frames.has(frameId)) this.#refs.retireDocument(p.id, frameId);
-    }
+    retirePerceivedRefs(p, model, generation, { refs: this.#refs });
     p.model = model;
     const prevUrl = p.currentUrl, prevTitle = p.currentTitle;
     p.currentUrl = model.url || p.currentUrl;
@@ -1487,90 +1441,18 @@ export class CamoufoxHost {
   }
 
   #drainSignals(p, caller, header = false) {
-    if (caller?.keepSignals) return [];
-    const queued = this.#signals.drain(p.owner, p.id)
-      .filter(sig => !(header && sig.tabId === p.id && sig.kind === 'navigated'));
-    const lines = formatSignals(queued, p.id);
-    const devtools = p.devtools.since(p.cursor ?? { console: 0, network: 0 });
-    p.cursor = devtools.cursor;
-    if (devtools.errors) lines.push(formatSignals([{ tabId: p.id, kind: 'console', count: devtools.errors }], p.id)[0]);
-    if (devtools.failed) lines.push(formatSignals([{ tabId: p.id, kind: 'network', count: devtools.failed }], p.id)[0]);
-    const pending = caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller).length : 0;
-    if (pending) lines.push(formatSignals([{ tabId: p.id, kind: 'requests', count: pending }], p.id)[0]);
-    return lines;
+    return drainPageSignals(p, caller, { signals: this.#signals, nativeRequests: this.nativeRequests, header });
   }
 
-  async #present(p, model, caller, result, { observe, snapshot = 'diff', screenshot = false, lines = [], value, state } = {}) {
-    const generation = p.presentation.generation;
-    const root = model.frames.get(model.rootId);
-    const snapshotId = `s${++this.#snapshotSequence}`;
-    const refFor = item => this.#refs.ref({
-      tabId: p.id, frameId: item.frameId, documentId: item.documentId, id: item.id, role: item.role, name: item.name, generation,
+  #present(p, model, caller, result, opts = {}) {
+    return presentModel(p, model, caller, result, opts, {
+      refs: this.#refs,
+      signals: this.#signals,
+      nativeRequests: this.nativeRequests,
+      pages: this.#pages,
+      nextSnapshotId: () => `s${++this.#snapshotSequence}`,
+      takeScreenshot: (page, m, sid) => this.#screenshot(page, m, sid),
     });
-    const isGone = (_key, ref) => this.#refs.lookup(ref)?.state !== 'live';
-    const base = p.base?.generation === generation && p.base.rootDocument === root.documentId ? p.base : null;
-    let nextView = null;
-    const merges = [];
-    const view = next => { nextView = next; };
-    const merge = partial => { if (base) merges.push(partial); };
-    const commit = () => {
-      if (nextView) {
-        p.base = { view: nextView, snapshotId, rootDocument: root.documentId, generation, url: model.url, scroll: model.scroll.y };
-      }
-      for (const partial of merges) {
-        for (const [key, line] of partial.lines) base.view.lines.set(key, line);
-        for (const [key, ref] of partial.refs) base.view.refs.set(key, ref);
-      }
-    };
-    let header = !base || base.url !== model.url || screenshot;
-    let viewLine = !header && base.scroll !== undefined && base.scroll !== model.scroll.y;
-    let body = '';
-    const full = mode => {
-      const rendered = renderSnapshot(model, { mode, refFor });
-      view(rendered.view);
-      header = true;
-      return rendered.text;
-    };
-    if (observe) {
-      header = true;
-      if (observe.find !== undefined) {
-        const found = renderFind(model, observe.find, { match: rankBrowserSemanticMatch, refFor });
-        merge(found.view);
-        body = found.text;
-      } else if (observe.mode === 'text') {
-        body = renderText(model);
-      } else if (observe.scope !== undefined) {
-        const rendered = renderSnapshot(model, { scopeKey: this.#scopeKey(p, observe.scope), depth: observe.depth, refFor });
-        merge(rendered.view);
-        body = rendered.text;
-      } else {
-        const rendered = renderSnapshot(model, { mode: observe.mode ?? 'default', depth: observe.depth, refFor });
-        view(rendered.view);
-        body = rendered.text;
-      }
-    } else if (snapshot === 'full' || (snapshot === 'diff' && !base)) {
-      body = full(snapshot === 'full' ? 'full' : 'default');
-    } else if (snapshot === 'diff') {
-      const diff = renderDiff(model, base.view, { from: base.snapshotId, to: snapshotId, refFor, isGone });
-      if (diff.large) body = full('default');
-      else { view(diff.view); body = diff.text; }
-    }
-    if (screenshot) result.screenshot = await this.#screenshot(p, model, snapshotId);
-    if (state?.delivered) return null;
-    if (!caller?.keepSignals) commit();
-    const out = [...this.#drainSignals(p, caller, header), ...lines];
-    if (header) out.push(renderHeader(model, { points: p.shot?.snapshotId === snapshotId }));
-    else if (viewLine) out.push(renderHeader(model).split('\n')[1]);
-    if (value !== undefined) out.push(`value ${clipText(JSON.stringify(value) ?? 'undefined', 4000)}`);
-    if (body) out.push(body);
-    return {
-      ...result,
-      sessionId: p.profile.id,
-      sessionName: p.profile.name,
-      ...(value === undefined ? {} : { value }),
-      snapshotId,
-      text: out.join('\n'),
-    };
   }
 
   async #screenshot(p, model, snapshotId) {
@@ -1585,50 +1467,16 @@ export class CamoufoxHost {
     return { mimeType: 'image/png', data: shot.data, width: w, height: h };
   }
 
-  #scopeKey(p, ref) {
-    const entry = this.#liveRef(p, ref);
-    const key = `${entry.frameId}:${entry.documentId}:${entry.id}`;
-    if (!p.model?.byKey.has(key)) fail('STALE_REF', `${ref} is not on the page now; observe again`);
-    return key;
-  }
-
   #liveRef(p, ref) {
-    const entry = this.#refs.lookup(ref);
-    if (!entry) fail('STALE_REF', `Unknown ref ${ref}; observe for current refs`);
-    if (entry.tabId !== p.id) {
-      const other = this.#pages.get(entry.tabId);
-      if (other && other.owner === p.owner && !other.closed) fail('WRONG_TAB', `${ref} belongs to tab ${entry.tabId}`);
-      if (other && other.owner === p.owner) fail('STALE_REF', `${ref} belonged to tab ${entry.tabId}, which is closed`);
-      fail('STALE_REF', `Unknown ref ${ref}; observe for current refs`);
-    }
-    if (entry.state !== 'live' || entry.generation !== p.presentation.generation) {
-      const reason = entry.generation !== p.presentation.generation || entry.state === 'retired'
-        ? 'is from an earlier presentation (handoff, Stop, hide or show)'
-        : entry.state === 'renamed' ? 'changed its role or name' : entry.state === 'replaced' ? 'belongs to a replaced document' : 'was removed';
-      this.#staleRef(p, entry, reason);
-    }
-    return entry;
+    return lookupLiveRef(p, ref, { refs: this.#refs, pages: this.#pages });
   }
 
   #staleRef(p, entry, reason) {
-    const generation = p.presentation.generation;
-    const now = (p.model?.items ?? []).filter(item => item.id !== undefined && item.role === entry.role && item.name === entry.name
-      && !(item.frameId === entry.frameId && item.documentId === entry.documentId && item.id === entry.id))
-      .slice(0, 3).map(item => this.#refs.ref({
-        tabId: p.id, frameId: item.frameId, documentId: item.documentId, id: item.id,
-        role: item.role, name: item.name, generation,
-      }));
-    fail('STALE_REF', `${entry.ref} ${entry.role}${entry.name ? ` ${quote(clipText(entry.name, 60))}` : ''} ${reason}`
-      + `${now.length ? `; same role+name now: ${now.join(' ')} (verify before acting)` : '; observe again'}`);
+    failStaleRef(p, entry, reason, { refs: this.#refs });
   }
 
   #frameOf(p, ref) {
-    const entry = this.#liveRef(p, ref);
-    if (entry.role !== 'iframe') fail('INVALID_ARGUMENT', `${ref} is not an iframe ref`);
-    const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
-    const frame = item?.childFrameId && p.driver.frames.get(item.childFrameId);
-    if (!frame) fail('STALE_FRAME', `${ref} has no current frame document; observe again`);
-    return frame;
+    return resolveFrameRef(p, ref, { refs: this.#refs, pages: this.#pages });
   }
 
   async #targetEntry(p, target, caller, signal) {
@@ -1685,54 +1533,16 @@ export class CamoufoxHost {
     }
   }
 
-  #requestLines(pending) {
-    return pending.map(request => `request ${request.requestRef} ${request.kind}`
-      + `${request.context?.message ? ` ${quote(clipText(String(request.context.message), 200))}` : ''}`
-      + `${request.options?.length ? ` options ${request.options.map(option => `${option.optionRef}=${quote(option.label)}`).join(' ')}` : ' (respond with files or cancel)'}`);
-  }
-
   #dialogFirst(p, caller, action) {
-    const pending = this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller);
-    return {
-      action, tabId: p.id, disposition: 'not-executed', code: 'DIALOG_OPEN', requestedInputDispatched: false,
-      dialog: { type: p.dialog.type }, pendingRequests: pending,
-      sessionId: p.profile.id, sessionName: p.profile.name,
-      text: [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer it first with handle_dialog or respond`,
-        ...this.#requestLines(pending)].join('\n'),
-    };
+    return buildDialogFirst(p, caller, action, { nativeRequests: this.nativeRequests });
   }
 
   #pendingUncertain(p, args, state, caller, code = 'DIALOG_OPEN') {
-    const parked = code === 'DIALOG_OPEN';
-    const pending = parked && caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller) : [];
-    return {
-      action: args.action, ref: state.ref, tabId: p.id, disposition: 'uncertain', replaySafe: false, code,
-      sessionId: p.profile.id, sessionName: p.profile.name,
-      ...(parked ? { operationPending: true, pendingRequests: pending } : {}),
-      text: [...this.#drainSignals(p, caller),
-        ...(parked && p.dialog ? [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer with handle_dialog or respond`] : []),
-        ...this.#requestLines(pending),
-        'note the input may have been delivered in part or in full; never repeat it; observe first'].join('\n'),
-    };
+    return buildPendingUncertain(p, args, state, caller, { signals: this.#signals, nativeRequests: this.nativeRequests, code });
   }
 
   #unobserved(p, args, cause, state = {}, caller = null) {
-    if (state.delivered) return null;
-    const parked = cause === 'DIALOG_OPEN';
-    const pending = parked && caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller) : [];
-    return {
-      action: args.action, disposition: 'executed', tabId: p.id, ref: state.ref ?? args.ref, observed: false, cause, replaySafe: false,
-      sessionId: p.profile.id, sessionName: p.profile.name,
-      ...(state.code ? { code: state.code } : {}),
-      ...(state.value === undefined ? {} : { value: state.value }),
-      ...(parked ? { operationPending: true, pendingRequests: pending } : {}),
-      text: [...this.#drainSignals(p, caller),
-        ...(p.dialog ? [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer with handle_dialog or respond`] : []),
-        ...this.#requestLines(pending),
-        ...(parked ? ['note the action is still pending behind the dialog; its result follows the answer'] : []),
-        ...(state.value === undefined ? [] : [`value ${clipText(JSON.stringify(state.value) ?? 'undefined', 4000)}`]),
-        'note input delivered once; observe to see the result; never repeat it'].join('\n'),
-    };
+    return buildUnobserved(p, args, cause, state, caller, { signals: this.#signals, nativeRequests: this.nativeRequests });
   }
 
   #arm(p) {
@@ -1875,11 +1685,7 @@ export class CamoufoxHost {
       const p = this.#pages.get(result?.tabId ?? unchecked?.tabId);
       return p && result && typeof result === 'object' ? { ...result, sessionId: p.profile.id, sessionName: p.profile.name } : result;
     } catch (error) {
-      const action = unchecked?.action;
-      if ((inputActions.has(action) || action === 'open' || action === 'run') && error && typeof error === 'object'
-        && error.requestedInputDispatched === undefined) {
-        Object.assign(error, { requestedInputDispatched: false, preparation: error.preparation ?? 'none', tabId: error.tabId ?? unchecked?.tabId });
-      }
+      tagNotDispatchedError(error, unchecked);
       throw error;
     }
   }
@@ -1917,7 +1723,7 @@ export class CamoufoxHost {
         this.#closePageRecord(p);
       }
       if (rt?.proc && !rt.proc.closed) {
-        for (const dl of profile.downloads) {
+        for (const dl of profile.activeDownloads) {
           if (dl.state === 'progressing') {
             await rt.proc.send('Browser.cancelDownload', { uuid: dl.id }, undefined, { timeoutMs: 3000 }).catch(() => {});
           }
@@ -2262,9 +2068,7 @@ export class CamoufoxHost {
 
     // Per-tab serialized lane actions (observe, read, inspect, navigate, click, fill, type, press, select, scroll, upload, evaluate)
     const p = this.#owned(args.tabId, caller, signal, false);
-    if (p.dialog && !['handoff', 'close_tab', 'hide', 'show'].includes(action)) {
-      return this.#dialogFirst(p, caller, action);
-    }
+    if (p.dialog) return this.#dialogFirst(p, caller, action);
     return this.#run(p, args, caller, signal);
   }
 
@@ -2398,16 +2202,10 @@ export class CamoufoxHost {
         timeout.abort(new Error('Browser action timed out; dispatch may still be fenced'));
       });
     } catch (error) {
-      const code = timeout.signal.aborted ? 'TIMEOUT' : typeof error?.code === 'string' ? error.code : signal.aborted ? 'ABORTED' : 'BROWSER_ERROR';
-      if (mutation && state.acked) return this.#unobserved(p, args, code, state, caller);
-      if (mutation && state.sent) return this.#pendingUncertain(p, args, state, caller, code);
-      if (mutation) {
-        const failure = error instanceof BrowserHostError ? error
-          : new BrowserHostError(code, signal.aborted ? 'Cancelled, timed out or stopped before dispatch' : String(error?.message ?? 'Target validation failed'));
-        if (signal.aborted && failure.code !== 'AUTOMATION_PAUSED') failure.code = code;
-        throw Object.assign(failure, { tabId: p.id, preparation: state.preparation, requestedInputDispatched: false });
-      }
-      throw error;
+      return classifyRunError(error, {
+        p, args, state, caller, mutation, signal, timeoutSignal: timeout.signal,
+        signals: this.#signals, nativeRequests: this.nativeRequests,
+      });
     } finally {
       state.delivered = true;
       if (p.dialogOpened === parked) p.dialogOpened = null;
@@ -2459,22 +2257,13 @@ export class CamoufoxHost {
         p.driver.disposeObject(resolved.frame, resolved.objectId);
       }
     }
-    let met = true;
-    if (args.wait) {
-      const deadline = Date.now() + (args.wait.timeoutMs ?? 5000);
-      met = false;
-      for (;;) {
-        this.#owned(p.id, caller, signal);
-        p.presentation.assertObservable();
-        const url = p.driver.rootFrame()?.url || p.currentUrl;
-        const ok = args.wait.url !== undefined
-          ? url.includes(args.wait.url)
-          : (await p.driver.textIncludes(args.wait.text ?? args.wait.gone, signal)) === (args.wait.text !== undefined);
-        if (ok) { met = true; break; }
-        if (Date.now() >= deadline) break;
-        await pause(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())), signal);
-      }
-    }
+    const met = args.wait
+      ? await waitForCondition(p, args.wait, caller, signal, {
+        assertOwned: () => this.#owned(p.id, caller, signal),
+        getUrl: () => p.driver.rootFrame()?.url || p.currentUrl,
+        textIncludes: needle => p.driver.textIncludes(needle, signal),
+      })
+      : true;
     const model = await this.#perceive(p, caller, signal);
     return this.#present(p, model, caller, {
       action: args.action, disposition: 'observed', tabId: p.id,

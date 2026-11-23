@@ -304,14 +304,14 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       revertBtn.style.display = state.elevated ? 'inline-flex' : 'none';
     }
 
-    function mountWindow(win) {
+    function mountWindow(win, { renderIfMounted = true } = {}) {
       if (!win || win.closed) return false;
       const doc = win.document;
       if (!doc) return false;
       const existing = doc.getElementById(BAR_ID);
       if (existing) {
         mountedWins.add(win);
-        renderWindow(win);
+        if (renderIfMounted) renderWindow(win);
         return true;
       }
       const nav = doc.getElementById('nav-bar');
@@ -410,11 +410,11 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       return true;
     }
 
-    function mountAll() {
+    function mountAll(options) {
       let count = 0;
       const en = Services.wm.getEnumerator('navigator:browser');
       while (en.hasMoreElements()) {
-        if (mountWindow(en.getNext())) count++;
+        if (mountWindow(en.getNext(), options)) count++;
       }
       return count;
     }
@@ -438,13 +438,13 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       sync(state) {
         if (destroyed) return 0;
         lastState = state || lastState;
-        mountAll();
+        mountAll({ renderIfMounted: false });
         for (const win of [...mountedWins]) renderWindow(win);
         return mountedWins.size;
       },
       flash(tabId) {
         if (destroyed) return;
-        mountAll();
+        mountAll({ renderIfMounted: false });
         for (const win of [...mountedWins]) {
           if (!win || win.closed) continue;
           const entry = resolveTabForWindow(win, lastState);

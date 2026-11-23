@@ -8,7 +8,9 @@ import { ELEMENT_SEMANTICS } from '../perception/semantics.mjs';
 import { browserRefPointExpression } from '../perception/target-point.mjs';
 import { bounded, pause } from '../../shared/async.mjs';
 import { fail, freshId } from '../../shared/contract.mjs';
-import { DEVTOOLS_LIMITS, INSPECT_ELEMENT, clip, redactURL } from '../devtools.mjs';
+import { DEVTOOLS_LIMITS, INSPECT_ELEMENT } from '../devtools.mjs';
+import { paintHoldingExpression } from '../host-common.mjs';
+import { clip, redactURL } from '../redact.mjs';
 import { quote as quoteText } from '../perception/render.mjs';
 import {
   actionTargetExpression, armGuardExpression, coveringExpression, describeExpression, disarmGuardExpression, hitExpression,
@@ -30,9 +32,7 @@ const OWNER_STABLE = `function(){return new Promise(resolve=>{
   const step=()=>{if(box().some((v,i)=>Math.abs(v-first[i])>1))return resolve(false);if(++frames>=2)return resolve(true);requestAnimationFrame(step)};
   requestAnimationFrame(step)})}`;
 
-const PAINT_HOLDING_EXPRESSION = `(()=>{if(performance.getEntriesByType('paint').some(e=>e.name==='first-contentful-paint'))return 0;`
-  + `const nav=performance.getEntriesByType('navigation')[0];`
-  + `return Math.max(0,(nav?nav.responseStart:0)+${PAINT_HOLDING_MS}-performance.now())})()`;
+const PAINT_HOLDING_EXPRESSION = paintHoldingExpression(PAINT_HOLDING_MS);
 
 const DOM_PATH_EXPRESSION = `function(){
   const segments = [];
@@ -806,25 +806,28 @@ export class CamoufoxFrameDriver {
     return { frame, contextId: ctx };
   }
 
+  async #ensureRdpAttached() {
+    if (!this.rdp) return false;
+    await this.rdp.attachTab(this.page.id, {
+      matchTab: t => t.url === this.page.currentUrl,
+      onResource: (phase, rtype, item, _from, target) => {
+        this.page.devtools?.recordRdp(phase, rtype, item, target?.targetType || null);
+      },
+    }).catch(() => {});
+    return this.rdp.connected;
+  }
+
   async evaluateUser(frame, contextId, expression, world, beforeDispatch, signal = this.actorSignal) {
-    if (world === 'page' && this.rdp) {
-      await this.rdp.attachTab(this.page.id, {
-        matchTab: t => t.url === this.page.currentUrl,
-        onResource: (phase, rtype, item, _from, target) => {
-          this.page.devtools?.recordRdp(phase, rtype, item, target?.targetType || null);
+    if (world === 'page' && await this.#ensureRdpAttached()) {
+      return this.rdp.pageEvaluate(this.page.id, {
+        expression,
+        frameUrl: frame.url,
+        beforeSend: () => {
+          this.assertNoDialogCleanup();
+          this.beforeInputDispatch?.();
+          beforeDispatch?.();
         },
-      });
-      if (this.rdp.connected) {
-        return this.rdp.pageEvaluate(this.page.id, {
-          expression,
-          frameUrl: frame.url,
-          beforeSend: () => {
-            this.assertNoDialogCleanup();
-            this.beforeInputDispatch?.();
-            beforeDispatch?.();
-          },
-        }, signal);
-      }
+      }, signal);
     }
     return this.#evaluateInContext(contextId, expression, true, signal, () => {
       this.beforeInputDispatch?.();
@@ -835,16 +838,8 @@ export class CamoufoxFrameDriver {
   async pageRead({ expression, frameId, limit = L.chars }, signal = this.actorSignal) {
     const frame = frameId ? this.frames.get(frameId) : this.rootFrame();
     if (!frame) fail('STALE_FRAME', 'The frame has no current page world; observe for current frames');
-    if (this.rdp) {
-      await this.rdp.attachTab(this.page.id, {
-        matchTab: t => t.url === this.page.currentUrl,
-        onResource: (phase, rtype, item, _from, target) => {
-          this.page.devtools?.recordRdp(phase, rtype, item, target?.targetType || null);
-        },
-      });
-      if (this.rdp.connected) {
-        return this.rdp.eagerRead(this.page.id, { expression, frameUrl: frame.url, limit }, signal);
-      }
+    if (await this.#ensureRdpAttached()) {
+      return this.rdp.eagerRead(this.page.id, { expression, frameUrl: frame.url, limit }, signal);
     }
     fail('DEBUGGER_DISCONNECTED', 'Firefox DevTools RDP is unavailable for side-effect-free console reads');
   }
@@ -875,13 +870,7 @@ export class CamoufoxFrameDriver {
         this.callOn(frame, obj.objectId, DOM_PATH_EXPRESSION, [], true, signal).catch(() => null),
       ]);
       let rdpDetails = {};
-      if (this.rdp) {
-        await this.rdp.attachTab(this.page.id, {
-          matchTab: t => t.url === this.page.currentUrl,
-          onResource: (phase, rtype, item, _from, target) => {
-            this.page.devtools?.recordRdp(phase, rtype, item, target?.targetType || 'worker');
-          },
-        }).catch(() => {});
+      if (await this.#ensureRdpAttached()) {
         rdpDetails = await this.rdp.inspectNode(this.page.id, { frameUrl: frame.url, domPath, selector }, signal);
       }
       return { ...info, ...rdpDetails };
@@ -913,10 +902,11 @@ export class CamoufoxFrameDriver {
 
   async dispatchWithCredits(kinds, fn) {
     const credits = [];
+    const grant = (extra = kinds) => {
+      for (const kind of extra) credits.push(this.expectInput(kind));
+    };
     try {
-      return await fn(() => {
-        for (const kind of kinds) credits.push(this.expectInput(kind));
-      });
+      return await fn(grant);
     } finally {
       for (const c of credits) this.settleCredit(c);
     }
@@ -990,7 +980,7 @@ export class CamoufoxFrameDriver {
         });
         await this.send('Page.dispatchKeyEvent', { type: 'keydown', key: 'a', code: 'KeyA', keyCode: 65, location: 0, repeat: false }, signal, () => {
           this.beforeInputDispatch?.();
-          this.expectInput('keydown');
+          grant(['keydown']);
         });
         await this.send('Page.dispatchKeyEvent', { type: 'keyup', key: 'a', code: 'KeyA', keyCode: 65, location: 0, repeat: false }, null).catch(() => {});
       } finally {
@@ -1002,7 +992,7 @@ export class CamoufoxFrameDriver {
       try {
         await this.send('Page.dispatchKeyEvent', { type: 'keydown', key: 'Backspace', code: 'Backspace', keyCode: 8, location: 0, repeat: false }, signal, () => {
           this.beforeInputDispatch?.();
-          this.expectInput('keydown');
+          grant(['keydown']);
           bsDown = true;
         });
       } finally {
@@ -1029,5 +1019,3 @@ export class CamoufoxFrameDriver {
     });
   }
 }
-
-export { quoteText };

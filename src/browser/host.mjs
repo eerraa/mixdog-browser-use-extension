@@ -1,9 +1,8 @@
 import { session, WebContentsView } from 'electron';
-import { createHash } from 'node:crypto';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { FenceQueue } from './queue.mjs';
-import { bounded, pause } from '../shared/async.mjs';
+import { bounded } from '../shared/async.mjs';
 import { FrameDriver } from './frames.mjs';
 import { BrowserPermissions } from './permissions.mjs';
 import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from './policy.mjs';
@@ -14,37 +13,24 @@ import { PagePresentation, TOOLBAR_HEIGHT } from './presentation.mjs';
 import {
   DEVTOOLS_LIMITS, DevToolsRecorder, INSPECT_ELEMENT, PrivacyWindows, inspectNode, pageRead, performanceSnapshot, responseBody, selectElement,
 } from './devtools.mjs';
-import { rankBrowserSemanticMatch } from './perception/match.mjs';
 import { composeModel } from './perception/model.mjs';
 import { RefRegistry } from './perception/refs.mjs';
-import { displayURL, quote, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from './perception/render.mjs';
+import { displayURL, quote } from './perception/render.mjs';
 import { armNavigation, settle } from './settle.mjs';
-import { CONTROL_SIGNALS, formatSignals, SignalQueue } from './signals.mjs';
+import { CONTROL_SIGNALS, SignalQueue } from './signals.mjs';
 import { runScript } from './runner/run.mjs';
 import { createRunnerSandbox } from './runner/sandbox.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
 } from '../shared/contract.mjs';
-import { isProtectedInternalPath, saveUserPreferences } from '../shared/preferences.mjs';
-
-const hash = value => createHash('sha256').update(value).digest('hex');
-const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
-// Points: a 24×24 CSS-pixel tile around the point must be unchanged (D18).
-const TILE = 24;
-const WAIT_POLL_MS = 100;
-const SHORT_SETTLE = new Set(['scroll', 'evaluate']);
-const SHORT_PROBE_ACTIONS = new Set(['scroll', 'fill', 'type', 'select', 'upload']);
-// A native request other than a JS dialog leaves the renderer running; the
-// input that opened it gets this long to be acknowledged before the result.
-const NATIVE_REQUEST_ACK_GRACE_MS = 300;
-// Points under a hit chain this transparent are refused (D18).
-const MIN_POINT_OPACITY = 0.1;
-// Open tabs per session at which `open` is refused (pages' own popups still open).
-const MAX_SESSION_TABS = 32;
-// Electron retains partition objects until process exit; bound lifetime allocation.
-const MAX_TEMPORARY_SESSIONS = 16;
-const RETURN_TIMEOUT_MS = 25000;
-const clipText = (value, max) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
+import { saveUserPreferences } from '../shared/preferences.mjs';
+import {
+  assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, classifyRunError, clipText,
+  drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS, MAX_TEMPORARY_SESSIONS,
+  MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, presentModel, resolveFrameRef, retirePerceivedRefs,
+  RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError, TILE, validateUploadFiles,
+  waitForCondition,
+} from './host-common.mjs';
 
 /**
  * Electron-main only. Construct AFTER app.ready, one host per MCP companion
@@ -227,14 +213,10 @@ export class BrowserHost {
     }
   }
   #assertCaller(caller, signal) {
-    if (!caller || typeof caller.sessionId !== 'string' || !caller.sessionId || typeof caller.callId !== 'string'
-      || !caller.callId || typeof caller.assertLive !== 'function' || !caller.signal) {
-      fail('UNAUTHENTICATED_CALLER', 'Authenticated live host caller is required');
-    }
-    caller.assertLive();
-    caller.signal.throwIfAborted();
-    signal?.throwIfAborted();
-    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
+    assertLiveCaller(caller, signal, this.#closed || this.#revoking);
+  }
+  #ownerPages(owner) {
+    return [...this.#pages.values()].filter(p => !p.closed && p.owner === owner);
   }
   #owned(tabId, caller, signal, input = false, allowDisconnected = false, dialogCleanup = false) {
     this.#assertCaller(caller, signal);
@@ -608,31 +590,8 @@ export class BrowserHost {
       withdraw: () => {},
     });
   }
-  // Local regular files only; returns their real paths, which are what the
-  // page receives. A network or device path (\\host\share, \\?\UNC\…, //host)
-  // is refused before any filesystem call: touching it would send the user's
-  // NTLM credentials to that host. The resolved path must still be a local
-  // drive-letter path to a regular file.
-  async #validateFiles(files, multiple) {
-    if (!Array.isArray(files) || !files.length || files.length > 32 || (!multiple && files.length !== 1)) {
-      fail('INVALID_UPLOAD_FILE', 'File selection must match the input multiplicity');
-    }
-    const local = file => typeof file === 'string' && !file.includes('\0') && /^[a-zA-Z]:[\\/]/.test(file);
-    const refuse = () => fail('INVALID_UPLOAD_FILE', 'Upload requires existing local regular files with drive-letter paths; network and device paths are refused');
-    const real = [];
-    for (const file of files) {
-      if (!local(file)) refuse();
-      let resolved, info;
-      try { resolved = await realpath(file); } catch { refuse(); }
-      if (!local(resolved)) refuse();
-      if (isProtectedInternalPath(resolved, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir })) {
-        fail('INVALID_UPLOAD_FILE', 'Uploading internal browser profile, preference, or connection control files is refused');
-      }
-      try { info = await stat(resolved); } catch { refuse(); }
-      if (!info.isFile()) refuse();
-      real.push(resolved);
-    }
-    return real;
+  #validateFiles(files, multiple) {
+    return validateUploadFiles(files, multiple, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir });
   }
 
   #sessionInfo(profile) {
@@ -752,8 +711,9 @@ export class BrowserHost {
     this.#assertCaller(caller, signal);
     if (profile.state !== 'open') fail('CLOSED_SESSION', 'Browser session closed before page creation');
     if (profile.temporary) this.#assertSessionCreation(caller, signal);
-    const open = [...this.#pages.values()].filter(q => q.owner === owner && !q.closed).length;
-    if (open >= MAX_SESSION_TABS) fail('TAB_LIMIT', `A caller has at most ${MAX_SESSION_TABS} open tabs across all browser sessions`);
+    if (this.#ownerPages(owner).length >= MAX_SESSION_TABS) {
+      fail('TAB_LIMIT', `A caller has at most ${MAX_SESSION_TABS} open tabs across all browser sessions`);
+    }
     const view = new WebContentsView({ webPreferences: this.#guestPreferences(profile) });
     const p = this.#registerPage(owner, profile, view, null, { width: 1120, height: 820 });
     try {
@@ -988,11 +948,7 @@ export class BrowserHost {
       // An input action (or run) that throws never dispatched: after a
       // dispatch, #run, respond, handle_dialog and run return a result
       // instead of throwing. Invalid arguments are refused before anything.
-      const action = unchecked?.action;
-      if ((inputActions.has(action) || action === 'open' || action === 'run') && error && typeof error === 'object'
-        && error.requestedInputDispatched === undefined) {
-        Object.assign(error, { requestedInputDispatched: false, preparation: error.preparation ?? 'none', tabId: error.tabId ?? unchecked?.tabId });
-      }
+      tagNotDispatchedError(error, unchecked);
       throw error;
     }
   }
@@ -1037,7 +993,7 @@ export class BrowserHost {
       return this.#disposeSession(profile);
     }
     if (args.action === 'list_tabs') return {
-      tabs: [...this.#pages.values()].filter(p => p.owner === caller.sessionId && !p.closed).map(p => ({
+      tabs: this.#ownerPages(caller.sessionId).map(p => ({
         tabId: p.id, sessionId: p.profile.id, sessionName: p.profile.name,
         automationMode: this.#automationMode,
         url: p.presentation.mode === 'automation' ? p.contents.getURL() : null,
@@ -1050,8 +1006,6 @@ export class BrowserHost {
     if (args.action === 'run') return this.#runScript(args, caller, signal);
     let p;
     if (args.action === 'open') {
-      const open = [...this.#pages.values()].filter(q => q.owner === caller.sessionId && !q.closed).length;
-      if (open >= MAX_SESSION_TABS) fail('TAB_LIMIT', `A session has at most ${MAX_SESSION_TABS} open tabs; close one first`);
       p = await this.#createPage(caller, signal, args.sessionId);
       try { this.#owned(p.id, caller, signal); }
       catch (error) { p.frame.destroy(); throw error; }
@@ -1379,36 +1333,18 @@ export class BrowserHost {
         timeout.abort(new Error('Browser action timed out; dispatch may still be fenced'));
       });
     } catch (error) {
-      // Abort reasons are BrowserHostErrors (Stop, tab closed, renderer gone,
-      // connection closed): their code says why the action ended.
-      const code = timeout.signal.aborted ? 'TIMEOUT' : typeof error?.code === 'string' ? error.code : signal.aborted ? 'ABORTED' : 'BROWSER_ERROR';
-      if (mutation && state.acked) return this.#unobserved(p, args, code, state, caller);
-      if (mutation && state.sent) return this.#pendingUncertain(p, args, state, caller, code);
-      if (mutation) {
-        const failure = error instanceof BrowserHostError ? error
-          : new BrowserHostError(code, signal.aborted ? 'Cancelled, timed out or stopped before dispatch' : 'Target validation failed');
-        if (signal.aborted && failure.code !== 'AUTOMATION_PAUSED') failure.code = code;
-        throw Object.assign(failure, { tabId: p.id, preparation: state.preparation, requestedInputDispatched: false });
-      }
-      throw error;
+      return classifyRunError(error, {
+        p, args, state, caller, mutation, signal, timeoutSignal: timeout.signal,
+        signals: this.#signals, nativeRequests: this.nativeRequests,
+      });
     } finally {
       state.delivered = true;
       if (p.dialogOpened === parked) p.dialogOpened = null;
       if (p.nativeRequestOpened === requested) p.nativeRequestOpened = null;
     }
   }
-  // Sent but not every command acknowledged: the outcome is unknown.
   #pendingUncertain(p, args, state, caller, code = 'DIALOG_OPEN') {
-    const parked = code === 'DIALOG_OPEN';
-    const pending = parked && caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller) : [];
-    return {
-      action: args.action, ref: state.ref, tabId: p.id, disposition: 'uncertain', replaySafe: false, code,
-      ...(parked ? { operationPending: true, pendingRequests: pending } : {}),
-      text: [...this.#drainSignals(p, caller),
-        ...(parked && p.dialog ? [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer with handle_dialog or respond`] : []),
-        ...this.#requestLines(pending),
-        'note the input may have been delivered in part or in full; never repeat it; observe first'].join('\n'),
-    };
+    return buildPendingUncertain(p, args, state, caller, { signals: this.#signals, nativeRequests: this.nativeRequests, code });
   }
   #arm(p) {
     const wc = p.contents;
@@ -1429,18 +1365,23 @@ export class BrowserHost {
   }
   async #afterDispatch(p, args, caller, signal, armed, state) {
     const interrupt = new Promise(resolve => { p.settleInterrupt = resolve; });
-    const settled = await settle({
-      armed, signal, interrupt, short: SHORT_SETTLE.has(args.action),
-      bounds: SHORT_PROBE_ACTIONS.has(args.action) ? { probeMs: 20 } : undefined,
-      // The host enforces the cap: a page that never answers cannot hold the
-      // settle for the CDP command limit.
-      quiet: (ms, cap) => {
-        let timer;
-        const capped = new Promise(resolve => { timer = setTimeout(() => resolve({ quiet: false }), cap + 100); });
-        return Promise.race([p.driver.quiet(state.frameId ? [state.frameId] : [], ms, cap), capped]).finally(() => clearTimeout(timer));
-      },
-      pendingRequests: () => p.devtools.running(state.wall),
-    });
+    let settled;
+    try {
+      settled = await settle({
+        armed, signal, interrupt, short: SHORT_SETTLE.has(args.action),
+        bounds: SHORT_PROBE_ACTIONS.has(args.action) ? { probeMs: 20 } : undefined,
+        // The host enforces the cap: a page that never answers cannot hold the
+        // settle for the CDP command limit.
+        quiet: (ms, cap) => {
+          let timer;
+          const capped = new Promise(resolve => { timer = setTimeout(() => resolve({ quiet: false }), cap + 100); });
+          return Promise.race([p.driver.quiet(state.frameId ? [state.frameId] : [], ms, cap), capped]).finally(() => clearTimeout(timer));
+        },
+        pendingRequests: () => p.devtools.running(state.wall),
+      });
+    } finally {
+      p.settleInterrupt = null;
+    }
     if (state.delivered) return null;
     if (!p.connected) {
       await p.driver.reconnect();
@@ -1466,56 +1407,16 @@ export class BrowserHost {
   }
   // Acknowledged input whose result could not be observed: executed, never resent.
   #unobserved(p, args, cause, state = {}, caller = null) {
-    // A result for a caller that already has one is never built: no drain.
-    if (state.delivered) return null;
-    const parked = cause === 'DIALOG_OPEN';
-    const pending = parked && caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller) : [];
-    return {
-      action: args.action, disposition: 'executed', tabId: p.id, ref: state.ref ?? args.ref, observed: false, cause, replaySafe: false,
-      // What the dispatch itself reported (TARGET_MISMATCH, a page-script
-      // error) survives an observation that could not follow.
-      ...(state.code ? { code: state.code } : {}),
-      ...(state.value === undefined ? {} : { value: state.value }),
-      ...(parked ? { operationPending: true, pendingRequests: pending } : {}),
-      text: [...this.#drainSignals(p, caller),
-        ...(p.dialog ? [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer with handle_dialog or respond`] : []),
-        ...this.#requestLines(pending),
-        ...(parked ? ['note the action is still pending behind the dialog; its result follows the answer'] : []),
-        ...(state.value === undefined ? [] : [`value ${clipText(JSON.stringify(state.value) ?? 'undefined', 4000)}`]),
-        'note input delivered once; observe to see the result; never repeat it'].join('\n'),
-    };
-  }
-  // Pending native requests with their offered refs, for respond.
-  #requestLines(pending) {
-    return pending.map(request => `request ${request.requestRef} ${request.kind}`
-      + `${request.context?.message ? ` ${quote(clipText(String(request.context.message), 200))}` : ''}`
-      + `${request.options?.length ? ` options ${request.options.map(option => `${option.optionRef}=${quote(option.label)}`).join(' ')}` : ' (respond with files or cancel)'}`);
+    return buildUnobserved(p, args, cause, state, caller, { signals: this.#signals, nativeRequests: this.nativeRequests });
   }
   #plain(p, action, text) {
     return { action, disposition: 'executed', tabId: p.id, text };
   }
   #dialogFirst(p, caller, action) {
-    const pending = this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller);
-    return {
-      action, tabId: p.id, disposition: 'not-executed', code: 'DIALOG_OPEN', requestedInputDispatched: false,
-      dialog: { type: p.dialog.type }, pendingRequests: pending,
-      text: [`dialog ${p.dialog.type} ${quote(clipText(p.dialog.message ?? '', 200))}: answer it first with handle_dialog or respond`,
-        ...this.#requestLines(pending)].join('\n'),
-    };
+    return buildDialogFirst(p, caller, action, { nativeRequests: this.nativeRequests });
   }
   #drainSignals(p, caller, header = false) {
-    // Script steps keep the queue for the run's final views.
-    if (caller?.keepSignals) return [];
-    const queued = this.#signals.drain(p.owner, p.id)
-      .filter(signal => !(header && signal.tabId === p.id && signal.kind === 'navigated'));
-    const lines = formatSignals(queued, p.id);
-    const devtools = p.devtools.since(p.cursor ?? { console: 0, network: 0 });
-    p.cursor = devtools.cursor;
-    if (devtools.errors) lines.push(formatSignals([{ tabId: p.id, kind: 'console', count: devtools.errors }], p.id)[0]);
-    if (devtools.failed) lines.push(formatSignals([{ tabId: p.id, kind: 'network', count: devtools.failed }], p.id)[0]);
-    const pending = caller ? this.nativeRequests.list(p, caller?.requestOwner?.caller ?? caller).length : 0;
-    if (pending) lines.push(formatSignals([{ tabId: p.id, kind: 'requests', count: pending }], p.id)[0]);
-    return lines;
+    return drainPageSignals(p, caller, { signals: this.#signals, nativeRequests: this.nativeRequests, header });
   }
 
   // Read-only work in the lane: observe (with wait), read, inspect, and the
@@ -1553,17 +1454,12 @@ export class BrowserHost {
       action: args.action, disposition: 'observed', tabId: p.id, code: met ? undefined : 'WAIT_TIMEOUT',
     }, { observe: args.action === 'read' ? { mode: 'text' } : args, screenshot: args.screenshot === true });
   }
-  async #wait(p, wait, caller, signal) {
-    const deadline = Date.now() + (wait.timeoutMs ?? 5000);
-    for (;;) {
-      this.#owned(p.id, caller, signal);
-      p.presentation.assertObservable();
-      const met = wait.url !== undefined ? p.contents.getURL().includes(wait.url)
-        : (await p.driver.textIncludes(wait.text ?? wait.gone)) === (wait.text !== undefined);
-      if (met) return true;
-      if (Date.now() >= deadline) return false;
-      await pause(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())), signal);
-    }
+  #wait(p, wait, caller, signal) {
+    return waitForCondition(p, wait, caller, signal, {
+      assertOwned: () => this.#owned(p.id, caller, signal),
+      getUrl: () => p.contents.getURL(),
+      textIncludes: query => p.driver.textIncludes(query),
+    });
   }
 
   // One page model from parallel per-frame walker snapshots (D15). Never an
@@ -1583,87 +1479,17 @@ export class BrowserHost {
     signal?.throwIfAborted();
     p.presentation.assertObservable(returning);
     if (p.presentation.generation !== generation) fail('PRESENTATION_CHANGED', 'Presentation changed during observation');
-    this.#refs.retireGeneration(p.id, generation);
-    for (const frame of model.frames.values()) {
-      if (!frame.documentId) continue;
-      this.#refs.retireDocument(p.id, frame.frameId, frame.documentId);
-      this.#refs.gone(p.id, frame.frameId, frame.documentId, frame.gone, frame.renamed);
-    }
-    for (const frameId of p.model?.frames.keys() ?? []) if (!model.frames.has(frameId)) this.#refs.retireDocument(p.id, frameId);
+    retirePerceivedRefs(p, model, generation, { refs: this.#refs });
     p.model = model;
     p.modelFresh = { generation, url: p.contents.getURL(), at: Date.now() };
     return model;
   }
-  // Text result for a model: signals, page header, then the snapshot, find,
-  // text or diff body. Updates the agent's view (the next diff base).
-  // Everything that can fail runs first; the agent's view (the next diff base)
-  // and the signal queue change only for a result that is delivered.
-  async #present(p, model, caller, result, { observe, snapshot = 'diff', screenshot = false, lines = [], value, state } = {}) {
-    const generation = p.presentation.generation;
-    const root = model.frames.get(model.rootId);
-    const snapshotId = `s${++this.#snapshotSequence}`;
-    const refFor = item => this.#refs.ref({
-      tabId: p.id, frameId: item.frameId, documentId: item.documentId, id: item.id, role: item.role, name: item.name, generation,
+  #present(p, model, caller, result, options = {}) {
+    return presentModel(p, model, caller, result, options, {
+      refs: this.#refs, signals: this.#signals, nativeRequests: this.nativeRequests, pages: this.#pages,
+      nextSnapshotId: () => `s${++this.#snapshotSequence}`,
+      takeScreenshot: (tab, tabModel, snapId) => this.#screenshot(tab, tabModel, snapId),
     });
-    const isGone = (_key, ref) => this.#refs.lookup(ref)?.state !== 'live';
-    const base = p.base?.generation === generation && p.base.rootDocument === root.documentId ? p.base : null;
-    let nextView = null;
-    const merges = [];
-    const view = next => { nextView = next; };
-    // find and scope add what they showed to the current view.
-    const merge = partial => { if (base) merges.push(partial); };
-    const commit = () => {
-      if (nextView) p.base = { view: nextView, snapshotId, rootDocument: root.documentId, generation, url: model.url, scroll: model.scroll.y };
-      for (const partial of merges) {
-        for (const [key, line] of partial.lines) base.view.lines.set(key, line);
-        for (const [key, ref] of partial.refs) base.view.refs.set(key, ref);
-      }
-    };
-    let header = !base || base.url !== model.url || screenshot;
-    // A scroll since the agent's last view prints the view line.
-    let viewLine = !header && base.scroll !== undefined && base.scroll !== model.scroll.y;
-    let body = '';
-    const full = mode => {
-      const rendered = renderSnapshot(model, { mode, refFor });
-      view(rendered.view);
-      header = true;
-      return rendered.text;
-    };
-    if (observe) {
-      header = true;
-      if (observe.find !== undefined) {
-        const found = renderFind(model, observe.find, { match: rankBrowserSemanticMatch, refFor });
-        merge(found.view);
-        body = found.text;
-      } else if (observe.mode === 'text') {
-        body = renderText(model);
-      } else if (observe.scope !== undefined) {
-        const rendered = renderSnapshot(model, { scopeKey: this.#scopeKey(p, observe.scope), depth: observe.depth, refFor });
-        merge(rendered.view);
-        body = rendered.text;
-      } else {
-        const rendered = renderSnapshot(model, { mode: observe.mode ?? 'default', depth: observe.depth, refFor });
-        view(rendered.view);
-        body = rendered.text;
-      }
-    } else if (snapshot === 'full' || (snapshot === 'diff' && !base)) {
-      body = full(snapshot === 'full' ? 'full' : 'default');
-    } else if (snapshot === 'diff') {
-      const diff = renderDiff(model, base.view, { from: base.snapshotId, to: snapshotId, refFor, isGone });
-      if (diff.large) body = full('default');
-      else { view(diff.view); body = diff.text; }
-    }
-    if (screenshot) result.screenshot = await this.#screenshot(p, model, snapshotId);
-    if (state?.delivered) return null;
-    // A script step's view goes to the script, not the agent: the agent's diff
-    // base stays its own last view, so the run's final diff covers the run.
-    if (!caller?.keepSignals) commit();
-    const out = [...this.#drainSignals(p, caller, header), ...lines];
-    if (header) out.push(renderHeader(model, { points: p.shot?.snapshotId === snapshotId }));
-    else if (viewLine) out.push(renderHeader(model).split('\n')[1]);
-    if (value !== undefined) out.push(`value ${clipText(JSON.stringify(value) ?? 'undefined', 4000)}`);
-    if (body) out.push(body);
-    return { ...result, ...(value === undefined ? {} : { value }), snapshotId, text: out.join('\n') };
   }
   // On request only: the image at CSS scale (image pixels = CSS pixels). It
   // grounds points only if the page did not move while it was taken.
@@ -1695,47 +1521,14 @@ export class BrowserHost {
     if (!root) fail('STALE_FRAME', 'The root frame is not available; observe again');
     return root;
   }
-  #scopeKey(p, ref) {
-    const entry = this.#liveRef(p, ref);
-    const key = `${entry.frameId}:${entry.documentId}:${entry.id}`;
-    if (!p.model?.byKey.has(key)) fail('STALE_REF', `${ref} is not on the page now; observe again`);
-    return key;
-  }
-  // A registry entry this tab may act on (C7): live, same tab, same generation.
   #liveRef(p, ref) {
-    const entry = this.#refs.lookup(ref);
-    if (!entry) fail('STALE_REF', `Unknown ref ${ref}; observe for current refs`);
-    if (entry.tabId !== p.id) {
-      const other = this.#pages.get(entry.tabId);
-      if (other && other.owner === p.owner && !other.closed) fail('WRONG_TAB', `${ref} belongs to tab ${entry.tabId}`);
-      if (other && other.owner === p.owner) fail('STALE_REF', `${ref} belonged to tab ${entry.tabId}, which is closed`);
-      fail('STALE_REF', `Unknown ref ${ref}; observe for current refs`);
-    }
-    if (entry.state !== 'live' || entry.generation !== p.presentation.generation) {
-      const reason = entry.generation !== p.presentation.generation || entry.state === 'retired'
-        ? 'is from an earlier presentation (handoff, Stop, hide or show)'
-        : entry.state === 'renamed' ? 'changed its role or name' : entry.state === 'replaced' ? 'belongs to a replaced document' : 'was removed';
-      this.#staleRef(p, entry, reason);
-    }
-    return entry;
+    return lookupLiveRef(p, ref, { refs: this.#refs, pages: this.#pages });
   }
-  // No fallback to another node: same-role+name refs are a hint only.
   #staleRef(p, entry, reason) {
-    const generation = p.presentation.generation;
-    const now = (p.model?.items ?? []).filter(item => item.id !== undefined && item.role === entry.role && item.name === entry.name
-      && !(item.frameId === entry.frameId && item.documentId === entry.documentId && item.id === entry.id))
-      .slice(0, 3).map(item => this.#refs.ref({ tabId: p.id, frameId: item.frameId, documentId: item.documentId, id: item.id,
-        role: item.role, name: item.name, generation }));
-    fail('STALE_REF', `${entry.ref} ${entry.role}${entry.name ? ` ${quote(clipText(entry.name, 60))}` : ''} ${reason}`
-      + `${now.length ? `; same role+name now: ${now.join(' ')} (verify before acting)` : '; observe again'}`);
+    return failStaleRef(p, entry, reason, { refs: this.#refs });
   }
   #frameOf(p, ref) {
-    const entry = this.#liveRef(p, ref);
-    if (entry.role !== 'iframe') fail('INVALID_ARGUMENT', `${ref} is not an iframe ref`);
-    const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
-    const frame = item?.childFrameId && p.driver.frames.get(item.childFrameId);
-    if (!frame) fail('STALE_FRAME', `${ref} has no current frame document; observe again`);
-    return frame;
+    return resolveFrameRef(p, ref, { refs: this.#refs, pages: this.#pages });
   }
   async #targetEntry(p, target, caller, signal) {
     const model = await this.#perceive(p, caller, signal);
@@ -1780,31 +1573,50 @@ export class BrowserHost {
     // Paint holding is waited out first, so the hit tests below are the last
     // reads before dispatch (H1).
     if (input) await p.driver.inputReady(frame, signal);
-    const described = await p.driver.describe(frame, entry.id, entry.documentId);
-    if (described?.stale || described?.missing) {
+    if (!input) {
+      const described = await p.driver.describe(frame, entry.id, entry.documentId);
+      if (described?.stale || described?.missing) {
+        this.#refs.retireDocument(p.id, entry.frameId, null);
+        this.#staleRef(p, entry, 'belongs to a replaced document');
+      }
+      if (!described?.described) { this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]); this.#staleRef(p, entry, 'was removed'); }
+      if (described.described.role !== entry.role || described.described.name !== entry.name) this.#staleRef(p, entry, 'changed its role or name');
+      const objectId = await p.driver.resolveObject(frame, entry.id, entry.documentId);
+      return { frame, entry, ref: entry.ref, objectId };
+    }
+    const inspected = await p.driver.inspectTarget(frame, entry.id, entry.documentId);
+    if (inspected?.stale || inspected?.missing) {
       this.#refs.retireDocument(p.id, entry.frameId, null);
       this.#staleRef(p, entry, 'belongs to a replaced document');
     }
-    if (!described?.described) { this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]); this.#staleRef(p, entry, 'was removed'); }
-    if (described.described.role !== entry.role || described.described.name !== entry.name) this.#staleRef(p, entry, 'changed its role or name');
-    const objectId = await p.driver.resolveObject(frame, entry.id, entry.documentId);
-    if (!input) return { frame, entry, ref: entry.ref, objectId };
+    if (!inspected?.described) { this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]); this.#staleRef(p, entry, 'was removed'); }
+    if (inspected.described.role !== entry.role || inspected.described.name !== entry.name) this.#staleRef(p, entry, 'changed its role or name');
+    const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
+    const now = inspected.view ?? await p.driver.inView(frame, entry.id, entry.documentId);
+    const needsScroll = !now.inView || (frame.parentId && !item?.inView);
+    const keepObject = args.action !== 'click' && args.action !== 'scroll';
+    let objectId = null;
+    if (needsScroll || keepObject) {
+      objectId = await p.driver.resolveObject(frame, entry.id, entry.documentId);
+    }
     try {
       // Decided live, not from the last model: the page may have scrolled.
       // A child frame's own viewport may itself be scrolled out of the root
       // view, so an iframe target the model saw offscreen is prepared too.
-      const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
-      const now = await p.driver.inView(frame, entry.id, entry.documentId);
-      if (!now.inView || (frame.parentId && !item?.inView)) {
+      if (needsScroll) {
         await p.driver.prepare(frame, objectId, () => onPreparation('scrolled'),
           now.proxied ? { id: entry.id, documentId: entry.documentId } : null);
+        if (!keepObject) {
+          await p.driver.release(frame, objectId).catch(() => {});
+          objectId = null;
+        }
       }
       this.#owned(p.id, caller, signal, true);
       const point = await p.driver.pointFor(frame, entry.id, entry.documentId, signal);
       this.#owned(p.id, caller, signal, true);
-      return { frame, entry, ref: entry.ref, objectId, point };
+      return { frame, entry, ref: entry.ref, objectId, point, info: inspected.info ?? null };
     } catch (error) {
-      await p.driver.release(frame, objectId).catch(() => {});
+      if (objectId) await p.driver.release(frame, objectId).catch(() => {});
       throw error;
     }
   }
@@ -1940,7 +1752,7 @@ export class BrowserHost {
       return;
     }
     {
-      const info = await p.driver.callOn(frame, objectId, `function() {
+      const info = target.info ?? await p.driver.callOn(frame, objectId, `function() {
         const s = globalThis.__independentState;
         return {connected:this.isConnected,disabled:!!this.disabled,readOnly:!!this.readOnly,
           tag:this.tagName,type:this.type,multiple:!!this.multiple,editable:this.isContentEditable,

@@ -2,7 +2,7 @@
 // diff, find and text; the MCP layer adds the status line (src/mcp/tool.mjs).
 // Grammar: docs/agents/contracts.md.
 import { subtree } from './model.mjs';
-import { redactURL } from '../devtools.mjs';
+import { redactURL } from '../redact.mjs';
 
 export const BUDGETS = Object.freeze({ default: 6000, full: 30000, scope: 12000, text: 12000 });
 const TEXT_CHARS = { default: { root: 1500, frame: 200, line: 100 }, full: { root: 12000, frame: 2000, line: 200 } };
@@ -162,20 +162,31 @@ export function renderSnapshot(model, { mode = 'default', scopeKey, depth, budge
   const rows = [];
   for (const item of items) {
     if (!printed.has(item.key)) continue;
-    const content = formatItem(item, { mode: full ? 'full' : 'default', model,
-      showHref: !item.name || names.get(item.name) > 1 });
+    const showHref = !item.name || names.get(item.name) > 1;
+    const content = formatItem(item, { mode: full ? 'full' : 'default', model, showHref });
     const sub = item.frameId !== model.rootId;
-    rows.push({ item, content, indent: indentOf(item), prio: item.kind === 't' ? (sub ? 3 : 2) : (sub ? 1 : 0) });
+    rows.push({
+      item, content, canonicalSame: !full && !(showHref && item.role === 'link'),
+      indent: indentOf(item), prio: item.kind === 't' ? (sub ? 3 : 2) : (sub ? 1 : 0),
+    });
   }
   // Summary lines go after the last row of their frame.
   const summary = summaries(model, items, printed, full);
   const out = [];
   const lastRow = new Map();
   rows.forEach((row, index) => lastRow.set(row.item.frameId, index));
+  const summaryAtRow = new Map();
+  for (const [frameId, last] of lastRow) {
+    if (frameId === model.rootId || !summary.has(frameId)) continue;
+    let list = summaryAtRow.get(last);
+    if (!list) { list = []; summaryAtRow.set(last, list); }
+    list.push(frameId);
+  }
   rows.forEach((row, index) => {
     out.push(row);
-    for (const [frameId, last] of lastRow) {
-      if (last === index && frameId !== model.rootId && summary.has(frameId)) {
+    const framesHere = summaryAtRow.get(index);
+    if (framesHere) {
+      for (const frameId of framesHere) {
         for (const text of summary.get(frameId)) out.push({ summary: true, content: text, indent: row.indent });
         summary.delete(frameId);
       }
@@ -220,7 +231,7 @@ export function renderSnapshot(model, { mode = 'default', scopeKey, depth, budge
     let ref = null;
     if (!row.summary) {
       if (REFERABLE.has(row.item.kind)) ref = refFor(row.item);
-      view.lines.set(row.item.key, canonical(row.item, model));
+      view.lines.set(row.item.key, row.canonicalSame ? row.content : canonical(row.item, model));
       if (ref) view.refs.set(row.item.key, ref);
     }
     return `${' '.repeat(row.indent)}${ref ? `${ref} ` : ''}${row.content}`;
@@ -256,18 +267,19 @@ export function renderDiff(model, base, { from, to, refFor = () => null, isGone 
     return '';
   };
   for (const item of model.items) {
+    const inBase = base.lines.has(item.key);
+    if (!inBase && !printed.has(item.key)) {
+      if (item.kind === 'i' && !base.known.has(item.key)) offscreen++;
+      continue;
+    }
     const content = canonical(item, model);
-    const shown = () => formatItem(item, { mode: 'default', model, showHref: !item.name });
-    if (!base.lines.has(item.key)) {
-      if (!printed.has(item.key)) {
-        if (item.kind === 'i' && !base.known.has(item.key)) offscreen++;
-        continue;
-      }
+    const shown = () => (item.role === 'link' && !item.name ? formatItem(item, { mode: 'default', model, showHref: true }) : content);
+    if (!inBase) {
       const ref = REFERABLE.has(item.kind) ? refFor(item) : null;
       if (ref) view.refs.set(item.key, ref);
       view.lines.set(item.key, content);
       added.push(`+ ${ref ? `${ref} ` : ''}${shown()}${context(item)}`);
-    } else if (base.lines.has(item.key) && base.lines.get(item.key) !== content) {
+    } else if (base.lines.get(item.key) !== content) {
       const ref = view.refs.get(item.key);
       view.lines.set(item.key, content);
       changed.push(`~ ${ref ? `${ref} ` : ''}${shown()}`);

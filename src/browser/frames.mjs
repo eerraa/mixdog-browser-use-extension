@@ -5,10 +5,11 @@ import { browserRefPointExpression, BROWSER_STABLE_RECT } from './perception/tar
 import { bounded, pause } from '../shared/async.mjs';
 import { fail, freshId } from '../shared/contract.mjs';
 import { DEVTOOLS_LIMITS } from './devtools.mjs';
+import { paintHoldingExpression } from './host-common.mjs';
 import { quote as quoteText } from './perception/render.mjs';
 import {
   actionTargetExpression, armGuardExpression, coveringExpression, describeExpression, disarmGuardExpression, hitExpression,
-  inViewExpression, privatizeExpression,
+  inViewExpression, inspectTargetExpression, privatizeExpression,
   quietExpression, resolveExpression, sensitivePresentExpression, snapshotExpression, targetPointExpression,
   textIncludesExpression, viewportExpression, walkerInstallSource,
 } from './perception/walker.mjs';
@@ -22,31 +23,7 @@ const ACTIONABLE_MS = 2000;
 // its first contentful paint, at most 500 ms, and drops input meanwhile while
 // still acknowledging the dispatch. The margin covers commit after responseStart.
 const PAINT_HOLDING_MS = 700;
-// Paint entries cannot be created by page script (performance.mark can only
-// create marks), so filter them by type/name rather than getEntriesByName.
-// When PerformanceObserver and setTimeout exist (real Chromium), resolve as
-// soon as first-contentful-paint fires instead of blind-sleeping the full cap;
-// otherwise return the remaining numeric wait for host-side pause.
-const PAINT_HOLDING_EXPRESSION = `(()=>{
-  const hasFcp=()=>performance.getEntriesByType('paint').some(e=>e.name==='first-contentful-paint');
-  if(hasFcp())return 0;
-  const nav=performance.getEntriesByType('navigation')[0];
-  const wait=Math.min(${PAINT_HOLDING_MS},Math.max(0,(nav?nav.responseStart:0)+${PAINT_HOLDING_MS}-performance.now()));
-  if(!(wait>0))return 0;
-  if(typeof PerformanceObserver!=='function'||typeof setTimeout!=='function')return wait;
-  return new Promise(resolve=>{
-    let obs=null,done=false;
-    const finish=()=>{if(done)return;done=true;clearTimeout(timer);try{obs&&obs.disconnect();}catch{}resolve(0);};
-    const timer=setTimeout(finish,wait);
-    try{
-      obs=new PerformanceObserver(list=>{
-        if(list.getEntries().some(e=>e.name==='first-contentful-paint')||hasFcp())finish();
-      });
-      obs.observe({type:'paint',buffered:true});
-    }catch{}
-    if(hasFcp())finish();
-  });
-})()`;
+const PAINT_HOLDING_EXPRESSION = paintHoldingExpression(PAINT_HOLDING_MS);
 // At most this many frames are captured per observation; the rest count as hidden frames.
 export const FRAME_CAP = 50;
 // How long after its command returned a press or key may still claim the
@@ -568,7 +545,9 @@ export class FrameDriver {
     // Root first, then tree order: only the first FRAME_CAP frames get a world
     // and the walker; the rest are listed as capped (hidden frames) and never
     // evaluated, so a page with thousands of frames costs a bounded setup.
-    const ordered = [...[...tree].filter(([, frame]) => !frame.parentId), ...[...tree].filter(([, frame]) => frame.parentId)];
+    const roots = [], children = [];
+    for (const pair of tree) (pair[1].parentId ? children : roots).push(pair);
+    const ordered = [...roots, ...children];
     for (const [id, frame] of ordered.slice(FRAME_CAP)) this.frames.set(id, { ...frame, contextId: undefined, capped: true });
     await Promise.all(ordered.slice(0, FRAME_CAP).map(async ([id, frame]) => {
       if (frame.unavailable) { this.frames.set(id, frame); return; }
@@ -695,6 +674,9 @@ export class FrameDriver {
   }
   describe(frame, id, documentId) {
     return this.evaluate(frame, describeExpression(id, documentId));
+  }
+  inspectTarget(frame, id, documentId) {
+    return this.evaluate(frame, inspectTargetExpression(id, documentId));
   }
   viewport(frame) {
     return this.evaluate(frame, viewportExpression());

@@ -25,7 +25,6 @@ const toRoot = (frame, [x, y, w, h]) => ({
 export function composeModel(frames) {
   const root = frames.find(frame => !frame.parentId);
   if (!root?.snapshot?.checkpoint) throw Object.assign(new Error('Root frame snapshot is unavailable'), { code: 'ROOT_UNAVAILABLE' });
-  const byId = new Map(frames.map(frame => [frame.frameId, frame]));
   const children = new Map();
   for (const frame of frames) {
     if (!frame.parentId) continue;

@@ -102,6 +102,10 @@ function pageInstall(U) {
   const CONTAINERS = new Set(['dialog', 'alertdialog', 'form', 'navigation', 'main', 'search', 'region', 'tablist', 'menu',
     'menubar', 'radiogroup', 'grid', 'table', 'tree', 'treegrid', 'toolbar']);
   const LIVE = new Set(['alert', 'status', 'log', 'marquee']);
+  const LIVE_ATTR = new Set(['polite', 'assertive']);
+  const LEAF_TAGS = new Set(['iframe', 'frame', 'svg']);
+  const ABSORB_KINDS = new Set(['h', 'l', 'm']);
+  const OCCLUDE_KINDS = new Set(['i', 'f']);
   const IMPLICIT = { nav: 'navigation', main: 'main', form: 'form', dialog: 'dialog', table: 'table', search: 'search',
     section: 'region', img: 'img', iframe: 'iframe', frame: 'iframe', option: 'option', output: 'status' };
   const SKIP = new Set(['script', 'style', 'noscript', 'template', 'head', 'meta', 'link', 'title', 'base']);
@@ -323,7 +327,7 @@ function pageInstall(U) {
   };
   const kindOf = (el, tag, role, style, parentStyle, inInteractive) => {
     const tabindex = el.hasAttribute('tabindex') ? Number(el.getAttribute('tabindex')) : Number.NaN;
-    const semantic = CONTROLS.has(role) || ['a', 'button', 'input', 'select', 'textarea', 'summary'].includes(tag) && role !== tag;
+    const semantic = CONTROLS.has(role) || (NESTED_CONTROL_TAGS.has(tag) && role !== tag);
     if (semantic || el.isContentEditable && !el.parentElement?.isContentEditable) return 'interactive';
     if (inInteractive || tag === 'html' || tag === 'body' || (tag === 'label' && el.control)) return null;
     // cursor:pointer is inherited; only its outermost element is a target.
@@ -424,7 +428,7 @@ function pageInstall(U) {
           const level = /^h[1-6]$/.test(tag) ? Number(tag[1]) : Number(el.getAttribute('aria-level')) || 2;
           if (name) node = emit(el, { id: identify(el, 'heading', name), p: ctx.p, k: 'h', r: 'heading', n: name, lv: level, b, vp: inViewport(b) });
         } else if (!ctx.interactive && !ctx.live && (LIVE.has(role)
-          || ['polite', 'assertive'].includes(el.getAttribute('aria-live')))) {
+          || LIVE_ATTR.has(el.getAttribute('aria-live')))) {
           const liveRole = LIVE.has(role) ? role : 'live';
           const name = nameOf(el, tag, 'live');
           node = emit(el, { id: identify(el, liveRole, name), p: ctx.p, k: 'l', r: liveRole, n: name,
@@ -443,14 +447,14 @@ function pageInstall(U) {
       }
       if (node?.k === 'i') summary.controls++;
       // Frame documents are walked in their own world; SVG internals are art.
-      if (['iframe', 'frame', 'svg'].includes(tag)) return { summary };
+      if (LEAF_TAGS.has(tag)) return { summary };
       const child = {
         p: node ? node.id : ctx.p,
         // A generic clickable may be dropped as a wrapper, so its text is kept
         // until then; a kept one drops the text its name already carries.
         // A control's label text is that control's name.
         absorb: ctx.absorb || (tag === 'label' && !!el.control)
-          || !!node && (['h', 'l', 'm'].includes(node.k) || (node.k === 'i' && !node.generic)),
+          || !!node && (ABSORB_KINDS.has(node.k) || (node.k === 'i' && !node.generic)),
         interactive: ctx.interactive || node?.k === 'i',
         live: ctx.live || node?.k === 'l',
         fixed: ctx.fixed || style.position === 'fixed',
@@ -461,8 +465,9 @@ function pageInstall(U) {
       child.block = run;
       // Visually hidden (sr-only) text is not on screen.
       const tiny = b[2] <= 1 && b[3] <= 1;
+      const assigned = !el.shadowRoot && tag === 'slot' ? el.assignedNodes({ flatten: true }) : null;
       const children = el.shadowRoot ? el.shadowRoot.childNodes
-        : tag === 'slot' && el.assignedNodes({ flatten: true }).length ? el.assignedNodes({ flatten: true }) : el.childNodes;
+        : assigned?.length ? assigned : el.childNodes;
       return { el, b, node, child, run, style, summary, children: Array.from(children), index: 0, textual: !!run && visible && !tiny };
     };
     const exit = frame => {
@@ -472,11 +477,13 @@ function pageInstall(U) {
         if (t) texts.push({ p: child.p, t, b: run.b, vp: inViewport(run.b), o: run.o });
       }
       if (node?.k === 'toast') {
-        const t = compact(state.maskedText(el).text, 300);
         const area = b[2] * b[3];
-        if (t && summary.controls <= 2 && area < 0.4 * vw * vh) {
-          node.k = 'l';
-          node.v = compact(t, 200);
+        if (summary.controls <= 2 && area < 0.4 * vw * vh) {
+          const t = compact(state.maskedText(el).text, 300);
+          if (t) {
+            node.k = 'l';
+            node.v = compact(t, 200);
+          } else node.drop = true;
         } else node.drop = true;
       }
       // Wrapper removal: a generic clickable without a name, or one that wraps
@@ -528,7 +535,7 @@ function pageInstall(U) {
     // Occlusion: does a hit test at the center or a quarter point reach it?
     for (let i = 0; i < kept.length; i++) {
       const node = kept[i];
-      if (!['i', 'f'].includes(node.k) || !node.vp) continue;
+      if (!OCCLUDE_KINDS.has(node.k) || !node.vp) continue;
       const el = keptElements[i];
       const [x, y, w, h] = node.b;
       let reached = false;
@@ -554,32 +561,40 @@ function pageInstall(U) {
     };
   };
 
-  // Current role and name of a live element, computed exactly as the walk does.
-  state.describe = id => {
-    const el = state.resolve(id);
-    if (!el) return null;
+  const describeEl = (el, style) => {
     const tag = el.localName;
-    const style = getComputedStyle(el);
     if (tag === 'iframe' || tag === 'frame') return { role: 'iframe', name: nameOf(el, tag, 'frame') };
     const role = roleOf(el, tag);
     const kind = kindOf(el, tag, role, style, el.parentElement ? getComputedStyle(el.parentElement) : null, false);
     if (kind) return { role: ARIA.has(role) ? role : 'generic', name: nameOf(el, tag, 'interactive') };
     if (role === 'heading') return { role, name: nameOf(el, tag, 'heading') };
-    if (LIVE.has(role) || ['polite', 'assertive'].includes(el.getAttribute('aria-live'))) {
+    if (LIVE.has(role) || LIVE_ATTR.has(el.getAttribute('aria-live'))) {
       return { role: LIVE.has(role) ? role : 'live', name: nameOf(el, tag, 'live') };
     }
     if (CONTAINERS.has(role)) return { role, name: nameOf(el, tag, 'container') };
     if (style.position === 'fixed') return { role: 'toast', name: '' };
     return { role, name: nameOf(el, tag, 'img') };
   };
+  const inViewEl = el => {
+    const target = labelProxy(el) || el;
+    const rect = target.getBoundingClientRect();
+    return { inView: rect.width >= 1 && rect.height >= 1 && rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
+      proxied: target !== el };
+  };
+  // Current role and name of a live element, computed exactly as the walk does.
+  state.describe = id => {
+    const el = state.resolve(id);
+    return el ? describeEl(el, getComputedStyle(el)) : null;
+  };
   // Combined read-only target validation: role/name, live viewport visibility,
   // and control metadata in one isolated-world evaluation (saves serial RPCs).
   state.inspectTarget = id => {
     const el = state.resolve(id);
     if (!el) return { described: null, view: null, info: null };
+    const style = getComputedStyle(el);
     return {
-      described: state.describe(id),
-      view: state.inView(id),
+      described: describeEl(el, style),
+      view: inViewEl(el),
       info: {
         connected: el.isConnected,
         disabled: !!el.disabled,
@@ -588,7 +603,7 @@ function pageInstall(U) {
         type: el.type,
         multiple: !!el.multiple,
         editable: el.isContentEditable,
-        sensitive: state.sensitive(el),
+        sensitive: isSensitive(el, el.localName, style),
       },
     };
   };

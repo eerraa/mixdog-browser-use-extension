@@ -187,11 +187,18 @@ export async function runScript({ script, tabId, timeoutMs = RUN_LIMITS.defaultM
     const tick = async () => {
       if (finished || bridge.sealed || controller.signal.aborted) return;
       try {
-        const tabs = (await execute({ action: 'list_tabs' }, runCaller)).tabs ?? [];
-        if (finished) return;
-        for (const touched of bridge.touched) {
-          const reason = interruption(tabs.find(tab => tab.tabId === touched));
-          if (reason) { resolve({ kind: 'interrupt', status: reason }); return; }
+        if (tabState) {
+          for (const touched of bridge.touched) {
+            const reason = interruption(tabState(touched));
+            if (reason) { resolve({ kind: 'interrupt', status: reason }); return; }
+          }
+        } else {
+          const tabs = (await execute({ action: 'list_tabs' }, runCaller)).tabs ?? [];
+          if (finished) return;
+          for (const touched of bridge.touched) {
+            const reason = interruption(tabs.find(tab => tab.tabId === touched));
+            if (reason) { resolve({ kind: 'interrupt', status: reason }); return; }
+          }
         }
       } catch { /* the bridge or deadline reports a lost caller */ }
       if (!finished) timers.push(setTimeout(tick, watchMs));

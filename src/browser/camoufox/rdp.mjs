@@ -8,7 +8,8 @@
 // its privacy-window timestamp gate (nothing recorded during human handoff).
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
-import { DEVTOOLS_LIMITS, clip, redactURL } from '../devtools.mjs';
+import { DEVTOOLS_LIMITS } from '../devtools.mjs';
+import { clip, redactURL } from '../redact.mjs';
 import { fail } from '../../shared/contract.mjs';
 
 const L = DEVTOOLS_LIMITS;

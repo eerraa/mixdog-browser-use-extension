@@ -6,6 +6,8 @@
 // they never carry observations or screenshots and never invalidate refs.
 // Nothing produced while the person controls the page is recorded or exposed.
 import { fail } from '../shared/contract.mjs';
+import { clip, redactBody, redactClip, redactHeaders, redactText, redactURL } from './redact.mjs';
+export { clip, redactBody, redactHeaders, redactText, redactURL };
 
 export const DEVTOOLS_LIMITS = Object.freeze({
   console: 500, network: 1000, rows: 30, maxRows: 100, chars: 8192, maxChars: 65536,
@@ -32,160 +34,11 @@ const FILTERS = {
   console: { level: ['error', 'warn', 'warning', 'info', 'log', 'debug'] },
   network: { status: null, type: null, method: null, is: ['failed', 'running', 'cached'] },
 };
-// Every pattern below runs on page-controlled text that is first cut to a
-// bounded length, and every pattern is linear: no nested or overlapping
-// quantifiers, and scans that can fail start only at token boundaries.
-const SENSITIVE_HEADER = /^(?:cookie|set-cookie|authorization|proxy-authorization|dpop)$|token|secret|api[-_]?key|key$|session|passw|credential|csrf|xsrf|auth|signature|ticket|jwt|assertion|saml/i;
-const SENSITIVE_FIELD = /pass|pwd|^pw$|secret|token|auth|session|otp|cvv|cvc|card.?(?:num|no)|credential|api.?key|access.?key|private.?key|signature|ssn|jwt|assertion|saml|ticket|(?:^|[-_.])(?:key|code|state|sig|nonce)$|^(?:key|code|state|sig|nonce)[-_.]/i;
-const URL_HEADER = /^(?:location|content-location|referer)$/i;
-const SECRET_VALUE = /\b(Bearer|Basic|Digest|Negotiate)[ \t]{1,8}[\w.~+/=-]{1,4096}|(?<![\w.-])eyJ[\w-]{1,4096}\.[\w-]{1,4096}\.[\w-]{0,4096}/gi;
-const JWT_SHAPE = /^eyJ[\w-]+\.[\w-]+\.[\w-]*$/;
-const TEXT_URL = /(?<![\w.+-])(?:https?|wss?):\/\/[^\s"'<>\\^`{|}]{1,2048}/gi;
-const KEY_VALUE = /(?<![\w.-])(["']?)([\w.-]{1,128})\1\s{0,16}[:=]\s{0,16}/g;
-const VALUE_END = new Set(['&', ',', ';', '}', ']', ')', '<', '>', '"', "'", ' ', '\t', '\r', '\n']);
 const TEXT_MIME = /^text\/|json|javascript|ecmascript|xml|html|css|svg|x-www-form-urlencoded|graphql|csv/i;
-const REDACTED = '[redacted]';
-const ALREADY_REDACTED = new Set([REDACTED, encodeURIComponent(REDACTED), `"${REDACTED}"`, `'${REDACTED}'`]);
-const RELATIVE = 'http://relative.invalid';
-
-export const clip = (value, max) => {
-  const text = String(value ?? '');
-  return text.length <= max ? text : `${text.slice(0, max)}…(+${text.length - max})`;
-};
-// Redacts at most 2×max characters of page text, then clips to max.
-function redactClip(value, max, redact = redactText) {
-  const text = String(value ?? '');
-  const out = redact(text.length > max * 2 ? text.slice(0, max * 2) : text);
-  return out.length <= max && text.length <= max * 2 ? out : `${out.slice(0, max)}…(+${Math.max(1, text.length - max)})`;
-}
 const compact = object => Object.fromEntries(Object.entries(object)
   .filter(([, value]) => value !== undefined && value !== null && value !== '' && !(Array.isArray(value) && !value.length)));
 const sessionKey = sessionId => sessionId ?? '';
 const firstLine = text => String(text ?? '').split('\n', 1)[0];
-
-const secretValue = value => JWT_SHAPE.test(value) || /^(?:Bearer|Basic|Digest|Negotiate)\s/i.test(value);
-// Query or fragment parameters: sensitive names and token-shaped values.
-function redactParams(params) {
-  let changed = false;
-  for (const [key, value] of [...params]) {
-    if (value !== REDACTED && (SENSITIVE_FIELD.test(key) || secretValue(value))) { params.set(key, REDACTED); changed = true; }
-  }
-  return changed;
-}
-function redactFragment(fragment) {
-  const at = fragment.indexOf('?');
-  const [route, query] = at >= 0 ? [fragment.slice(0, at + 1), fragment.slice(at + 1)]
-    : fragment.includes('=') ? ['', fragment] : [fragment, ''];
-  if (!query) return JWT_SHAPE.test(route) ? REDACTED : route;
-  const params = new URLSearchParams(query);
-  return redactParams(params) ? `${route}${params}` : fragment;
-}
-// Credentials, sensitive query and fragment parameters, token-shaped values.
-// `relative` also accepts header values such as Location: /callback?code=…
-export function redactURL(value, relative = false) {
-  const text = String(value ?? '');
-  let url, base = false;
-  try { url = new URL(text); } catch {
-    if (!relative || !text) return text;
-    try { url = new URL(text, `${RELATIVE}/`); base = true; } catch { return text; }
-  }
-  if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return url.href;
-  url.username = '';
-  url.password = '';
-  redactParams(url.searchParams);
-  if (url.hash.length > 1) url.hash = redactFragment(url.hash.slice(1));
-  return base ? url.href.slice(RELATIVE.length) : url.href;
-}
-// Sensitive `name: value` / `name=value` pairs. Non-sensitive values are not
-// skipped, so names nested in them are still found; each scan is linear.
-function redactPairs(text) {
-  let out = '', last = 0, match;
-  KEY_VALUE.lastIndex = 0;
-  while ((match = KEY_VALUE.exec(text))) {
-    if (!SENSITIVE_FIELD.test(match[2])) continue;
-    const start = KEY_VALUE.lastIndex;
-    const quote = text[start] === '"' || text[start] === "'" ? text[start] : '';
-    let end = start + (quote ? 1 : 0);
-    if (quote) {
-      while (end < text.length && text[end] !== quote) end += text[end] === '\\' ? 2 : 1;
-      end = Math.min(text.length, end + 1);
-    } else while (end < text.length && !VALUE_END.has(text[end])) end++;
-    if (end === start || ALREADY_REDACTED.has(text.slice(start, end))) continue;
-    out += `${text.slice(last, start)}${quote}${REDACTED}${quote}`;
-    last = KEY_VALUE.lastIndex = end;
-  }
-  return out + text.slice(last);
-}
-// Free text (console messages, header values, unparsed bodies): URLs inside
-// the text, Bearer/Basic/JWT-shaped values and sensitive name/value pairs.
-export function redactText(value) {
-  return redactPairs(String(value ?? '')
-    .replace(TEXT_URL, url => {
-      // Rewrite only URLs that held something to redact; keep the text as written otherwise.
-      const out = redactURL(url);
-      try { return out === new URL(url).href ? url : out; } catch { return url; }
-    })
-    .replace(SECRET_VALUE, (_match, scheme) => scheme ? `${scheme} ${REDACTED}` : REDACTED));
-}
-export function redactHeaders(headers = {}) {
-  const out = {};
-  let budget = L.headerBytes, omitted = 0;
-  for (const [name, raw] of Object.entries(headers)) {
-    const value = SENSITIVE_HEADER.test(name) ? REDACTED
-      : URL_HEADER.test(name) ? clip(redactURL(String(raw).slice(0, L.storedURL), true), L.header)
-        : /^refresh$/i.test(name) ? redactClip(raw, L.header, text => text.replace(/(url\s{0,8}=\s{0,8}['"]?)([^'"\s]{1,2048})/i,
-          (_match, prefix, url) => `${prefix}${redactURL(url, true)}`))
-          : redactClip(raw, L.header);
-    if (name.length + value.length > budget) { omitted++; continue; }
-    budget -= name.length + value.length;
-    out[name] = value;
-  }
-  if (omitted) out['…'] = `+${omitted} headers`;
-  return out;
-}
-const redactValue = value => typeof value === 'string' ? redactText(value)
-  : Array.isArray(value) ? value.map(redactValue)
-    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value)
-      .map(([key, item]) => [key, SENSITIVE_FIELD.test(key) ? REDACTED : redactValue(item)]))
-      : value;
-// Multipart: a sensitive part's value lines up to the next boundary.
-function redactMultipart(text) {
-  const lines = text.split('\n');
-  let state = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].endsWith('\r') ? lines[i].slice(0, -1) : lines[i];
-    if (line.startsWith('--')) { state = null; continue; }
-    if (state === 'value') { lines[i] = lines[i].endsWith('\r') ? `${REDACTED}\r` : REDACTED; continue; }
-    if (state === 'headers') { if (!line) state = 'value'; continue; }
-    if (/^content-disposition:/i.test(line)) {
-      const name = /(?:^|[;\s])name="([^"]{0,256})"/i.exec(line.slice(0, 1024))?.[1];
-      if (name !== undefined && SENSITIVE_FIELD.test(name)) state = 'headers';
-    }
-  }
-  return lines.join('\n');
-}
-// Best effort for request and response bodies: JSON (parsed when at most
-// 1 MiB), form and multipart field names, then the free-text rules on at most
-// 2×max characters. The result is clipped to max.
-export function redactBody(text, max) {
-  const value = String(text ?? '');
-  const trimmed = value.length <= L.jsonParse ? value.trim() : '';
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try { return clip(JSON.stringify(redactValue(JSON.parse(trimmed))), max); } catch { /* not JSON or too deep: text rules */ }
-  }
-  return redactClip(value, max, head => {
-    const pairs = head.split('&');
-    if (head.includes('=') && !/\s/.test(head) && pairs.every(pair => pair.indexOf('=') > 0)) {
-      return pairs.map(pair => {
-        const key = pair.slice(0, pair.indexOf('='));
-        let name = key;
-        try { name = decodeURIComponent(key.replace(/\+/g, ' ')); } catch { /* keep the raw name */ }
-        return SENSITIVE_FIELD.test(name) ? `${key}=${REDACTED}` : `${key}=${redactText(pair.slice(key.length + 1))}`;
-      }).join('&');
-    }
-    return redactText(/content-disposition:/i.test(head) ? redactMultipart(head) : head);
-  });
-}
 const location = frame => `${clip(redactURL(frame.url) || '<anonymous>', L.url)}:${(frame.lineNumber ?? 0) + 1}`
   + (frame.columnNumber === undefined ? '' : `:${frame.columnNumber + 1}`);
 
@@ -365,9 +218,22 @@ export class DevToolsRecorder {
   }
   /** Console errors and failed requests recorded after `cursor` (result signals). */
   since(cursor = {}) {
-    const errors = this.#console.filter(row => row.i > (cursor.console ?? Infinity) && row.lv === 'error').length;
-    const failed = this.#network.filter(entry => entry.rev > (cursor.network ?? Infinity)
-      && (entry.st === 'fail' || entry.s >= 400)).length;
+    const cAfter = cursor.console ?? Infinity;
+    const nAfter = cursor.network ?? Infinity;
+    let errors = 0;
+    if (cAfter < this.#seq) {
+      for (let i = this.#console.length - 1; i >= 0; i--) {
+        const row = this.#console[i];
+        if (row.i <= cAfter) break;
+        if (row.lv === 'error') errors++;
+      }
+    }
+    let failed = 0;
+    if (nAfter < this.#rev) {
+      for (const entry of this.#network) {
+        if (entry.rev > nAfter && (entry.st === 'fail' || entry.s >= 400)) failed++;
+      }
+    }
     return { errors, failed, cursor: { console: this.#seq, network: this.#rev } };
   }
   /** Requests still loading that started at or after `wallMs` (settle). */
@@ -531,18 +397,7 @@ export class DevToolsRecorder {
         hasBody: request.hasPostData, init: initiator(params.initiator), in: this.#target(sessionId, params.frameId),
         shared: this.#isShared(sessionId) || undefined,
       };
-      entry.rev = ++this.#rev;
-      this.#network.push(entry);
-      this.#requests.set(key, entry);
-      this.#ids.set(entry.id, entry);
-      this.#running.add(entry);
-      if (this.#network.length > L.network) {
-        const evicted = this.#network.shift();
-        this.#ids.delete(evicted.id);
-        this.#running.delete(evicted);
-        if (this.#requests.get(evicted.key) === evicted) this.#requests.delete(evicted.key);
-        this.#dropped.network++;
-      }
+      this.#pushNetwork(entry);
     } else if (method === 'Network.requestServedFromCache') {
       const entry = this.#live(sessionId, params.requestId);
       if (entry) { entry.c = 'memory'; entry.rev = ++this.#rev; }
@@ -1038,7 +893,6 @@ export class DevToolsRecorder {
 const command = (driver, signal) => (method, params = {}, sessionId) => driver.devtoolsCommand(method, params, sessionId, signal);
 
 export async function responseBody(driver, entry, limit, signal) {
-  if (entry.source === 'websocket') return entry;
   if (entry.source === 'juggler') {
     let reply;
     try { reply = await driver.jugglerResponseBody(entry.requestId, signal); }

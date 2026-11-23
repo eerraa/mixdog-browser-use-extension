@@ -9,9 +9,10 @@ import { JugglerTransport, CamoufoxProcess, chunkCamouEnv, defaultCamouConfig, d
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus, toolbarLabels } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
+import { CamoufoxFrameDriver, INPUT_BINDING } from '../../src/browser/camoufox/driver.mjs';
 import { CAMOUFOX_BOOTSTRAP_URL, createCamoufoxRunnerSandboxFactory } from '../../src/browser/camoufox/runner-sandbox.mjs';
 import { deflateSync } from 'node:zlib';
-import { acquireProfileLock, releaseProfileLock } from '../../src/browser/camoufox/profile-lock.mjs';
+import { acquireProfileLock, releaseProfileLock } from '../../src/shared/profile-lock.mjs';
 import { loadUserPreferences } from '../../src/shared/preferences.mjs';
 import { DevToolsRecorder, PrivacyWindows, responseBody } from '../../src/browser/devtools.mjs';
 
@@ -1556,6 +1557,7 @@ test('Camoufox #nav-bar uses Disconnect/연결 종료 with × window-close guida
         return {};
       };
       p.sendRaw = p.send;
+      p.start = async () => {};
       p.close = async () => { p.closed = true; p.exited = true; return { exited: true }; };
       spawned.push(p);
       return p;
@@ -1610,6 +1612,146 @@ test('Camoufox #nav-bar uses Disconnect/연결 종료 with × window-close guida
     const tabsAfterCrash = (await host.execute({ action: 'list_tabs' }, caller)).tabs;
     assert.equal(tabsAfterCrash.find(t => t.tabId === second.tabId).paused, 'presentation-lost');
 
+    await host.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CamoufoxFrameDriver.dispatchSelectAllDelete settles all keydown credits without leaking Infinity credits', async () => {
+  const trusted = [];
+  let failOnKey = null;
+  const sent = [];
+  const proc = {
+    sendRaw: async (method, params) => {
+      sent.push({ method, params });
+      if (failOnKey && method === 'Page.dispatchKeyEvent' && params.key === failOnKey) {
+        throw new Error(`simulated ${failOnKey} failure`);
+      }
+      return {};
+    },
+  };
+  const driver = new CamoufoxFrameDriver({
+    page: {
+      id: 't1', connected: true, closed: false, dialog: null,
+      presentation: { mode: 'automation' },
+      onTrustedInput: kind => trusted.push(kind),
+    },
+    process: proc,
+    sessionId: 's1',
+  });
+
+  await driver.dispatchSelectAllDelete();
+  assert.ok(driver.inputCredits.every(c => Number.isFinite(c.until)), 'every credit must settle to a finite deadline');
+  // Consume the 3 granted keydown credits (Control, a, Backspace); a 4th keydown must fail closed.
+  for (let i = 0; i < 3; i++) {
+    driver.onMessage('Page.bindingCalled', { name: INPUT_BINDING, payload: 'keydown' });
+  }
+  assert.deepEqual(trusted, [], 'the 3 agent keydowns are covered by credits');
+  driver.onMessage('Page.bindingCalled', { name: INPUT_BINDING, payload: 'keydown' });
+  assert.deepEqual(trusted, ['keydown'], 'extra untrusted keydown after select-all-delete triggers fail-closed');
+
+  // Even on mid-sequence failure, granted credits settle to finite deadlines (never Infinity).
+  driver.inputCredits.length = 0;
+  trusted.length = 0;
+  failOnKey = 'Backspace';
+  await assert.rejects(() => driver.dispatchSelectAllDelete(), /simulated Backspace failure/);
+  assert.ok(driver.inputCredits.every(c => Number.isFinite(c.until)), 'aborted sequence still settles every granted credit');
+});
+
+test('CamoufoxHost cleans up finished downloads and detached target buffers so named profiles retire cleanly', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-cleanup-'));
+  const profilesRoot = path.join(root, 'profiles');
+  const spawned = [];
+  try {
+    const makeProc = () => {
+      const p = new EventEmitter();
+      p.closed = false;
+      p.exited = false;
+      let tabIdx = 0;
+      p.send = async (method, params = {}, sessionId = undefined) => {
+        if (method === 'Browser.newPage') {
+          const i = ++tabIdx;
+          const sid = `s-${i}`, tid = `t-${i}`;
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: 'https://cleanup.test/', title: 'Cleanup', scrollHeight: 400,
+                  checkpoint: { documentId: 'doc-1', revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.start = async () => {};
+      p.close = async () => { p.closed = true; p.exited = true; return { exited: true }; };
+      spawned.push(p);
+      return p;
+    };
+
+    const host = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-cleanup'),
+      dataRoot: root,
+      profilesRoot,
+      persistentProfilesEnabled: true,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      idleProfileTimeoutMs: 40,
+      onRevokeConnection: () => {},
+      createProcess: () => makeProc(),
+    });
+    const caller = makeCaller('caller-cleanup');
+    const created = await host.execute({ action: 'create_session', profile: 'work' }, caller);
+    const opened = await host.execute({ action: 'open', sessionId: created.sessionId, url: 'https://cleanup.test/' }, caller);
+    const workProc = spawned[0];
+
+    // Emit a completed download plus an unclaimed target attach + early message + detach.
+    workProc.emit('message', 'Browser.downloadCreated', { uuid: 'dl-1', pageTargetId: 't-1', url: 'https://cleanup.test/a.txt', suggestedFileName: 'a.txt' });
+    workProc.emit('message', 'Browser.downloadFinished', { uuid: 'dl-1', canceled: false });
+    const dls = await host.execute({ action: 'downloads', tabId: opened.tabId }, caller);
+    assert.equal(dls.items.length, 1);
+    assert.equal(dls.items[0].state, 'completed');
+
+    workProc.emit('message', 'Browser.attachedToTarget', { sessionId: 'orphan-s', targetInfo: { targetId: 'orphan-t' } });
+    workProc.emit('message', 'Page.frameAttached', { frameId: 'orphan-f' }, 'orphan-s');
+    workProc.emit('message', 'Browser.detachedFromTarget', { sessionId: 'orphan-s', targetId: 'orphan-t' });
+
+    // Closing the tab must let the named persistent profile retire cleanly to dormant
+    // (proving neither finished downloads nor detached buffered targets leaked).
+    await host.execute({ action: 'close_tab', tabId: opened.tabId }, caller);
+    let dormant = false;
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 20));
+      const info = (await host.execute({ action: 'list_sessions' }, caller)).sessions.find(s => s.sessionId === created.sessionId);
+      if (info?.runtimeState === 'dormant') { dormant = true; break; }
+    }
+    assert.equal(dormant, true, 'named profile retires to dormant once downloads finish and detached targets clear');
     await host.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

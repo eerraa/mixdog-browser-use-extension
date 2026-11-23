@@ -233,7 +233,13 @@ test('diff reports changed states, new content including live and toast text, re
   ], [text(1, 'Wrong password', [10, 90, 200, 20])]);
   const after = loginModel({ root });
   const gone = new Set([before.items.find(item => item.name === 'Sign in').key]);
-  const diff = renderDiff(after, first.view, { from: 's1', to: 's2', refFor, isGone: key => gone.has(key) });
+  let offscreenRefCalls = 0;
+  const diff = renderDiff(after, first.view, {
+    from: 's1', to: 's2',
+    refFor: item => { if (item.id === 14) offscreenRefCalls++; return refFor(item); },
+    isGone: key => gone.has(key),
+  });
+  assert.equal(offscreenRefCalls, 0, 'unprinted new offscreen items never allocate refs during diff');
   const lines = diff.text.split('\n');
   assert.match(lines[0], /^diff s1→s2 \+\d+ ~\d+ -1$/);
   assert.ok(lines.includes('~ e2 textbox "User" ="alice"'), diff.text);
