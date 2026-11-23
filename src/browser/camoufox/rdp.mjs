@@ -181,7 +181,9 @@ export class FirefoxRdpClient extends EventEmitter {
   #port;
   #transport = null;
   #connectFlight = null;
-  #watchers = new Map(); // pageId → { tabActor, watcherActor, targets: Map<actor, target>, stylesheets: Map, watching: boolean, onResource }
+  #chromeConsoleActor = null;
+  #chromeConsoleFlight = null;
+  #watchers = new Map(); // pageId → { tabActor, watcherActor, browsingContextID, targets: Map<actor, target>, stylesheets: Map, watching: boolean, onResource }
   #evalWaiters = new Map(); // resultID → { consoleActor, resolve, reject, timer }
   #targetWaiters = new Set(); // () => void
   #closed = false;
@@ -214,6 +216,7 @@ export class FirefoxRdpClient extends EventEmitter {
           transport.on('event', msg => this.#onEvent(msg));
           transport.on('close', err => {
             if (this.#transport === transport) this.#transport = null;
+            this.#chromeConsoleActor = null;
             this.#watchers.clear();
             for (const [id, waiter] of [...this.#evalWaiters.entries()]) {
               this.#evalWaiters.delete(id);
@@ -332,7 +335,11 @@ export class FirefoxRdpClient extends EventEmitter {
         isServerTargetSwitchingEnabled: true, isPopupDebuggingEnabled: true,
       });
       const watcherActor = watcherRes.actor;
-      const state = { tabActor: tab.actor, watcherActor, targets: new Map(), stylesheets: new Map(), watching: false, onResource };
+      const state = {
+        tabActor: tab.actor, watcherActor,
+        browsingContextID: typeof tab.browsingContextID === 'number' ? tab.browsingContextID : null,
+        targets: new Map(), stylesheets: new Map(), watching: false, onResource,
+      };
       this.#watchers.set(pageId, state);
       // Watch only 'frame' targets (never 'worker', which pauses newly created
       // dedicated workers waiting for debugger thread attach). Parent-process
@@ -697,8 +704,58 @@ export class FirefoxRdpClient extends EventEmitter {
     };
   }
 
+  browsingContextId(pageId) {
+    const state = this.#watchers.get(pageId);
+    if (!state) return null;
+    if (typeof state.browsingContextID === 'number') return state.browsingContextID;
+    for (const target of state.targets.values()) {
+      if (target.isTopLevelTarget && typeof target.browsingContextID === 'number') return target.browsingContextID;
+    }
+    return null;
+  }
+
+  async #ensureChromeConsole() {
+    if (!(await this.ensureConnected())) return null;
+    if (this.#chromeConsoleActor) return this.#chromeConsoleActor;
+    if (this.#chromeConsoleFlight) return this.#chromeConsoleFlight;
+    this.#chromeConsoleFlight = (async () => {
+      const desc = await this.#transport.request('root', 'getProcess', { id: 0 });
+      const actor = desc?.processDescriptor?.actor;
+      if (!actor) return null;
+      const target = await this.#transport.request(actor, 'getTarget');
+      const consoleActor = target?.process?.consoleActor ?? null;
+      this.#chromeConsoleActor = consoleActor;
+      return consoleActor;
+    })().catch(() => null).finally(() => { this.#chromeConsoleFlight = null; });
+    return this.#chromeConsoleFlight;
+  }
+
+  // Evaluate a privileged browser-chrome snippet in Firefox's parent process
+  // (used strictly for mounting/updating the trusted #nav-bar Agent Control UI).
+  async chromeEval(text, timeoutMs = 4000) {
+    const consoleActor = await this.#ensureChromeConsole();
+    if (!consoleActor) throw new Error('Firefox parent chrome console unavailable');
+    const started = await this.#transport.request(consoleActor, 'evaluateJSAsync', { text }, { timeoutMs });
+    let msg = started;
+    if (started.resultID && started.result === undefined) {
+      msg = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.#evalWaiters.delete(started.resultID);
+          reject(new Error('Firefox chrome evaluation timed out'));
+        }, timeoutMs);
+        timer.unref?.();
+        this.#evalWaiters.set(started.resultID, { consoleActor, resolve, reject, timer });
+      });
+    }
+    if (msg.exception) {
+      throw new Error(msg.exceptionMessage || 'Firefox chrome evaluation failed');
+    }
+    return msg.result;
+  }
+
   close() {
     this.#closed = true;
+    this.#chromeConsoleActor = null;
     for (const waiter of this.#evalWaiters.values()) {
       clearTimeout(waiter.timer);
       waiter.reject?.(new Error('FirefoxRdpClient closed'));

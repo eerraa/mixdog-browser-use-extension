@@ -6,6 +6,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CamoufoxHost } from '../../src/browser/camoufox/host.mjs';
+import { ChromeToolbarClient } from '../../src/browser/camoufox/presentation.mjs';
+import { FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
+import { CamoufoxProcess } from '../../src/browser/camoufox/juggler.mjs';
 import { camoufoxExecutable } from '../../src/shared/paths.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -634,4 +637,80 @@ test('live Camoufox 158: elevated mode permits sensitive input with masking, one
     return res.items.some(d => d.filename === 'report.txt' && d.state === 'completed') ? res : null;
   }, 'completed download report.txt', 8000);
   assert.ok(dls.items.some(d => d.filename === 'report.txt'));
+});
+
+test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px height delta and delivers authenticated click actions', { timeout: 45000 }, async t => {
+  const cfx = camoufoxExecutable(process.cwd());
+  const profileDir = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-navbar-'));
+  const proc = new CamoufoxProcess({
+    executablePath: cfx.executablePath, profileDir, headless: true, enableRdp: true, locale: 'ko-KR',
+  });
+  let rdp = null;
+  let toolbar = null;
+  t.after(async () => {
+    toolbar?.close();
+    rdp?.close();
+    await proc.close().catch(() => {});
+    rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  await proc.start();
+  await proc.send('Browser.newPage');
+  rdp = new FirefoxRdpClient(proc.rdpPort);
+  assert.equal(await rdp.ensureConnected(), true);
+
+  const heightBefore = await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); return w.outerHeight - w.innerHeight; })()');
+  toolbar = new ChromeToolbarClient({ getRdp: () => rdp, headless: false, locale: 'ko-KR' });
+  const received = [];
+  toolbar.on('action', (action, tabId) => received.push({ action, tabId }));
+
+  toolbar.sync({
+    elevated: false,
+    activeId: 't1',
+    visible: true,
+    tabs: [{
+      id: 't1',
+      label: 't1 · ChatGPT',
+      url: 'about:blank',
+      browsingContextId: null,
+      mode: 'native-handoff',
+      paused: true,
+      status: '직접 조작 중',
+      primaryText: '에이전트에게 돌려주기',
+      primaryAction: 'resume',
+      stopEnabled: true,
+      needsReturn: true,
+    }],
+  });
+
+  const mounted = await until(async () => {
+    const raw = await rdp.chromeEval(`JSON.stringify((() => {
+      const w = Services.wm.getMostRecentWindow("navigator:browser");
+      const bar = w?.document?.getElementById("wb-agent-nav-bar");
+      if (!bar || bar.style.display === "none") return null;
+      return {
+        heightDelta: (w.outerHeight - w.innerHeight) - ${Number(heightBefore)},
+        primaryText: bar._wbPrimary?.textContent || "",
+        statusText: bar._wbStatus?.textContent || "",
+        parentId: bar.parentElement?.id || "",
+      };
+    })())`).catch(() => null);
+    return raw && raw !== 'null' ? JSON.parse(raw) : null;
+  }, '#nav-bar ChromeToolbarClient mount', 8000);
+
+  assert.equal(mounted.parentId, 'nav-bar');
+  assert.equal(mounted.heightDelta, 0, 'mounting inside #nav-bar must not change outerHeight - innerHeight');
+  assert.equal(mounted.statusText, '직접 조작 중');
+  assert.equal(mounted.primaryText, '에이전트에게 돌려주기');
+
+  // Click the actual button inside Firefox #nav-bar and verify authenticated loopback callback arrives
+  await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); w.document.getElementById("wb-agent-nav-bar")._wbPrimary.click(); return true; })()');
+  await until(() => received.length === 1, 'authenticated loopback action from #nav-bar button click', 5000);
+  assert.deepEqual(received, [{ action: 'resume', tabId: 't1' }]);
+
+  toolbar.close();
+  const removed = await until(async () => {
+    return await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); return !w?.document?.getElementById("wb-agent-nav-bar"); })()').catch(() => false);
+  }, '#nav-bar cleanup on close', 4000);
+  assert.equal(removed, true);
 });

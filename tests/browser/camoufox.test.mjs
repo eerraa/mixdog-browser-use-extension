@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
-import { CamoufoxPresentation } from '../../src/browser/camoufox/presentation.mjs';
+import { CamoufoxPresentation, ChromeToolbarClient } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost } from '../../src/browser/camoufox/host.mjs';
 import { DevToolsRecorder, PrivacyWindows, responseBody } from '../../src/browser/devtools.mjs';
 
@@ -532,4 +532,72 @@ test('CamoufoxHost persistentProfileDir acquires atomic lock, falls back to ephe
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('ChromeToolbarClient mounts into Firefox #nav-bar via chromeEval, authenticates loopback actions, and emits fallback on chromeEval failure', async () => {
+  const evals = [];
+  let port = 0;
+  let token = '';
+  const mockRdp = {
+    connected: true,
+    closed: false,
+    async ensureConnected() { return true; },
+    async chromeEval(script) {
+      evals.push(script);
+      const pm = script.match(/const PORT = (\d+);/);
+      const tm = script.match(/const TOKEN = ("[^"]+");/);
+      if (pm) port = Number(pm[1]);
+      if (tm) token = JSON.parse(tm[1]);
+      return 1;
+    },
+  };
+  const bar = new ChromeToolbarClient({ getRdp: () => mockRdp, headless: false, locale: 'ko-KR' });
+  const actions = [];
+  bar.on('action', (action, tabId) => actions.push({ action, tabId }));
+
+  bar.sync({ elevated: false, activeId: 't1', visible: true, tabs: [{ id: 't1', status: '직접 조작 중', primaryText: '에이전트에게 돌려주기', primaryAction: 'resume', stopEnabled: true, needsReturn: true }] });
+  bar.flash('t1');
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && evals.length < 3) await new Promise(r => setTimeout(r, 15));
+  assert.ok(port > 0 && token.length >= 32, 'bootstrap script must embed loopback port and 32-byte token');
+  assert.ok(evals[0].includes('wb-agent-nav-bar') && evals[0].includes('nav-bar'));
+  assert.ok(evals.some(s => s.includes('__wbNavToolbar?.sync(')));
+  assert.ok(evals.some(s => s.includes('__wbNavToolbar?.flash("t1")')));
+
+  // Missing or wrong token MUST be refused with 403
+  const badTok = await fetch(`http://127.0.0.1:${port}/action`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': 'wrong-token' },
+    body: JSON.stringify({ action: 'resume', tabId: 't1' }),
+  });
+  assert.equal(badTok.status, 403);
+  assert.equal(badTok.headers.get('access-control-allow-origin'), null);
+
+  // Unknown action MUST be refused with 400
+  const badAct = await fetch(`http://127.0.0.1:${port}/action`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': token },
+    body: JSON.stringify({ action: 'eval-js', tabId: 't1' }),
+  });
+  assert.equal(badAct.status, 400);
+
+  // Valid token + allowed action MUST succeed and emit action event
+  const okRes = await fetch(`http://127.0.0.1:${port}/action`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': token },
+    body: JSON.stringify({ action: 'resume', tabId: 't1' }),
+  });
+  assert.equal(okRes.status, 200);
+  assert.deepEqual(actions, [{ action: 'resume', tabId: 't1' }]);
+
+  bar.close();
+  assert.ok(evals.some(s => s.includes('__wbNavToolbar?.destroy()')));
+
+  // Fallback path when chromeEval fails
+  const failRdp = { connected: true, closed: false, async ensureConnected() { return true; }, async chromeEval() { throw new Error('no chrome'); } };
+  const failBar = new ChromeToolbarClient({ getRdp: () => failRdp, headless: false, locale: 'en-US' });
+  const fellBack = new Promise(resolve => failBar.once('fallback', (err, st) => resolve({ err, st })));
+  const stPayload = { elevated: false, activeId: 't1', visible: true, tabs: [] };
+  failBar.sync(stPayload);
+  const fb = await fellBack;
+  assert.equal(fb.st, stPayload);
+  assert.equal(failBar.active, false);
+  failBar.close();
 });

@@ -27,7 +27,7 @@ import {
 import { CamoufoxProcess } from './juggler.mjs';
 import { FirefoxRdpClient } from './rdp.mjs';
 import { CamoufoxFrameDriver } from './driver.mjs';
-import { CamoufoxPresentation, ControlBarClient } from './presentation.mjs';
+import { CamoufoxPresentation, ChromeToolbarClient, ControlBarClient } from './presentation.mjs';
 import { createCamoufoxRunnerSandboxFactory } from './runner-sandbox.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -144,7 +144,9 @@ export class CamoufoxHost {
   #proc = null;
   #rdp = null;
   #startFlight = null;
+  #chromeToolbar = null;
   #controlBar = null;
+  #useFallbackBar = false;
   #downloadsByUuid = new Map();
   #permissionGrants = new Map(); // `${origin}\0${kind}` → 'allow' | 'deny'
   #activeTabId = null;
@@ -186,8 +188,19 @@ export class CamoufoxHost {
     this.createProcess = createProcess;
     this.createRdp = createRdp;
     this.createRunnerSandbox = createRunnerSandbox ?? (executablePath ? createCamoufoxRunnerSandboxFactory({ executablePath }) : null);
+    this.#chromeToolbar = new ChromeToolbarClient({
+      getRdp: () => this.#rdp,
+      headless: headless || !enableRdp,
+      locale,
+    });
+    this.#chromeToolbar.on('action', (action, tabId) => this.#onControlBarAction(action, tabId));
+    this.#chromeToolbar.on('fallback', (_err, lastState) => {
+      this.#useFallbackBar = true;
+      if (lastState) this.#controlBar.sync(lastState);
+    });
     this.#controlBar = new ControlBarClient({ executablePath: controlBarPath, headless, locale });
     this.#controlBar.on('action', (action, tabId) => this.#onControlBarAction(action, tabId));
+    this.#useFallbackBar = !enableRdp;
   }
 
   status() {
@@ -347,22 +360,39 @@ export class CamoufoxHost {
     if (this.#closed) return;
     const tabs = [...this.#pages.values()]
       .filter(p => !p.closed)
-      .map(p => p.presentation.barEntry({ title: p.currentTitle, url: p.currentUrl }));
+      .map(p => p.presentation.barEntry({
+        title: p.currentTitle,
+        url: p.currentUrl,
+        browsingContextId: this.#rdp?.browsingContextId?.(p.id) ?? null,
+      }));
     const browserPid = this.#proc?.pid ?? 0;
-    if (!tabs.length) {
-      this.#controlBar.sync({ elevated: this.#automationMode === 'elevated', activeId: '', tabs: [], visible: false, browserPid });
-      return;
+    const payload = !tabs.length
+      ? { elevated: this.#automationMode === 'elevated', activeId: '', tabs: [], visible: false, browserPid }
+      : (() => {
+        if (!this.#activeTabId || !this.#pages.get(this.#activeTabId) || this.#pages.get(this.#activeTabId).closed) {
+          this.#activeTabId = tabs.at(-1).id;
+        }
+        return {
+          elevated: this.#automationMode === 'elevated',
+          activeId: this.#activeTabId,
+          tabs,
+          visible: true,
+          browserPid,
+        };
+      })();
+    if (!this.#useFallbackBar && this.#chromeToolbar.active) {
+      this.#chromeToolbar.sync(payload);
+    } else {
+      this.#controlBar.sync(payload);
     }
-    if (!this.#activeTabId || !this.#pages.get(this.#activeTabId) || this.#pages.get(this.#activeTabId).closed) {
-      this.#activeTabId = tabs.at(-1).id;
+  }
+
+  #flashControlBar(tabId = '') {
+    if (!this.#useFallbackBar && this.#chromeToolbar.active) {
+      this.#chromeToolbar.flash(tabId);
+    } else {
+      this.#controlBar.flash();
     }
-    this.#controlBar.sync({
-      elevated: this.#automationMode === 'elevated',
-      activeId: this.#activeTabId,
-      tabs,
-      visible: true,
-      browserPid,
-    });
   }
 
   // Exposed for live/unit tests that simulate a person clicking a Control Bar button.
@@ -851,6 +881,7 @@ export class CamoufoxHost {
         },
         watchResources: p.presentation.mode === 'automation',
       }).catch(() => {});
+      this.#syncControlBar();
     }
     await this.#navigatePage(p, url, signal);
     return p;
@@ -877,7 +908,7 @@ export class CamoufoxHost {
           p.devtools.recordRdp(phase, rtype, item, target?.targetType || null);
         },
         watchResources: p.presentation.mode === 'automation',
-      }).catch(() => {});
+      }).then(() => this.#syncControlBar()).catch(() => {});
     }
   }
 
@@ -1203,7 +1234,7 @@ export class CamoufoxHost {
   async #handoff(p, reason = 'human-handoff', source = 'agent') {
     if (p.closed) return { tabId: p.id, mode: 'closed' };
     if (p.presentation.mode === 'native-handoff') {
-      if (source === 'agent') this.#controlBar.flash();
+      if (source === 'agent') this.#flashControlBar(p.id);
       return { tabId: p.id, mode: 'native-handoff', paused: p.paused };
     }
     const gen = p.presentation.beginDrain(reason);
@@ -1215,7 +1246,7 @@ export class CamoufoxHost {
       p.presentation.enterNative(reason, gen);
       this.#devtoolsMode(p);
       this.#signal(p, { kind: 'state', state: 'handoff' });
-      if (source === 'agent') this.#controlBar.flash();
+      if (source === 'agent') this.#flashControlBar(p.id);
     } catch {
       p.presentation.failClosed(reason);
     }
@@ -1959,6 +1990,7 @@ export class CamoufoxHost {
   async close() {
     if (this.#closed) return;
     this.#closed = true;
+    this.#chromeToolbar.close();
     this.#controlBar.close();
     this.#rdp?.close();
     this.nativeRequests.close();

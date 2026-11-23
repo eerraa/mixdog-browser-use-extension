@@ -612,7 +612,20 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+static void initDpiAwareness() {
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  if (user32) {
+    using SetDpiCtxFn = BOOL (WINAPI*)(HANDLE);
+    FARPROC proc = GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    auto fn = reinterpret_cast<SetDpiCtxFn>(reinterpret_cast<void*>(proc));
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+    if (fn && fn(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)))) return;
+  }
+  SetProcessDPIAware();
+}
+
 int wmain() {
+  initDpiAwareness();
   initDwm();
   HINSTANCE hInst = GetModuleHandleW(nullptr);
   WNDCLASSEXW wc{};

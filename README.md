@@ -153,13 +153,13 @@ C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 
   `browser-policy.json`에 `"engine": "electron"`을 추가합니다(`camoufox`·`electron` 외 값은
   시작 시 거부). Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` →
   공유 `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
-- **Camoufox 제어 막대**: Camoufox 창에는 DOM 오버레이를 주입하지 않고, Camoufox 창에 직접
-  도킹(`GWLP_HWNDPARENT`, 최상단 고정 없음)되는 슬림 Win32 Control Bar(`bin/control-bar.exe`)를
-  제공합니다. 다른 앱 위로 떠다니지 않고 Camoufox 창 이동·최소화·Z-순서를 함께 따르며(일반 창은 상단
-  바로 위, 최대화 시에는 탭·주소창을 가리지 않도록 하단 작업 영역 가장자리에 밀착), 탭별 페이지
-  제목 표시와 **직접 조작 / 에이전트에게 돌려주기 / 모두 반환 / 에이전트 중지 / 권한 상승 · 해제 /
-  연결 회수**를 지원합니다. Camoufox에서는 `window.prompt()`까지 네이티브로 지원하며,
-  `WB_ENGINE=electron`에서는 기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따릅니다.
+- **Camoufox 제어 툴바**: 웹페이지 DOM에는 아무것도 주입하지 않고, Camoufox 자체 주소창 툴바(`#nav-bar`)
+  오른쪽에 다크/라이트 테마와 맞춘 1클릭 네이티브 제어 버튼(**직접 조작 / 에이전트에게 돌려주기 / 모두 반환 /
+  중지 / 권한 해제 / 종료**)을 직접 내장합니다. 별도 떠다니는 창 없이 브라우저와 한 몸으로 움직이므로 창
+  이동·크기 조절·DPI 배율 변경 시 지연이나 어긋남이 없으며, 창 높이(`outerHeight - innerHeight`) 변화도
+  0px입니다(`#nav-bar` 장착이 불가능한 환경에서만 Per-Monitor DPI V2 `bin/control-bar.exe`로 자동 폴백).
+  Camoufox에서는 `window.prompt()`까지 네이티브로 지원하며, `WB_ENGINE=electron`에서는 기존 툴바·보호막
+  UI와 Electron 44.9.1 제약을 따릅니다.
 
 - 새 버전은 옆 폴더에 풀고 정션만 바꿉니다. 실행 중인 폴더는 덮어쓰지 않습니다.
 - 이미 실행 중인 연결은 시작할 때의 버전을 끝까지 쓰고, 다음 연결(새 세션, `/mcp` 재연결,
