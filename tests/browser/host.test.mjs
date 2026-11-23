@@ -2893,6 +2893,42 @@ test('standard mode refuses non-empty sensitive fill/type while allowing empty c
   }
 });
 
+test('Electron status reports engine metadata and visibility cues flash taskbar without stealing focus', async () => {
+  const { host, call, tabId, tab } = await setup();
+  try {
+    const status = host.status();
+    assert.equal(status.engine, 'electron');
+    assert.equal(status.capabilities.engine, 'electron');
+    assert.equal(status.capabilities.delegation.engine, 'electron');
+
+    // First top-level open flashes taskbar without activating the window.
+    assert.equal(tab.frame.isFocused(), false, 'first open never steals focus');
+    assert.equal(tab.frame.flashing, true, 'first top-level open highlights taskbar');
+    tab.frame.emit('focus');
+    assert.equal(tab.frame.flashing, false, 'focus clears taskbar flash cue');
+
+    // Second top-level open does not re-flash the taskbar.
+    const second = await call({ action: 'open', url: 'http://127.0.0.1:8000/second' });
+    const tab2 = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/second').webContents);
+    assert.equal(tab2.frame.isFocused(), false);
+    assert.notEqual(tab2.frame.flashing, true, 'subsequent opens stay quiet');
+
+    // Explicit `show` repeats the taskbar cue without taking focus and reports title only in automation.
+    const shown = await call({ action: 'show', tabId });
+    assert.equal(tab.frame.isFocused(), false, 'show never steals focus');
+    assert.equal(tab.frame.flashing, true, 'show repeats taskbar highlight');
+    assert.match(shown.text, /taskbar highlighted without taking focus/);
+
+    // During handoff, `show` must not leak the private page title.
+    tab.frame.emit('focus');
+    await call({ action: 'handoff', tabId: second.tabId });
+    tab2.contents.title = 'PRIVATE_SECRET_TITLE';
+    const shownPrivate = await call({ action: 'show', tabId: second.tabId });
+    assert.doesNotMatch(shownPrivate.text, /PRIVATE_SECRET_TITLE/);
+    assert.equal(tab2.frame.isFocused(), false);
+  } finally { await host.close(); }
+});
+
 test.after(() => {
   for (const [key, value] of Object.entries(original)) FrameDriver.prototype[key] = value;
 });

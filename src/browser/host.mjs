@@ -70,6 +70,7 @@ export class BrowserHost {
   #signals = new SignalQueue();
   #tabSequence = 0;
   #snapshotSequence = 0;
+  #firstTopLevelCued = false;
 
   constructor({ dataDir, dataRoot = null, connectionId = null, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
@@ -836,7 +837,9 @@ export class BrowserHost {
       await p.driver.start();
       if (p.closed || parent?.closed || profile.state !== 'open') fail('CLOSED_TAB', 'Tab or browser session closed during startup');
       if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Connection closed during startup');
-      await p.presentation.start();
+      const shouldCue = !parent && !this.#firstTopLevelCued;
+      if (shouldCue) this.#firstTopLevelCued = true;
+      await p.presentation.start({ cueTaskbar: shouldCue });
       if (parent?.closed || profile.state !== 'open' || this.#closed || this.#revoking) { p.frame.destroy(); return; }
     })().catch(error => { if (!p.frame.isDestroyed()) p.frame.destroy(); throw error; });
     if (parent) {
@@ -973,9 +976,14 @@ export class BrowserHost {
     if (args.action === 'hide' || args.action === 'show') {
       this.#invalidate(p, args.action);
       if (args.action === 'hide') p.presentation.hide();
-      else p.presentation.show();
+      else p.presentation.show({ cueTaskbar: true });
+      const visible = p.presentation.logicalVisible();
+      const title = args.action === 'show' && p.presentation.mode === 'automation' ? p.contents.getTitle() : '';
       // hide starts a new presentation generation (refs retire); show does not.
-      return this.#plain(p, args.action, `window ${p.presentation.logicalVisible() ? 'visible' : 'hidden'}${p.paused ? `; paused: ${p.paused}` : ''}`
+      return this.#plain(p, args.action, `window ${visible ? 'visible' : 'hidden'}`
+        + (args.action === 'show' && visible ? ' (taskbar highlighted without taking focus)' : '')
+        + (title ? `; title ${JSON.stringify(title)}` : '')
+        + `${p.paused ? `; paused: ${p.paused}` : ''}`
         + (args.action === 'hide' ? '; earlier refs and points of this tab are void (observe again after show)' : '; observe before acting'));
     }
     if (args.action === 'handoff') {

@@ -181,6 +181,8 @@ export class PagePresentation {
     this.notice = null;
     this.addressError = false;
     this.loadError = null;
+    this.flashTimer = null;
+    this.flashFocusListener = null;
     this.text = STRINGS[app.getLocale().toLowerCase().startsWith('ko') ? 'ko' : 'en'];
     this.toolbarURL = dataURL(toolbarHTML(this.text));
     this.shieldURL = dataURL(shieldHTML(this.text));
@@ -254,7 +256,28 @@ export class PagePresentation {
       this.contents.on(event, () => this.#publish());
     }
   }
-  async start() {
+  #clearFlashCue(stop = false) {
+    if (this.flashTimer) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    if (this.flashFocusListener && !this.frame.isDestroyed()) {
+      this.frame.removeListener('focus', this.flashFocusListener);
+    }
+    this.flashFocusListener = null;
+    if (stop && !this.frame.isDestroyed()) this.frame.flashFrame(false);
+  }
+  cueTaskbar(durationMs = 3000) {
+    if (this.closed || this.frame.isDestroyed() || this.frame.isFocused()) return;
+    this.#clearFlashCue(false);
+    this.frame.flashFrame(true);
+    const stop = () => this.#clearFlashCue(true);
+    this.flashFocusListener = stop;
+    this.frame.once('focus', stop);
+    this.flashTimer = setTimeout(stop, durationMs);
+    this.flashTimer.unref?.();
+  }
+  async start({ cueTaskbar = false } = {}) {
     await Promise.all([this.toolbar.loadURL(this.toolbarURL), this.shield.loadURL(this.shieldURL)]);
     if (this.closed) throw new Error('Presentation closed during initialization');
     this.ready = true;
@@ -262,6 +285,7 @@ export class PagePresentation {
     // Agent windows never take focus (D19): focus emulation lets the page
     // behave as focused, and the person activates the window by clicking it.
     this.frame.showInactive();
+    if (cueTaskbar) this.cueTaskbar();
     if (this.contents.isFocused()) this.toolbar.focus();
   }
   logicalVisible() {
@@ -427,6 +451,7 @@ export class PagePresentation {
     this.mode = 'native-handoff';
     this.notice = null;
     this.addressError = false;
+    this.#clearFlashCue(false);
     if (activate || this.frame.isFocused()) this.contents.focus();
     else {
       this.frame.flashFrame(true);
@@ -474,19 +499,22 @@ export class PagePresentation {
   }
   hide() {
     this.generation++;
+    this.#clearFlashCue(true);
     this.intentionalHide = true;
     try { this.frame.hide(); } finally { this.intentionalHide = false; }
     this.callbacks.visibility(false);
     this.callbacks.invalidate('logical-hidden');
   }
-  show() {
+  show({ cueTaskbar = false } = {}) {
     this.frame.showInactive();
+    if (cueTaskbar) this.cueTaskbar();
     this.callbacks.visibility(this.logicalVisible());
     this.callbacks.invalidate('logical-shown');
   }
   close() {
     this.closed = true;
     this.generation++;
+    this.#clearFlashCue(false);
     for (const resolve of this.releaseWaiters) resolve();
     this.releaseWaiters.clear();
     if (!this.frame.isDestroyed()) this.frame.destroy();
