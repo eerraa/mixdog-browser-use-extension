@@ -61,8 +61,8 @@ Doc rules:
 | --- | --- |
 | `src/mcp/` | MCP stdio server, `browse` schema, result text and connection-authority instructions, gateway that spawns and owns the companion and issues tickets under connection authority |
 | `src/hook/` | host hook process: lease injection, lifecycle fan-out |
-| `src/companion/` | Companion entry points per connection: `camoufox-main.mjs` (default pure-Node Camoufox companion) and `main.mjs` (Electron fallback); pipe server, role and method auth, termination |
-| `src/browser/` | Browser engines: `camoufox/` (default Camoufox Juggler + Firefox RDP driver, host, presentation/Control Bar, hardened runner) and root Electron engine (`host.mjs`, CDP `frames.mjs`, `presentation.mjs`, `permissions.mjs`, `dialogs.mjs`); shared `devtools.mjs`, `policy.mjs`, `requests.mjs`, `queue.mjs`, `signals.mjs`, `settle.mjs` |
+| `src/companion/` | Shared named-pipe RPC server (`server.mjs`, role/method auth, teardown) and companion entry points per connection: `camoufox-main.mjs` (default pure-Node Camoufox companion) and `main.mjs` (Electron fallback) |
+| `src/browser/` | Browser engines: `camoufox/` (default Camoufox Juggler + Firefox RDP driver, host, presentation/Control Bar, hardened runner) and root Electron engine (`host.mjs`, CDP `frames.mjs`, `presentation.mjs`, `permissions.mjs`, `dialogs.mjs`); shared `host-common.mjs`, `redact.mjs`, `devtools.mjs`, `policy.mjs`, `requests.mjs`, `queue.mjs`, `signals.mjs`, `settle.mjs` |
 | `src/browser/perception/` | walker source and the pure text projection: model, refs, render, `find` |
 | `src/browser/runner/` | `run`: sandbox window (Electron) or hardened headless Camoufox sandbox (`camoufox/runner-sandbox.mjs`), op bridge, script API |
 | `src/shared/` | modules of more than one process, without Electron: browse contract, authority, RPC, paths (`engineMode`, `camoufoxExecutable`), async |
