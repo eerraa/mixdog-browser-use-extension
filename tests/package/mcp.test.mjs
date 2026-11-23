@@ -1023,3 +1023,92 @@ test('packaged connection authority: named persistent profiles run concurrently 
   });
   assert.deepEqual(valueOf(readDefA), { cookie: 'acct=default-v064', local: 'default' });
 });
+
+test('packaged connection authority: Electron (WB_ENGINE=electron) starts lazily, rejects _lease on status, serves cold status/list_profiles, wakes on first call, and confirms cold revoke', { timeout: 120000 }, async t => {
+  const baseContext = await connectionEnvironment(t);
+  const elContext = { ...baseContext, env: { ...baseContext.env, WB_ENGINE: 'electron' } };
+  const page = await fixture(t);
+
+  const artifactLower = artifact.toLowerCase();
+  const countCompanions = async () => {
+    const procs = await processes('electron.exe');
+    return procs.filter(p => typeof p.CommandLine === 'string'
+      && p.CommandLine.includes('companion.cjs')
+      && p.CommandLine.toLowerCase().includes(artifactLower)).length;
+  };
+  const baselineCompanions = await countCompanions();
+  const hasConnectionDir = async channel => {
+    try { await stat(path.join(elContext.directory, 'connections', channel)); return true; }
+    catch (err) { if (err?.code === 'ENOENT') return false; throw err; }
+  };
+
+  // 1. Cold connection: tools/list, status, list_profiles, and forged _lease on status never spawn Electron.
+  const cold = await plainClient(t, elContext);
+  assert.match(cold.descriptor.description, /^Hardware-capable independent browser \(Electron/);
+  assert.match(cold.descriptor.description, /usekb\.cc/);
+  const elInstructions = cold.client.getInstructions();
+  assert.ok(elInstructions && elInstructions.length <= 4096 && !elInstructions.includes('_channel'));
+  assert.match(elInstructions, /WebHID/);
+
+  const coldStatus = dataOf(await cold.call({ action: 'status' }));
+  assert.equal(coldStatus.state, 'connected');
+  assert.equal(coldStatus.companionState, 'not-started');
+  assert.equal(coldStatus.engine, 'electron');
+  assert.equal(coldStatus.capabilities.engine, 'electron');
+  assert.equal(coldStatus.capabilities.delegation.engine, 'electron');
+  assert.equal(coldStatus.capabilities.delegation.configuredEngine, 'camoufox');
+  assert.equal(coldStatus.tabCount, 0);
+
+  const coldProfiles = dataOf(await cold.call({ action: 'list_profiles' }));
+  assert.equal(coldProfiles.supported, false);
+  assert.equal(coldProfiles.engine, 'electron');
+  assert.deepEqual(coldProfiles.profiles, []);
+
+  const forgedStatus = await cold.call({ action: 'status', _lease: 'model-supplied' });
+  assert.equal(forgedStatus.isError, true);
+  assert.equal(dataOf(forgedStatus).code, 'INVALID_ARGUMENT');
+  assert.equal(dataOf(forgedStatus).requestedInputDispatched, false);
+
+  assert.equal(await hasConnectionDir(cold.channel), false, 'cold Electron status/list_profiles never creates connection dir');
+  assert.equal(await countCompanions(), baselineCompanions, 'cold Electron connection spawns zero companion.cjs GUI processes');
+
+  // Closing a cold connection starts nothing.
+  await cold.client.close();
+  assert.equal(await hasConnectionDir(cold.channel), false);
+  assert.equal(await countCompanions(), baselineCompanions);
+
+  // 2. Concurrent operational calls share one lazy startup and preserve connectionId continuity.
+  const warm = await plainClient(t, elContext);
+  const preStatus = dataOf(await warm.call({ action: 'status' }));
+  assert.equal(preStatus.companionState, 'not-started');
+  const [opened, listed] = await Promise.all([
+    warm.call({ action: 'open', url: page.url }),
+    warm.call({ action: 'list_tabs' }),
+  ]);
+  assert.equal(opened.isError, false, textOf(opened));
+  assert.equal(listed.isError, false, textOf(listed));
+  const postStatus = dataOf(await warm.call({ action: 'status' }));
+  assert.equal(postStatus.companionState, 'running');
+  assert.equal(postStatus.engine, 'electron');
+  assert.equal(postStatus.connectionId, preStatus.connectionId, 'cold and warm status keep the exact same connectionId');
+  assert.equal(postStatus.tabCount, 1);
+  assert.equal(await countCompanions(), baselineCompanions + 1);
+
+  const shown = await warm.call({ action: 'show', tabId: tabOf(opened) });
+  assert.equal(shown.isError, false, textOf(shown));
+  assert.match(textOf(shown), /taskbar highlighted without taking focus/);
+  await warm.client.close();
+
+  // 3. Explicit revoke on a cold connection runs the ticketed teardown path and latches ended.
+  const revoking = await plainClient(t, elContext);
+  assert.equal(dataOf(await revoking.call({ action: 'status' })).companionState, 'not-started');
+  const rev = await revoking.call({ action: 'revoke' });
+  assert.equal(rev.isError, false, textOf(rev));
+  assert.equal(dataOf(rev).disposition, 'connection-terminated');
+  assert.equal(dataOf(rev).processTeardownConfirmed, true);
+  const endedStatus = dataOf(await revoking.call({ action: 'status' }));
+  assert.equal(endedStatus.state, 'connection-ended');
+  assert.equal(endedStatus.companionState, 'ended');
+  const afterRevoke = await revoking.call({ action: 'open', url: page.url });
+  assert.equal(afterRevoke.isError, true);
+});

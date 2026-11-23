@@ -85,13 +85,14 @@ One stable path per machine is the only registration of MCP hosts (D29). `npm ru
 
 A running connection keeps its version: the launcher resolves the junction when it starts (`architecture.md` Processes). The next connection (new session, `/mcp` reconnect, host restart) starts the new version; `status.version` shows which one runs.
 
-Registrations at the stable path (user steps unless the user asks the agent; data dirs stay per host):
+Registrations at the stable path (user steps unless the user asks the agent; data dirs stay per host and per registration; pin both `WB_ENGINE=camoufox` on `win-browser` and `WB_ENGINE=electron` on `win-browser-hid` when WebHID/WebUSB hardware workflows are needed):
 
 | Host | Registration |
 | --- | --- |
-| Claude Code | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_DATA_DIR=<abs dir> -- <root>\win-browser\bin\bridge.exe --mcp`; replace an earlier entry with `claude mcp remove --scope user win-browser` first; check with `claude mcp get win-browser` |
-| Codex | `~/.codex/config.toml` `[mcp_servers.win-browser]`: `command = "<root>/win-browser/bin/bridge.exe"`, `args = ["--mcp"]`, `[mcp_servers.win-browser.env]` `WB_AUTHORITY = "connection"`, `WB_DATA_DIR = '<abs dir>'` |
-| DSH | the profile's `cordis.patch.yml` entry `@deepseek-ai/dsh-mcp-client` with `serverName: win-browser`, `transport: stdio`, `command: <root>/win-browser/bin/bridge.exe`, `args: [--mcp]`, `env` as above |
+| Claude Code | `claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e WB_ENGINE=camoufox -e WB_DATA_DIR=<abs dir> -- <root>\win-browser\bin\bridge.exe --mcp` (optional WebHID sibling: `win-browser-hid` with `WB_ENGINE=electron` and `<abs dir>-hid`); replace with `claude mcp remove --scope user <name>` first; check with `claude mcp get <name>` |
+| Codex | `~/.codex/config.toml` `[mcp_servers.win-browser]` (`WB_ENGINE = "camoufox"`) and optional `[mcp_servers.win-browser-hid]` (`WB_ENGINE = "electron"`, separate `WB_DATA_DIR`): `command = "<root>/win-browser/bin/bridge.exe"`, `args = ["--mcp"]`, `WB_AUTHORITY = "connection"` |
+| Antigravity | `~/.gemini/config/mcp_config.json` `mcpServers.win-browser` (`WB_ENGINE: "camoufox"`) and optional `mcpServers.win-browser-hid` (`WB_ENGINE: "electron"`, separate `WB_DATA_DIR`) |
+| DSH (PTC) | profile `cordis.patch.yml` `- insert:` entries `@deepseek-ai/dsh-mcp-client` with `serverName: win-browser` (`WB_ENGINE: camoufox`) and optional `serverName: win-browser-hid` (`WB_ENGINE: electron`, separate `WB_DATA_DIR`), `transport: stdio`, `toolCallTimeoutMs: 120000`, `command: <root>/win-browser/bin/bridge.exe`, `args: [--mcp]` |
 
 ## Licensing
 

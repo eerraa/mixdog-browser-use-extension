@@ -148,18 +148,25 @@ C:\설치루트\win-browser-versions\v<버전>\win-browser   ← 버전별 설�
 C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 Camoufox 158 런타임(1회 배치)
 ```
 
-- **엔진 선택 (`WB_ENGINE`)**: 기본 엔진은 `camoufox`(Firefox 158)입니다. WebHID·WebUSB
-  장치 연결이 필요할 때는 MCP 등록 환경 변수에 `WB_ENGINE=electron`을 지정하거나 등록 전
-  `browser-policy.json`에 `"engine": "electron"`을 추가합니다(`camoufox`·`electron` 외 값은
-  시작 시 거부). Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` →
-  공유 `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
+- **엔진 선택 (`WB_ENGINE`) 및 이중 등록 권장 구성**: 기본 엔진은 `camoufox`(Firefox 158)입니다.
+  일반 웹·로그인·영구 프로필과 WebHID·WebUSB 장치 작업(`usekb.cc` 등)을 모두 쓰는 MCP 호스트
+  (Claude Code·Codex·Antigravity·DSH PTC)에서는 같은 `bin\bridge.exe --mcp`를 두 등록으로 나누어
+  고정하는 구성을 권장합니다: `win-browser`(`WB_ENGINE=camoufox`)와 `win-browser-hid`(`WB_ENGINE=electron`,
+  별도 `WB_DATA_DIR`). `win-browser-hid`는 연결 권한 모드에서 첫 실제 동작 전까지 Electron GUI
+  프로세스를 띄우지 않고 지연 시작(`companionState: "not-started"`)하므로 평소 메모리를 차지하지
+  않습니다. Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` → 공유
+  `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
 - **Camoufox 제어 툴바**: 웹페이지 DOM에는 아무것도 주입하지 않고, Camoufox 자체 주소창 툴바(`#nav-bar`)
   오른쪽에 다크/라이트 테마와 맞춘 프로필 배지(`default`·`work`·`personal` 등)와 1클릭 네이티브 제어 버튼(**직접 조작 / 에이전트에게 돌려주기 / 모두 반환 /
-  중지 / 권한 상승 · 권한 해제 / 종료**)을 직접 내장합니다. 별도 떠다니는 창 없이 브라우저와 한 몸으로 움직이므로 창
+  중지 / 권한 상승 · 권한 해제 / 연결 종료**)을 직접 내장합니다. **연결 종료**(영문 `Disconnect`)는 이
+  MCP 브라우저 연결의 모든 창을 닫고 연결을 끝내므로(다시 쓰려면 MCP 호스트에서 재연결 필요),
+  창 하나만 닫으려면 일반 브라우저처럼 창 오른쪽 위의 **×** 버튼을 사용하세요(마지막 창을 ×로 닫아도
+  연결은 유지되어 다음 `open` 때 새 창이 열립니다). 별도 떠다니는 창 없이 브라우저와 한 몸으로 움직이므로 창
   이동·크기 조절·DPI 배율 변경 시 지연이나 어긋남이 없으며, 창 높이(`outerHeight - innerHeight`) 변화도
   0px입니다. 상태 동기화와 버튼 클릭은 32바이트 랜덤 토큰으로 보호된 로컬 루프백(`127.0.0.1`) 스트림으로
   즉시 처리됩니다. Camoufox에서는 `window.prompt()`까지 네이티브로 지원하며, `WB_ENGINE=electron`에서는
-  기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따릅니다.
+  기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따르고 첫 최상위 창 열기·`show` 호출 시 포커스를 뺏지
+  않은 채 작업 표시줄 아이콘을 짧게 깜박여 창 위치를 알려 줍니다.
 
 - 새 버전은 옆 폴더에 풀고 정션만 바꿉니다. 실행 중인 폴더는 덮어쓰지 않습니다.
 - 이미 실행 중인 연결은 시작할 때의 버전을 끝까지 쓰고, 다음 연결(새 세션, `/mcp` 재연결,

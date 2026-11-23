@@ -34,10 +34,19 @@ Stop or denial, or replaying an uncertain action.
 ## Prerequisites
 
 The folder plugin and MCP server must already be enabled. Use the current
-schema and its exact `_channel`; the host hook supplies `_lease`. Under a plain
-MCP registration (Claude Code, `mcp__win-browser__browse`) the schema has
-neither and neither is sent; a restarted server is a new browser without the
-earlier tabs. The server instructions carry this guidance there.
+schema and its exact `_channel`; the host hook supplies `_lease`. Under plain
+MCP registrations (Claude Code, Codex, Antigravity, DSH PTC), hosts may expose
+two pinned registrations from the same packaged `bridge.exe --mcp` —
+`win-browser` (`WB_ENGINE=camoufox`, primary interactive browser for sign-in,
+named persistent profiles and `window.prompt()`) and `win-browser-hid`
+(`WB_ENGINE=electron`, hardware browser for physical WebHID/WebUSB workflows
+such as `usekb.cc`, lazily starting Electron on first operational call). Both
+expose `browse` with no `_channel`/`_lease`; pick the hardware registration
+before opening a device workflow, keep every returned handle (`t<n>`, `ctx<n>`,
+`e<n>`) on the registration that returned it, and never switch registrations to
+bypass Stop, denial, cancellation or uncertain input. A restarted server is a
+new browser without the earlier tabs. The server instructions carry engine-tuned
+guidance there.
 Never invent caller identity, run the hook, edit endpoint files or impersonate
 the host.
 Inspect capabilities when a protected interaction is needed. Registration of
@@ -149,15 +158,23 @@ DevTools and page actions still use only `tabId`; do not add `sessionId` to thos
 actions.
 
 Temporary and named persistent sessions stay alive after their last tab closes.
-`close_session {sessionId}` closes that session's tabs and cancels its pending
-downloads; for temporary sessions it clears data/auth/caches/connections, while
-for named persistent sessions (`isDefault:false`) it closes that profile's
-Camoufox process and releases its lock while keeping all on-disk logins intact
-(`storagePreserved:true`). The default cannot be closed this way. Check
-`cleanupComplete`; `SESSION_CLEANUP_FAILED` means cleanup is incomplete and that
-session stays unusable. At most 16 temporary sessions (closed included) and 8
-simultaneous persistent profiles may be held per connection; the 32-tab limit
-applies across all sessions.
+On Camoufox, idle zero-tab non-default named persistent profiles (`isDefault:false`)
+automatically reclaim their Firefox process into `runtimeState:"dormant"` while
+retaining `ctx<n>`, disk logins and the exclusive `.lock`: the next
+`open {sessionId}` wakes a fresh process transparently, while `close_session`
+releases the lock immediately without launching Firefox (contrast with
+`state:"connection-ended"`, which happens only on `revoke` or `#nav-bar`
+**Disconnect / 연결 종료** and requires explicit host reconnection). Closing the
+last window via the top-right **×** keeps the connection alive so the next
+`open` starts a fresh window. `close_session {sessionId}` closes that session's
+tabs and cancels its pending downloads; for temporary sessions it clears
+data/auth/caches/connections, while for named persistent sessions (`isDefault:false`)
+it closes that profile's Camoufox process (if awake) and releases its lock while
+keeping all on-disk logins intact (`storagePreserved:true`). The default cannot
+be closed this way. Check `cleanupComplete`; `SESSION_CLEANUP_FAILED` means
+cleanup is incomplete and that session stays unusable. At most 16 temporary
+sessions (closed included) and 8 simultaneous persistent profiles may be held
+per connection; the 32-tab limit applies across all sessions.
 
 Never use sessions to bypass Stop, denial, cancellation or handoff. Creating or
 opening a temporary session is refused while any owned tab is paused or private;
@@ -363,12 +380,17 @@ closes when control returns.
   before native `window.prompt()` creates a request; report a prompt-dependent app
   under Electron as blocked by that capability, not verified.
 - On Camoufox, human takeover, return, Return all (`resume-all`), Stop, one-way
-  Elevated revert and Revoke live directly inside Firefox's native `#nav-bar`
-  toolbar (`ChromeToolbarClient`, parent chrome only — zero web-content DOM
-  injection, 0px `outerHeight - innerHeight` change, 0ms drag/DPI lag, live
-  token-authenticated `127.0.0.1` SSE sync and action callback, no external
-  floating window), while the isolated-world `__wbTrustedInput` guard still
-  pauses automation on out-of-band trusted input. Under connection authority, the
+  Elevated revert and **Disconnect / 연결 종료** (connection-wide `revoke`,
+  distinct from closing one window via top-right **×**) live directly inside
+  Firefox's native `#nav-bar` toolbar (`ChromeToolbarClient`, parent chrome
+  only — zero web-content DOM injection, 0px `outerHeight - innerHeight` change,
+  0ms drag/DPI lag, live token-authenticated `127.0.0.1` SSE sync and action
+  callback, no external floating window), while the isolated-world
+  `__wbTrustedInput` guard still pauses automation on out-of-band trusted input.
+  Under `WB_ENGINE=electron`, windows open via `showInactive()` with a bounded
+  taskbar highlight on the first top-level open (never stealing keyboard focus),
+  and `show` repeats that taskbar cue and reports the window title/session so
+  the person can switch via taskbar or Alt+Tab. Under connection authority, the
   default Camoufox profile persists inside `WB_DATA_DIR/profiles/camoufox-default`
   (protected by a PID lock, falling back to `ephemeral-busy` when another live
   connection holds it; `status.profilePersistence` reports the live state).
