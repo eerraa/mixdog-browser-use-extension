@@ -83,18 +83,20 @@ blocker, not permission to edit it or operate a human approval surface.
      `dispatched=false`). For password entry, login, CAPTCHA or 2FA, request
      `handoff` on that exact tab and stop automated page work. Do not request,
      log or supply the person's password, PIN, OTP or biometric data.
-   - **Elevated mode (explicit host/policy opt-in only, via `WB_AUTOMATION_MODE=elevated`
-     or `browser-policy.json` `"automationMode": "elevated"`)**: `fill`/`type`/`click`/`observe`
-     on sensitive login, password and OTP fields are allowed without automatic
-     handoff, and stray clicks or keys on the live input shield are ignored while
-     automation runs. Sensitive field values still stay masked in snapshots, diffs,
-     `read`, `find`, DevTools and `run` reports, and `evaluate` / `console(expression)`
-     still refuse with `SENSITIVE_PRESENT` while a sensitive field holds a value.
-     Still request manual `handoff` for CAPTCHA or other human-only verification.
-     The person can immediately downgrade the entire connection back to `standard`
-     (one-way) from the amber toolbar **Elevated · Revert** button or the native
-     menu **Revert connection to standard mode**, or pause with **Stop agent** /
-     **Take control**; never try to bypass a downgrade or pause.
+   - **Elevated mode (explicit out-of-band opt-in only: `WB_AUTOMATION_MODE=elevated`,
+     `browser-policy.json` `"automationMode": "elevated"`, or user-saved
+     `<dataRoot>/user-preferences.json` toggled by a human click in the `#nav-bar`
+     when unpinned)**: `fill`/`type`/`click`/`observe` on sensitive login, password
+     and OTP fields are allowed without automatic handoff, and stray clicks or keys
+     on the live input shield are ignored while automation runs. Sensitive field
+     values still stay masked in snapshots, diffs, `read`, `find`, DevTools and
+     `run` reports, and `evaluate` / `console(expression)` still refuse with
+     `SENSITIVE_PRESENT` while a sensitive field holds a value. Still request manual
+     `handoff` for CAPTCHA or other human-only verification. The person can
+     immediately downgrade the entire connection back to `standard` (latched one-way
+     for this connection) from the amber toolbar **Revert / 권한 해제** button or
+     native menu, or pause with **Stop / 중지** / **Take control / 직접 조작**;
+     never try to bypass a downgrade or pause.
    - **Handoff & return (both modes)**: on `handoff`, the window flashes without
      taking focus; tell the person which window needs them and ask them to finish
      (e.g. submit the login or solve the CAPTCHA) before returning control. Page
@@ -123,29 +125,39 @@ blocker, not permission to edit it or operate a human approval surface.
    owned tabs. Revocation closes every plugin window in this MCP connection,
    so request it only when the user intends that connection-wide effect.
 
-## Browser sessions
+## Browser sessions & persistent profiles
 
-`open {url}` keeps the existing default login/storage. To compare separate accounts,
-use `create_session {name?}` (JSON result: `sessionId:ctx<n>`, name, temporary,
-state), then `open {url, sessionId}`. This selects storage, never caller authority.
-Only use returned ids; sessions belong to this caller and connection. Cookies,
-localStorage, IndexedDB, service workers, Cache Storage, HTTP/auth caches are
-separate; tabs and popups within one session share its login. No storage is copied.
-Login still requires `handoff` and a person, who submits before returning control.
+`open {url}` keeps the existing default login/storage (`camoufox-default` on
+connection-authority Camoufox). To inspect available named persistent profiles
+(`default`, `work`, `personal`, plus any existing custom slugs) and whether
+another live connection holds them, call `list_profiles` (read-only). To reuse
+or create a named persistent Camoufox profile (preserving logins across restarts
+and allowing concurrent threads to hold different profiles without hitting
+`ephemeral-busy`), call `create_session {profile, name?}` (fails `PROFILE_IN_USE`
+if another live process holds it; unsupported on Electron), then `open {url, sessionId}`.
+To compare accounts in a disposable empty context, call `create_session {name?}`
+without `profile`. This selects storage, never caller authority. Only use returned
+ids; sessions belong to this caller and connection. Cookies, localStorage,
+IndexedDB, service workers, Cache Storage, HTTP/auth caches are separate; tabs
+and popups within one session share its login. No storage is copied.
 
-`list_sessions` shows session ids/names and tab counts; `list_tabs` and tab results
-carry `sessionId`/`sessionName`. The window title and toolbar show `name (ctx<n>)`.
-Check these labels when directing the person to an account's window. DevTools and
-page actions still use only `tabId`; do not add `sessionId` to those actions.
+`list_sessions` shows session ids/names/profiles and tab counts; `list_tabs` and
+tab results carry `sessionId`/`sessionName` (plus `profile`/`persistent` on
+`list_tabs`). The window title and `#nav-bar` show the profile pill and session
+label. Check these labels when directing the person to an account's window.
+DevTools and page actions still use only `tabId`; do not add `sessionId` to those
+actions.
 
-Temporary sessions stay alive after their last tab closes. When the task's
-temporary session is no longer needed, `close_session {sessionId}` closes only its
-tabs, cancels its pending downloads and clears its data/auth/caches/connections.
-Completed downloads stay on disk. The default cannot be closed this way. Check
+Temporary and named persistent sessions stay alive after their last tab closes.
+`close_session {sessionId}` closes that session's tabs and cancels its pending
+downloads; for temporary sessions it clears data/auth/caches/connections, while
+for named persistent sessions (`isDefault:false`) it closes that profile's
+Camoufox process and releases its lock while keeping all on-disk logins intact
+(`storagePreserved:true`). The default cannot be closed this way. Check
 `cleanupComplete`; `SESSION_CLEANUP_FAILED` means cleanup is incomplete and that
-session stays unusable. Connection end also clears temporary sessions. At most
-16 can be created per caller over a connection's lifetime, closed ones included;
-the 32-tab limit applies across all its sessions.
+session stays unusable. At most 16 temporary sessions (closed included) and 8
+simultaneous persistent profiles may be held per connection; the 32-tab limit
+applies across all sessions.
 
 Never use sessions to bypass Stop, denial, cancellation or handoff. Creating or
 opening a temporary session is refused while any owned tab is paused or private;

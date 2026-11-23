@@ -8,6 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { CallerAuthority, withoutLease } from '../shared/authority.mjs';
 import { CamoufoxHost } from '../browser/camoufox/host.mjs';
 import { BrowserPolicy } from '../browser/policy.mjs';
+import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, pluginData } from '../shared/paths.mjs';
 
@@ -53,24 +54,31 @@ function terminate(reason) {
 }
 
 async function main() {
-  const policy = await BrowserPolicy.load(root);
-  const configuredAutomationMode = envAutomationMode ?? policy.automationMode;
-  const automationModeSource = envAutomationMode ? 'env' : policy.explicitAutomationMode ? 'policy' : 'default';
+  const [policy, prefs] = await Promise.all([
+    BrowserPolicy.load(root),
+    loadUserPreferences(dataRoot),
+  ]);
+  const resolvedMode = resolveAutomationMode({ envMode: envAutomationMode, policy, prefs });
   const camoufox = camoufoxExecutable(root);
   const headless = process.env.WB_HEADLESS === '1' || process.env.WB_HEADLESS === 'true';
   const persistentPref = process.env.WB_PERSISTENT_PROFILE;
   const usePersistent = persistentPref === '1' || persistentPref === 'true'
     || (authMode === 'connection' && persistentPref !== '0' && persistentPref !== 'false');
-  const persistentProfileDir = usePersistent ? path.join(dataRoot, 'profiles', 'camoufox-default') : null;
+  const profilesRoot = path.join(dataRoot, 'profiles');
 
   host = new CamoufoxHost({
     dataDir: paths.directory,
-    persistentProfileDir,
+    dataRoot,
+    profilesRoot,
+    persistentProfilesEnabled: usePersistent,
+    authorityMode: authMode,
     executablePath: camoufox.executablePath,
     camoufoxVersion: camoufox.version,
     policy,
-    automationMode: configuredAutomationMode,
-    automationModeSource,
+    automationMode: resolvedMode.mode,
+    automationModeSource: resolvedMode.source,
+    automationModePinned: resolvedMode.pinned,
+    automationPreferenceReason: resolvedMode.preferenceReason,
     headless,
     onRevokeConnection: () => terminate('permission-revocation'),
   });

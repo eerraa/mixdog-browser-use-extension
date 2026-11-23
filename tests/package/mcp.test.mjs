@@ -407,6 +407,12 @@ test('packaged WB_ENGINE=electron fallback: preserves Electron 44.9.1 runtime, n
   assert.equal(unsupported.isError, false, textOf(unsupported));
   await until(() => page.state.nativeResults.includes('prompt() is not supported.'), 'actual unsupported native prompt');
   assert.equal(dataOf(await connection.call(owner, { action: 'requests', tabId })).pending.length, 0);
+  // Electron explicitly reports named persistent profiles unsupported and refuses binding one
+  const lp = dataOf(await connection.call(owner, { action: 'list_profiles' }));
+  assert.equal(lp.supported, false);
+  const badBind = await connection.call(owner, { action: 'create_session', profile: 'work' });
+  assert.equal(badBind.isError, true);
+  assert.equal(dataOf(badBind).code, 'UNSUPPORTED_ENGINE_FEATURE');
 });
 
 test('packaged browser clicks nested frames exactly once; a renamed shadow control retires its ref, an unrelated new root does not', { timeout: 60000 }, async t => {
@@ -933,4 +939,87 @@ test('packaged connection authority: Camoufox persists default profile across cl
   });
   assert.equal(read2.isError, false, textOf(read2));
   assert.deepEqual(valueOf(read2), { cookie: 'persistToken=kept-v061', local: 'kept-v061' });
+});
+
+test('packaged connection authority: named persistent profiles run concurrently without ephemeral-busy, preserve logins across close/restart, and honor WB_DATA_DIR user-preferences.json with env ceiling', { timeout: 120000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const page = await fixture(t);
+
+  // 1. Pre-seed saved elevated user preference in WB_DATA_DIR/user-preferences.json
+  await writeFile(path.join(context.directory, 'user-preferences.json'), JSON.stringify({ version: 1, automationMode: 'elevated' }), 'utf8');
+
+  // Connection A starts elevated from user-preferences.json, lists default profiles, opens default AND binds work
+  const connA = await plainClient(t, context);
+  const stA = dataOf(await connA.call({ action: 'status' }));
+  assert.equal(stA.automationMode, 'elevated');
+  assert.equal(stA.capabilities.automation.source, 'user-preference');
+  assert.equal(stA.capabilities.sessions.namedPersistentProfiles, true);
+
+  const profiles0 = dataOf(await connA.call({ action: 'list_profiles' }));
+  assert.equal(profiles0.supported, true);
+  assert.deepEqual(profiles0.profiles.map(p => p.profile), ['default', 'work', 'personal']);
+  assert.ok(profiles0.profiles.every(p => p.state === 'available'));
+
+  const openDef = await connA.call({ action: 'open', url: page.url + 'sessions/def' });
+  assert.equal(openDef.isError, false, textOf(openDef));
+  await connA.call({
+    action: 'evaluate', tabId: tabOf(openDef), world: 'page',
+    expression: 'document.cookie="acct=default-v064; Path=/; Max-Age=3600"; localStorage.setItem("who","default"); "ok"',
+  });
+
+  // 2. Concurrent Connection B binds named persistent profile "work" on the SAME WB_DATA_DIR without falling back to ephemeral-busy!
+  // Also pin WB_AUTOMATION_MODE=standard on Connection B to verify env hard ceiling overrides saved elevated preference.
+  const ctxB = { ...context, env: { ...context.env, WB_AUTOMATION_MODE: 'standard' } };
+  const connB = await plainClient(t, ctxB);
+  const stB = dataOf(await connB.call({ action: 'status' }));
+  assert.equal(stB.automationMode, 'standard', 'explicit WB_AUTOMATION_MODE=standard must override saved elevated user-preferences.json');
+  assert.equal(stB.capabilities.automation.source, 'env');
+  assert.equal(stB.capabilities.automation.pinned, true);
+
+  const profB = dataOf(await connB.call({ action: 'list_profiles' }));
+  assert.equal(profB.profiles.find(p => p.profile === 'default').state, 'in-use-other');
+  assert.equal(profB.profiles.find(p => p.profile === 'work').state, 'available');
+
+  const workSes = dataOf(await connB.call({ action: 'create_session', profile: 'work', name: 'Work Account' }));
+  assert.equal(workSes.profile, 'work');
+  assert.equal(workSes.persistent, true);
+  assert.equal(workSes.temporary, false);
+
+  // Connection A trying to bind "work" while Connection B holds it fails PROFILE_IN_USE
+  const conflictA = await connA.call({ action: 'create_session', profile: 'work' });
+  assert.equal(conflictA.isError, true);
+  assert.equal(dataOf(conflictA).code, 'PROFILE_IN_USE');
+
+  const openWork = await connB.call({ action: 'open', sessionId: workSes.sessionId, url: page.url + 'sessions/work' });
+  assert.equal(openWork.isError, false, textOf(openWork));
+  await connB.call({
+    action: 'evaluate', tabId: tabOf(openWork), world: 'page',
+    expression: 'document.cookie="acct=work-v064; Path=/; Max-Age=3600"; localStorage.setItem("who","work"); "ok"',
+  });
+
+  // Close work session via close_session -> closes Camoufox process, releases lock, preserves disk storage!
+  const closedWork = dataOf(await connB.call({ action: 'close_session', sessionId: workSes.sessionId }));
+  assert.equal(closedWork.cleanupComplete, true);
+  assert.equal(closedWork.storagePreserved, true);
+  await until(async () => {
+    try { await stat(path.join(context.directory, 'profiles', 'camoufox-work.lock')); return false; }
+    catch (err) { return err?.code === 'ENOENT'; }
+  }, 'camoufox-work.lock released on close_session');
+
+  // Connection A now binds "work" cleanly and reads back the saved work login while keeping default isolated!
+  const workA = dataOf(await connA.call({ action: 'create_session', profile: 'work' }));
+  assert.equal(workA.persistent, true);
+  const openWorkA = await connA.call({ action: 'open', sessionId: workA.sessionId, url: page.url + 'sessions/work' });
+  assert.equal(openWorkA.isError, false, textOf(openWorkA));
+  const readWorkA = await connA.call({
+    action: 'evaluate', tabId: tabOf(openWorkA),
+    expression: '({ cookie: document.cookie, local: localStorage.getItem("who") })',
+  });
+  assert.deepEqual(valueOf(readWorkA), { cookie: 'acct=work-v064', local: 'work' });
+
+  const readDefA = await connA.call({
+    action: 'evaluate', tabId: tabOf(openDef),
+    expression: '({ cookie: document.cookie, local: localStorage.getItem("who") })',
+  });
+  assert.deepEqual(valueOf(readDefA), { cookie: 'acct=default-v064', local: 'default' });
 });

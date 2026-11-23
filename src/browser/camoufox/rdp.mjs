@@ -341,8 +341,16 @@ export class FirefoxRdpClient extends EventEmitter {
     try {
       const { tabs = [] } = await this.#transport.request('root', 'listTabs');
       const taken = new Set([...this.#watchers.values()].map(w => w.tabActor));
-      const tab = (matchTab ? tabs.find(t => !taken.has(t.actor) && matchTab(t)) : null)
-        ?? tabs.find(t => !taken.has(t.actor));
+      const available = tabs.filter(t => !taken.has(t.actor));
+      let tab = null;
+      if (matchTab) {
+        const matches = available.filter(t => matchTab(t));
+        if (matches.length === 1) tab = matches[0];
+        else if (matches.length > 1) tab = matches.at(-1);
+        else if (available.length === 1) tab = available[0];
+      } else if (available.length === 1) {
+        tab = available[0];
+      }
       if (!tab) return false;
       const watcherRes = await this.#transport.request(tab.actor, 'getWatcher', {
         isServerTargetSwitchingEnabled: true, isPopupDebuggingEnabled: true,

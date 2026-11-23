@@ -24,7 +24,8 @@ test('every public action has a bounded explicit accepted argument shape', () =>
     { action: 'open', url: 'http://127.0.0.1:9000', screenshot: true, snapshot: 'none' },
     { action: 'open', url: 'http://127.0.0.1:9000', sessionId: 'ctx2' },
     { action: 'create_session' }, { action: 'create_session', name: 'Reference account' },
-    { action: 'list_sessions' }, { action: 'close_session', sessionId: 'ctx2' },
+    { action: 'create_session', profile: 'work' }, { action: 'create_session', profile: 'work_2', name: 'Work Account' },
+    { action: 'list_sessions' }, { action: 'close_session', sessionId: 'ctx2' }, { action: 'list_profiles' },
     { action: 'navigate', tabId: 't1', url: 'https://example.invalid', snapshot: 'full' },
     ...['observe', 'close_tab', 'hide', 'show', 'downloads', 'handoff', 'permissions', 'requests'].map(action => ({ action, tabId: 't1' })),
     { action: 'observe', tabId: 't1', mode: 'full', depth: 3, screenshot: true },
@@ -68,6 +69,11 @@ test('every public action has a bounded explicit accepted argument shape', () =>
     { action: 'create_session', sessionId: 'ctx2' }, { action: 'create_session', name: '   ' },
     { action: 'create_session', name: 'x'.repeat(81) }, { action: 'create_session', name: 'x\nforged' },
     { action: 'create_session', name: 'x\u202e' }, { action: 'create_session', name: 2 },
+    { action: 'create_session', profile: '' }, { action: 'create_session', profile: 'Work' },
+    { action: 'create_session', profile: '../escape' }, { action: 'create_session', profile: '-leading' },
+    { action: 'create_session', profile: 'a'.repeat(41) }, { action: 'create_session', profile: 42 },
+    { action: 'open', url: 'https://example.invalid', profile: 'work' },
+    { action: 'list_profiles', tabId: 't1' },
     { action: 'close_session' }, { action: 'close_session', sessionId: 2 },
     { action: 'list_sessions', tabId: 't1' }, { action: 'observe', tabId: 't1', sessionId: 'ctx2' },
     { action: 'click', tabId: 't', ref: 'r' }, { action: 'click', tabId: 't', ref: 'e0' },
@@ -160,7 +166,7 @@ test('text results carry the status line and isError follows the disposition; JS
   assert.equal(toolResult({ action: 'click', disposition: 'uncertain', tabId: 't1', replaySafe: false }, 'click').isError, true);
   const image = toolResult({ action: 'observe', disposition: 'observed', tabId: 't1', screenshot: { mimeType: 'image/png', data: 'AAAA' } }, 'observe');
   assert.deepEqual(image.content[1], { type: 'image', mimeType: 'image/png', data: 'AAAA' });
-  for (const action of ['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'requests', 'permissions', 'console', 'network', 'inspect', 'performance']) {
+  for (const action of ['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'list_profiles', 'requests', 'permissions', 'console', 'network', 'inspect', 'performance']) {
     const result = toolResult({ tabId: 't1', rows: [] }, action);
     assert.deepEqual(JSON.parse(result.content[0].text), { tabId: 't1', rows: [] }, action);
     assert.equal(result.isError, false);

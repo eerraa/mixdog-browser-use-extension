@@ -62,6 +62,10 @@ export function defaultCamouPrefs({ enableRdp = true, hardenedRunner = false } =
     'devtools.debugger.force-local': true,
     'devtools.chrome.enabled': Boolean(enableRdp),
     'focusmanager.testmode': true,
+    // Block unsolicited persistent-storage doorhangers by default (SitePermissions
+    // DENY_ACTION = 2); explicit per-origin user decisions and normal cookies /
+    // localStorage / IndexedDB persistence remain intact.
+    'permissions.default.persistent-storage': 2,
   };
   if (hardenedRunner) {
     Object.assign(prefs, {
@@ -225,6 +229,8 @@ export class CamoufoxProcess extends EventEmitter {
     const env = {
       ...this.env,
       MOZ_NO_REMOTE: '1',
+      // Prevent Windows Shift key held in another app at launch from opening Safe Mode.
+      MOZ_DISABLE_SAFE_MODE_KEY: '1',
       ...(Object.keys(config).length ? chunkCamouEnv('CAMOU_CONFIG', config) : {}),
       ...chunkCamouEnv('CAMOU_PREFS', prefs),
     };
@@ -239,7 +245,10 @@ export class CamoufoxProcess extends EventEmitter {
 
     let stdout = '', stderr = '';
     const exit = new Promise(resolve => {
-      child.once('exit', (code, signal) => resolve({ code, signal }));
+      let settled = false;
+      const done = info => { if (!settled) { settled = true; resolve(info); } };
+      child.once('exit', (code, signal) => done({ code, signal }));
+      child.once('error', error => done({ code: null, signal: null, error: error?.message }));
     });
     this.#exited = exit;
 

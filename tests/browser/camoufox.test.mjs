@@ -7,8 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
-import { CamoufoxPresentation, ChromeToolbarClient } from '../../src/browser/camoufox/presentation.mjs';
+import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost } from '../../src/browser/camoufox/host.mjs';
+import { acquireProfileLock, releaseProfileLock } from '../../src/browser/camoufox/profile-lock.mjs';
+import { loadUserPreferences } from '../../src/shared/preferences.mjs';
 import { DevToolsRecorder, PrivacyWindows, responseBody } from '../../src/browser/devtools.mjs';
 
 function makeCaller(sessionId = 'caller-1') {
@@ -62,9 +64,15 @@ test('chunkCamouEnv and defaultCamouConfig/Prefs shape Camoufox environment clea
   const cfg = defaultCamouConfig({ version: '158.0.1-beta.41', locale: 'ko-KR' });
   assert.match(cfg['navigator.userAgent'], /Firefox\/158\.0$/);
   assert.equal(cfg['navigator.userAgent'], cfg['headers.User-Agent']);
+  const defaultPrefs = defaultCamouPrefs({ enableRdp: true });
+  assert.equal(defaultPrefs['permissions.default.persistent-storage'], 2);
   const runnerPrefs = defaultCamouPrefs({ enableRdp: true, hardenedRunner: true });
   assert.equal(runnerPrefs['media.peerconnection.enabled'], false);
   assert.equal(runnerPrefs['devtools.debugger.remote-enabled'], false);
+  assert.equal(formatPausedStatus('ko-KR', 'unexpected-page-input'), '직접 입력 감지');
+  assert.equal(formatPausedStatus('ko-KR', 'explicit-stop'), '사용자 중지');
+  assert.equal(formatPausedStatus('en-US', 'unexpected-page-input'), 'Paused: Direct input');
+  assert.equal(formatPausedStatus('ko-KR', 'unknown-internal-code'), '일시정지됨');
 });
 
 test('FirefoxRdpTransport frames length-prefixed UTF-8 packets, matches replies, and emits unsolicited resources', async () => {
@@ -362,13 +370,20 @@ test('CamoufoxHost with mock Juggler+RDP enforces standard vs elevated mode, one
           if (expr.includes('disarmGuard')) return { result: { value: { guard: { fired: true, inside: true } } } };
           if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
           if (expr.includes('privatize(')) return { result: { value: { marked: 0 } } };
-          if (expr.includes('resolve(')) return { result: { objectId: 'obj-1' } };
+          if (expr.includes('resolve(')) return { result: { objectId: expr.includes('(2,') ? 'obj-file' : 'obj-1' } };
           return { result: { value: 0 } };
         }
         if (method === 'Runtime.callFunction') {
           const fn = String(params.functionDeclaration ?? '');
           if (fn.includes('sensitive(this)')) {
-            return { result: { value: { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'password', multiple: false, editable: false, sensitive: true } } };
+            const isFile = params.args?.[0]?.objectId === 'obj-file';
+            return {
+              result: {
+                value: isFile
+                  ? { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'file', multiple: false, editable: false, sensitive: false }
+                  : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'password', multiple: false, editable: false, sensitive: true },
+              },
+            };
           }
           if (fn.includes('activeElement')) return { result: { value: true } };
           return { result: { value: null } };
@@ -643,4 +658,334 @@ test('ChromeToolbarClient mounts once via chromeEval, streams state/flash over a
 
   bar.close();
   assert.ok(evals.some(s => s.includes('__wbNavToolbar?.destroy()')));
+});
+
+test('CamoufoxHost named persistent profiles isolate colliding Juggler IDs, enforce PROFILE_IN_USE, coalesce binds, preserve disk storage on close_session, and guard stale-lock recovery', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-multi-'));
+  try {
+    const profilesRoot = path.join(root, 'profiles');
+    const makeCollidingProc = tag => {
+      const p = new EventEmitter();
+      p.closed = false;
+      p.rdpPort = 0;
+      p.pid = 51000 + Math.floor(Math.random() * 1000);
+      p.tag = tag;
+      p.sent = [];
+      p.contexts = new Set();
+      p.start = async () => p;
+      p.send = async (method, params = {}, sessionId) => {
+        p.sent.push({ method, params, sessionId });
+        if (method === 'Browser.createBrowserContext') {
+          const id = `bc-${p.contexts.size + 1}`;
+          p.contexts.add(id);
+          return { browserContextId: id };
+        }
+        if (method === 'Browser.newPage') {
+          // Deliberately collide Juggler sessionId & targetId across distinct processes!
+          const sid = 'sess-colliding-1';
+          const tid = 'tgt-colliding-1';
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: `https://${tag}.test/`, title: `Page ${tag}`, scrollHeight: 800,
+                  checkpoint: { documentId: `doc-${tag}`, revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [{ id: 1, k: 'i', r: 'button', n: `marker:${tag}`, v: '', s: [], b: [10, 10, 120, 30], vp: true, o: 1 }],
+                  texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.close = async () => { p.closed = true; };
+      return p;
+    };
+
+    const procs = new Map();
+    const hostA = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-a'),
+      dataRoot: root,
+      profilesRoot,
+      persistentProfilesEnabled: true,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      onRevokeConnection: () => {},
+      createProcess: ({ profileSlug }) => {
+        const proc = makeCollidingProc(profileSlug || 'ephemeral');
+        procs.set(profileSlug || 'ephemeral', proc);
+        return proc;
+      },
+    });
+    const caller = makeCaller('u-multi');
+
+    // list_profiles is strictly read-only: lists default/work/personal without creating dirs or locks
+    const listed0 = await hostA.execute({ action: 'list_profiles' }, caller);
+    assert.equal(listed0.supported, true);
+    assert.deepEqual(listed0.profiles.map(p => p.profile), ['default', 'work', 'personal']);
+    assert.ok(listed0.profiles.every(p => p.state === 'available' && p.existsOnDisk === false));
+    assert.equal(existsSync(profilesRoot), false, 'list_profiles must not create profiles directory');
+
+    // Coalesce concurrent binds for the same profile slug into one session handle
+    const [w1, w2] = await Promise.all([
+      hostA.execute({ action: 'create_session', profile: 'work', name: 'Work' }, caller),
+      hostA.execute({ action: 'create_session', profile: 'work', name: 'Work' }, caller),
+    ]);
+    assert.equal(w1.sessionId, w2.sessionId);
+    assert.equal(w1.profile, 'work');
+    assert.equal(w1.persistent, true);
+    assert.equal(w1.temporary, false);
+
+    // Concurrently open tabs in default AND work with deliberately colliding Juggler sessionId/targetId
+    const [openDefault, openWork] = await Promise.all([
+      hostA.execute({ action: 'open', url: 'https://default.test/' }, caller),
+      hostA.execute({ action: 'open', url: 'https://work.test/', sessionId: w1.sessionId }, caller),
+    ]);
+    assert.match(openDefault.text, /Page default/);
+    assert.match(openWork.text, /Page work/);
+    assert.notEqual(openDefault.tabId, openWork.tabId);
+
+    const tabs = (await hostA.execute({ action: 'list_tabs' }, caller)).tabs;
+    assert.equal(tabs.find(t => t.tabId === openDefault.tabId).profile, 'default');
+    assert.equal(tabs.find(t => t.tabId === openWork.tabId).profile, 'work');
+
+    // Second live host gets PROFILE_IN_USE for work, while personal remains available
+    const hostB = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-b'),
+      dataRoot: root,
+      profilesRoot,
+      persistentProfilesEnabled: true,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      onRevokeConnection: () => {},
+      createProcess: ({ profileSlug }) => makeCollidingProc(`b-${profileSlug || 'eph'}`),
+    });
+    const listB = await hostB.execute({ action: 'list_profiles' }, caller);
+    assert.equal(listB.profiles.find(p => p.profile === 'work').state, 'in-use-other');
+    assert.equal(listB.profiles.find(p => p.profile === 'personal').state, 'available');
+    await assert.rejects(
+      hostB.execute({ action: 'create_session', profile: 'work' }, caller),
+      err => err.code === 'PROFILE_IN_USE' && err.requestedInputDispatched === false,
+    );
+
+    // Closing work session closes its process, releases lock after exit, preserves disk dir, and frees it for hostB
+    const closedWork = await hostA.execute({ action: 'close_session', sessionId: w1.sessionId }, caller);
+    assert.equal(closedWork.cleanupComplete, true);
+    assert.equal(closedWork.storagePreserved, true);
+    assert.equal(procs.get('work').closed, true);
+    assert.equal(existsSync(path.join(profilesRoot, 'camoufox-work.lock')), false);
+    assert.equal(existsSync(path.join(profilesRoot, 'camoufox-work')), true, 'on-disk persistent profile survives close_session');
+    assert.equal(procs.get('default').closed, false, 'default runtime stays open');
+
+    const reboundB = await hostB.execute({ action: 'create_session', profile: 'work' }, caller);
+    assert.equal(reboundB.profile, 'work');
+    assert.equal(reboundB.persistent, true);
+
+    await hostB.close();
+    await hostA.close();
+
+    // Two simultaneous contenders recovering ONE stale dead-PID lock: exactly one wins, loser never unlinks winner
+    const staleLock = path.join(profilesRoot, 'camoufox-race.lock');
+    writeFileSync(staleLock, JSON.stringify({ pid: 999999, token: 'dead-token', acquiredAt: 1 }), 'utf8');
+    const [r1, r2] = await Promise.all([
+      acquireProfileLock(profilesRoot, 'race', { connectionId: 'c1' }),
+      acquireProfileLock(profilesRoot, 'race', { connectionId: 'c2' }),
+    ]);
+    const winners = [r1, r2].filter(r => r.ok);
+    const losers = [r1, r2].filter(r => !r.ok);
+    assert.equal(winners.length, 1, 'exactly one contender may reclaim a stale lock');
+    assert.equal(losers.length, 1);
+    assert.equal(losers[0].reason, 'busy');
+    assert.equal(existsSync(staleLock), true, 'winner lock must still exist');
+    // Releasing with a forged token must NOT unlink the winner's lock
+    assert.equal(await releaseProfileLock({ lockPath: staleLock, token: 'wrong-token' }), false);
+    assert.equal(existsSync(staleLock), true);
+    assert.equal(await releaseProfileLock(winners[0]), true);
+    assert.equal(existsSync(staleLock), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CamoufoxHost persisted #nav-bar elevation toggle, pinned-standard ceiling, in-flight Revert race guard, and internal upload block', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-pref-'));
+  try {
+    let onFocusBeforeInsert = null;
+    const makeProc = () => {
+      const p = new EventEmitter();
+      p.closed = false;
+      p.rdpPort = 0;
+      p.pid = 61001;
+      p.inserted = [];
+      p.start = async () => p;
+      p.send = async (method, params = {}, sessionId) => {
+        if (method === 'Browser.newPage') {
+          const sid = 's-1', tid = 't-1';
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Page.insertText') {
+          p.inserted.push(params.text);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: 'https://login.test/', title: 'Login', scrollHeight: 800,
+                  checkpoint: { documentId: 'd1', revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [
+                    { id: 1, k: 'i', r: 'textbox', n: 'Password', v: '', s: [], b: [10, 10, 200, 30], vp: true, o: 1, x: 1 },
+                    { id: 2, k: 'i', r: 'button', n: 'File', v: '', s: [], b: [10, 50, 100, 30], vp: true, o: 2 },
+                  ],
+                  texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('describe(')) {
+            const isFile = expr.includes('describe(2)');
+            return { result: { value: { described: isFile ? { role: 'button', name: 'File' } : { role: 'textbox', name: 'Password' } } } };
+          }
+          if (expr.includes('inView(')) return { result: { value: { view: { inView: true, proxied: false } } } };
+          if (expr.includes('getBoundingClientRect') || expr.includes('targetPoint')) return { result: { value: { x: 40, y: 25 } } };
+          if (expr.includes('armGuard')) return { result: { value: { armed: true } } };
+          if (expr.includes('disarmGuard')) return { result: { value: { guard: { fired: true, inside: true } } } };
+          if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+          if (expr.includes('resolve(')) return { result: { objectId: expr.includes('resolve(2)') ? 'obj-file' : 'obj-1' } };
+          return { result: { value: 0 } };
+        }
+        if (method === 'Runtime.callFunction') {
+          const fn = String(params.functionDeclaration ?? '');
+          if (fn.includes('sensitive(this)')) {
+            const isFile = params.args?.[0]?.objectId === 'obj-file';
+            return {
+              result: {
+                value: isFile
+                  ? { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'file', multiple: false, editable: false, sensitive: false }
+                  : { connected: true, disabled: false, readOnly: false, tag: 'INPUT', type: 'password', multiple: false, editable: false, sensitive: true },
+              },
+            };
+          }
+          if (fn.includes('activeElement')) {
+            if (onFocusBeforeInsert) { const cb = onFocusBeforeInsert; onFocusBeforeInsert = null; cb(); }
+            return { result: { value: true } };
+          }
+          return { result: { value: null } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.close = async () => { p.closed = true; };
+      return p;
+    };
+
+    const proc = makeProc();
+    const host = new CamoufoxHost({
+      dataDir: path.join(root, 'connections', 'c1'),
+      dataRoot: root,
+      profilesRoot: path.join(root, 'profiles'),
+      persistentProfilesEnabled: true,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      automationMode: 'standard',
+      automationModeSource: 'default',
+      automationModePinned: false,
+      createProcess: () => proc,
+      onRevokeConnection: () => {},
+    });
+    const caller = makeCaller('u-pref');
+    const st0 = await host.execute({ action: 'status' }, caller);
+    assert.equal(st0.automationMode, 'standard');
+    assert.equal(st0.capabilities.automation.canElevate, true);
+
+    // Human clicks [권한 상승] in #nav-bar → saves user-preferences.json and elevates host
+    const okElev = await host.triggerControlBarAction('set-automation-mode', null, 'elevated');
+    assert.equal(okElev, true);
+    assert.equal((await host.execute({ action: 'status' }, caller)).automationMode, 'elevated');
+    assert.equal((await loadUserPreferences(root)).automationMode, 'elevated');
+
+    const opened = await host.execute({ action: 'open', url: 'https://login.test/' }, caller);
+    // Revert arriving mid-flight right before Page.insertText must refuse SENSITIVE_INPUT_REFUSED with 0 chars sent!
+    let revertDone = null;
+    onFocusBeforeInsert = () => { revertDone = host.triggerControlBarAction('revert-standard'); };
+    await assert.rejects(
+      host.execute({ action: 'type', tabId: opened.tabId, ref: 'e1', text: 'MIDFLIGHT_SECRET' }, caller),
+      err => err.code === 'SENSITIVE_INPUT_REFUSED' && err.requestedInputDispatched === false,
+    );
+    assert.deepEqual(proc.inserted, [], 'zero characters may reach Page.insertText after mid-flight Revert');
+    assert.equal((await host.execute({ action: 'status' }, caller)).automationMode, 'standard');
+    assert.equal((await host.execute({ action: 'status' }, caller)).capabilities.automation.canElevate, false, 'one-way emergency Revert stays latched on this connection');
+    assert.equal(await host.triggerControlBarAction('set-automation-mode', null, 'elevated'), false);
+    assert.equal(await revertDone, true);
+    assert.equal((await loadUserPreferences(root)).automationMode, 'standard');
+
+    // Uploading internal user-preferences.json must be refused before file disclosure
+    await assert.rejects(
+      host.execute({ action: 'upload', tabId: opened.tabId, ref: 'e2', files: [path.join(root, 'user-preferences.json')] }, caller),
+      err => err.code === 'INVALID_UPLOAD_FILE' && err.requestedInputDispatched === false,
+    );
+    await host.close();
+
+    // Pinned-standard host cannot be elevated even via #nav-bar action
+    const pinned = new CamoufoxHost({
+      dataDir: path.join(root, 'connections', 'c2'),
+      dataRoot: root,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      automationMode: 'standard',
+      automationModeSource: 'env',
+      automationModePinned: true,
+      createProcess: () => makeProc(),
+      onRevokeConnection: () => {},
+    });
+    assert.equal((await pinned.execute({ action: 'status' }, caller)).capabilities.automation.canElevate, false);
+    assert.equal(await pinned.triggerControlBarAction('set-automation-mode', null, 'elevated'), false);
+    await pinned.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

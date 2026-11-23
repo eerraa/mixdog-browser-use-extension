@@ -11,7 +11,7 @@ Read order for a task: this file (Edit table) → the `change-map.md` steps → 
 | Key | Value |
 | --- | --- |
 | Product | Independent Windows Browser (`win-browser`): one packaged folder, registered as a Mixdog folder plugin or as a plain MCP stdio server in Claude Code (`claude mcp add`), Codex or DSH, at one stable install path (`build-release.md` Local install) |
-| Agent surface | MCP tool `browse` (32 actions, including isolated browser sessions, DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs). Mixdog: `mcp__plugin-win-browser__browse`, skill `independent-browser`, host hooks (auth and lifecycle only). Claude Code: `mcp__win-browser__browse` under connection authority, server instructions instead of the skill, no hooks |
+| Agent surface | MCP tool `browse` (33 actions, including isolated browser sessions, named persistent Camoufox profiles, DevTools reads and the sandboxed script runner `run`; text page results with persistent `e<n>` refs and diffs). Mixdog: `mcp__plugin-win-browser__browse`, skill `independent-browser`, host hooks (auth and lifecycle only). Claude Code: `mcp__win-browser__browse` under connection authority, server instructions instead of the skill, no hooks |
 | Runtime | Default Camoufox 158.0.1-beta.41 (patched Firefox 158, pure-Node Juggler pipe + local Firefox RDP + native Firefox `#nav-bar` Agent Control toolbar); Electron 44.9.1 stays bundled as the Node runtime (`ELECTRON_RUN_AS_NODE=1`) and explicit fallback engine (`WB_ENGINE=electron` or `browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |

@@ -25,6 +25,7 @@ import { createRunnerSandbox } from './runner/sandbox.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
 } from '../shared/contract.mjs';
+import { isProtectedInternalPath } from '../shared/preferences.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
@@ -62,15 +63,19 @@ export class BrowserHost {
   #automationMode = 'standard';
   #configuredAutomationMode = 'standard';
   #automationModeSource = 'default';
+  #automationModePinned = false;
+  #automationPreferenceReason = null;
   // Connection-wide refs (D14), result signals and short ids.
   #refs = new RefRegistry();
   #signals = new SignalQueue();
   #tabSequence = 0;
   #snapshotSequence = 0;
 
-  constructor({ dataDir, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
+  constructor({ dataDir, dataRoot = null, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
     automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
+    automationModePinned = undefined,
+    automationPreferenceReason = null,
     runnerPreloadPath, createRunnerSandbox: sandboxFactory = createRunnerSandbox }) {
     if (![dataDir, consentHelperPath, toolbarPreloadPath].every(value => typeof value === 'string' && path.isAbsolute(value))
       || (runnerPreloadPath !== undefined && !(typeof runnerPreloadPath === 'string' && path.isAbsolute(runnerPreloadPath)))
@@ -81,6 +86,7 @@ export class BrowserHost {
       throw new TypeError('automationMode must be standard or elevated');
     }
     this.dataDir = dataDir;
+    this.dataRoot = typeof dataRoot === 'string' && path.isAbsolute(dataRoot) ? path.resolve(dataRoot) : null;
     this.toolbarPreloadPath = toolbarPreloadPath;
     this.runnerPreloadPath = runnerPreloadPath;
     this.createRunnerSandbox = sandboxFactory;
@@ -90,6 +96,8 @@ export class BrowserHost {
     this.#automationMode = automationMode;
     this.#configuredAutomationMode = automationMode;
     this.#automationModeSource = automationModeSource;
+    this.#automationModePinned = automationModePinned ?? ['env', 'policy', 'policy-invalid'].includes(automationModeSource);
+    this.#automationPreferenceReason = automationPreferenceReason;
     this.nativeRequests = new BrowserRequests();
     this.permissions = new BrowserPermissions({
       connectionId: this.connectionId, consentHelperPath, policy, nativeRequests: this.nativeRequests,
@@ -117,6 +125,8 @@ export class BrowserHost {
           mode: this.#automationMode,
           configuredMode: this.#configuredAutomationMode,
           source: this.#automationModeSource,
+          pinned: this.#automationModePinned,
+          ...(this.#automationPreferenceReason ? { preferenceReason: this.#automationPreferenceReason } : {}),
           scope: elevated
             ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted without shield auto-handoff'
             : 'standard safety boundary: shield click/key triggers handoff; human handles sign-in and secrets',
@@ -127,7 +137,7 @@ export class BrowserHost {
           manualHandoffRequiredFor: ['OS identity', 'CAPTCHA', 'human verification'],
           revocableByUser: true,
         },
-        sessions: { temporary: true, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
+        sessions: { temporary: true, namedPersistentProfiles: false, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
         nativeRequests: ['javascript-dialog', 'file-picker', 'hid', 'usb', 'notifications', 'geolocation'],
         javascriptDialogs: {
           supported: ['alert', 'confirm'],
@@ -556,6 +566,9 @@ export class BrowserHost {
       let resolved, info;
       try { resolved = await realpath(file); } catch { refuse(); }
       if (!local(resolved)) refuse();
+      if (isProtectedInternalPath(resolved, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir })) {
+        fail('INVALID_UPLOAD_FILE', 'Uploading internal browser profile, preference, or connection control files is refused');
+      }
       try { info = await stat(resolved); } catch { refuse(); }
       if (!info.isFile()) refuse();
       real.push(resolved);
@@ -918,7 +931,18 @@ export class BrowserHost {
     const signal = requestSignal ? AbortSignal.any([caller.signal, requestSignal]) : caller.signal;
     if (args.action === 'status') return this.status();
     if (args.action === 'revoke') return this.#revoke();
+    if (args.action === 'list_profiles') {
+      return {
+        supported: false,
+        engine: 'electron',
+        reason: 'Named persistent profiles require the default Camoufox engine; Electron supports only temporary sessions',
+        profiles: [],
+      };
+    }
     if (args.action === 'create_session') {
+      if (args.profile !== undefined) {
+        fail('UNSUPPORTED_ENGINE_FEATURE', 'Named persistent profiles require the Camoufox engine; Electron cannot bind a persistent profile');
+      }
       this.#assertSessionCreation(caller, signal);
       await this.#profile(caller.sessionId);
       this.#assertSessionCreation(caller, signal);
@@ -1898,7 +1922,7 @@ export class BrowserHost {
         const insert = async () => {
           assertSensitiveInputAllowed();
           await ensureEditable();
-          const outcome = await guarded('beforeinput', () => dispatch('Input.insertText', { text: args.text }));
+          const outcome = await guarded('beforeinput', () => dispatch('Input.insertText', { text: args.text }, undefined, assertSensitiveInputAllowed));
           if (missed(outcome)) state.code = 'TARGET_MISMATCH';
         };
         if (args.action === 'fill') {

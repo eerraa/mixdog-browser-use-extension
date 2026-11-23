@@ -1,9 +1,10 @@
 // Camoufox presentation and native Firefox #nav-bar Agent Control toolbar.
 // Preserves the exact handoff state machine (`automation | draining |
 // native-handoff | returning`, generation counter, fail-closed transitions,
-// human-only return/resume, one-way elevated downgrade) inside Firefox's
-// trusted parent chrome `#nav-bar` (0px height delta on outerHeight-innerHeight,
-// zero DOM injected into web content, zero external floating window).
+// human-only return/resume, emergency Revert, and trusted human elevation
+// toggle) inside Firefox's trusted parent chrome `#nav-bar` (0px height delta
+// on outerHeight-innerHeight, zero DOM injected into web content, zero
+// external floating window).
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
@@ -38,37 +39,78 @@ const STRINGS = {
   },
 };
 
+const PAUSE_REASONS = {
+  en: {
+    'unexpected-page-input': 'Direct input',
+    'explicit-stop': 'Stopped',
+    'human-handoff': 'Manual control',
+    'inherited-native-handoff': 'Control inherited',
+    'presentation-lost': 'Window closed',
+    'permission-revocation': 'Revoking',
+    'return-failed': 'Return failed',
+  },
+  ko: {
+    'unexpected-page-input': '직접 입력 감지',
+    'explicit-stop': '사용자 중지',
+    'human-handoff': '직접 조작',
+    'inherited-native-handoff': '직접 조작 상속',
+    'presentation-lost': '창 연결 끊김',
+    'permission-revocation': '연결 종료 중',
+    'return-failed': '반환 실패',
+  },
+};
+
 const ALLOWED_BAR_ACTIONS = new Set([
   'take-control',
   'resume',
   'resume-all',
   'stop-automation',
   'revert-standard',
+  'set-automation-mode',
   'revoke',
 ]);
+
+const ALLOWED_AUTOMATION_MODES = new Set(['standard', 'elevated']);
+
+export function formatPausedStatus(locale, reason) {
+  const isKo = String(locale).toLowerCase().startsWith('ko');
+  const map = isKo ? PAUSE_REASONS.ko : PAUSE_REASONS.en;
+  const strings = isKo ? STRINGS.ko : STRINGS.en;
+  const mapped = reason ? map[reason] : null;
+  if (!mapped) return strings.paused;
+  if (isKo) return mapped;
+  return reason === 'explicit-stop' || reason === 'return-failed' ? mapped : `${strings.paused}: ${mapped}`;
+}
 
 function sameToken(supplied, expected) {
   if (typeof supplied !== 'string' || supplied.length !== expected.length) return false;
   return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
+function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedPid = 0 }) {
   const isKo = String(locale).toLowerCase().startsWith('ko');
   const labels = isKo
     ? {
       stop: '중지',
       stopTitle: '에이전트 자동화 중지',
+      elevate: '권한 상승',
+      elevateTitle: '권한 상승 자동화(elevated)로 전환하고 저장합니다 (비밀번호/OTP 자동 입력 허용, CAPTCHA는 직접 처리)',
       revert: '권한 해제',
-      revertTitle: '권한 상승 모드를 기본(standard)으로 즉시 되돌립니다',
+      revertTitle: '권한 상승 모드를 기본(standard)으로 즉시 해제합니다',
       revoke: '종료',
       revokeTitle: '이 브라우저 연결을 종료합니다',
       returnAll: '모두 반환',
       pendingReturn: '반환 대기',
       idle: '대기 중',
+      persistentProfileTitle: '영구 프로필 (로그인 유지)',
+      ephemeralProfileTitle: '임시 프로필 (종료 시 초기화)',
+      saveFailed: '설정 저장 실패',
     }
     : {
       stop: 'Stop',
       stopTitle: 'Stop agent automation',
+      elevate: 'Elevate',
+      elevateTitle: 'Switch to elevated automation and remember preference (CAPTCHA stays manual)',
       revert: 'Revert',
       revertTitle: 'Revert connection to standard mode',
       revoke: 'Revoke',
@@ -76,12 +118,20 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       returnAll: 'Return all',
       pendingReturn: 'Return needed',
       idle: 'Idle',
+      persistentProfileTitle: 'Persistent profile (logins kept)',
+      ephemeralProfileTitle: 'Temporary profile (cleared on close)',
+      saveFailed: 'Failed to save preference',
     };
   return `(() => {
+    const EXPECTED_PID = ${Number(expectedPid) || 0};
+    try {
+      const actualPid = Services.appinfo?.processID || 0;
+      if (EXPECTED_PID > 0 && actualPid > 0 && actualPid !== EXPECTED_PID) return -1;
+    } catch {}
     const PORT = ${Number(port)};
     const TOKEN = ${JSON.stringify(token)};
     const L = ${JSON.stringify(labels)};
-    const INITIAL_STATE = ${JSON.stringify(initialState ?? { elevated: false, activeId: '', visible: false, tabs: [] })};
+    const INITIAL_STATE = ${JSON.stringify(initialState ?? { elevated: false, canElevate: false, profileLabel: '', profilePersistent: false, activeId: '', visible: false, tabs: [] })};
     const HTML_NS = 'http://www.w3.org/1999/xhtml';
     const BAR_ID = 'wb-agent-nav-bar';
     const STYLE_ID = 'wb-agent-nav-style';
@@ -104,20 +154,32 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       try { return Services.wm.getMostRecentWindow('navigator:browser'); } catch { return null; }
     }
 
-    function postAction(win, action, tabId) {
+    function postAction(win, action, tabId, mode, onFail) {
       try {
         const fn = win?.fetch ?? globalThis.fetch;
         if (typeof fn !== 'function') return;
+        const payload = { action, tabId: tabId || '' };
+        if (mode) payload.mode = mode;
         fn('http://127.0.0.1:' + PORT + '/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-WB-Token': TOKEN },
-          body: JSON.stringify({ action, tabId: tabId || '' }),
-        }).catch(() => {});
-      } catch {}
+          body: JSON.stringify(payload),
+        }).then(res => {
+          if (!res.ok && typeof onFail === 'function') onFail();
+        }).catch(() => {
+          if (typeof onFail === 'function') onFail();
+        });
+      } catch {
+        if (typeof onFail === 'function') onFail();
+      }
     }
 
     function indexBrowsingContexts(win, tabs) {
       if (!win || !Array.isArray(tabs)) return;
+      const validIds = new Set(tabs.map(t => t.id));
+      for (const [bid, tid] of [...browserIdToTabId.entries()]) {
+        if (!validIds.has(tid)) browserIdToTabId.delete(bid);
+      }
       const BC = win.BrowsingContext;
       for (const t of tabs) {
         if (typeof t.browsingContextId === 'number' && BC && typeof BC.get === 'function') {
@@ -151,23 +213,28 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
         }
         const spec = sel.currentURI?.spec || '';
         if (spec && spec !== 'about:blank') {
-          const exact = tabs.find(t => t.url === spec);
-          if (exact) {
-            if (typeof sel.browserId === 'number') browserIdToTabId.set(sel.browserId, exact.id);
-            return exact;
+          const exactMatches = tabs.filter(t => t.url === spec);
+          if (exactMatches.length === 1) {
+            if (typeof sel.browserId === 'number') browserIdToTabId.set(sel.browserId, exactMatches[0].id);
+            return exactMatches[0];
           }
         }
       }
       return tabs.find(t => t.id === state.activeId) || tabs.find(t => t.needsReturn) || tabs[0];
     }
 
-    function makeBtn(doc, text, title, onClick) {
+    function makeBtn(doc, text, title, onClick, { requireTrusted = false } = {}) {
       const btn = doc.createElementNS(HTML_NS, 'button');
       btn.type = 'button';
       btn.textContent = text;
       if (title) btn.title = title;
       btn.style.cssText = 'appearance:none;height:22px;padding:0 8px;border-radius:5px;border:1px solid color-mix(in srgb,currentColor 24%,transparent);background:color-mix(in srgb,currentColor 8%,transparent);color:inherit;font:inherit;font-size:11.5px;line-height:20px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;-moz-window-dragging:no-drag;';
-      btn.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); onClick(); });
+      btn.addEventListener('click', e => {
+        if (requireTrusted && (!e.isTrusted || (typeof e.mozInputSource === 'number' && e.mozInputSource === 0))) return;
+        e.stopPropagation();
+        e.preventDefault();
+        onClick(e);
+      });
       return btn;
     }
 
@@ -188,12 +255,27 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       const pendingTabs = state.tabs.filter(t => t.needsReturn);
       const otherPending = pendingTabs.filter(t => !entry || t.id !== entry.id);
 
+      const profileEl = bar._wbProfile;
       const dot = bar._wbDot;
       const statusEl = bar._wbStatus;
       const primaryBtn = bar._wbPrimary;
       const returnAllBtn = bar._wbReturnAll;
       const stopBtn = bar._wbStop;
+      const elevateBtn = bar._wbElevate;
       const revertBtn = bar._wbRevert;
+
+      if (state.profileLabel) {
+        profileEl.style.display = 'inline-flex';
+        profileEl.textContent = state.profileLabel;
+        profileEl.title = state.profilePersistent
+          ? (L.persistentProfileTitle + ': ' + state.profileLabel)
+          : L.ephemeralProfileTitle;
+        profileEl.style.borderColor = state.profilePersistent
+          ? 'color-mix(in srgb,currentColor 26%,transparent)'
+          : 'rgba(148,163,184,0.45)';
+      } else {
+        profileEl.style.display = 'none';
+      }
 
       const isHandoff = entry?.mode === 'native-handoff';
       const isFailed = Boolean(entry?.needsReturn && !isHandoff);
@@ -218,7 +300,8 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       }
 
       statusEl.textContent = entry ? entry.status : L.idle;
-      statusEl.title = entry ? (entry.label + ' — ' + entry.status) : '';
+      const rawNote = entry?.rawPausedReason ? (' [' + entry.rawPausedReason + ']') : '';
+      statusEl.title = entry ? (entry.label + ' — ' + entry.status + rawNote) : '';
 
       bar._wbTabId = entry?.id || '';
       bar._wbPrimaryAction = entry?.primaryAction || '';
@@ -253,6 +336,7 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       stopBtn.disabled = !entry || !entry.stopEnabled;
       stopBtn.style.opacity = stopBtn.disabled ? '0.45' : '1';
 
+      elevateBtn.style.display = (!state.elevated && state.canElevate) ? 'inline-flex' : 'none';
       revertBtn.style.display = state.elevated ? 'inline-flex' : 'none';
     }
 
@@ -282,10 +366,13 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       bar.id = BAR_ID;
       bar.style.cssText = 'display:none;align-items:center;gap:5px;height:26px;padding:0 6px;margin-inline:4px;border-radius:7px;border:1px solid color-mix(in srgb,currentColor 20%,transparent);background:color-mix(in srgb,currentColor 6%,transparent);color:inherit;font-size:11.5px;box-sizing:border-box;flex-shrink:0;-moz-window-dragging:no-drag;transition:border-color 120ms ease,background-color 120ms ease;';
 
+      const profileEl = doc.createElementNS(HTML_NS, 'span');
+      profileEl.style.cssText = 'display:none;align-items:center;height:18px;padding:0 5px;border-radius:4px;border:1px solid color-mix(in srgb,currentColor 24%,transparent);background:color-mix(in srgb,currentColor 8%,transparent);font-size:10.5px;font-weight:600;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;';
+
       const dot = doc.createElementNS(HTML_NS, 'span');
       dot.style.cssText = 'width:7px;height:7px;border-radius:50%;background:#22c55e;flex-shrink:0;';
       const statusEl = doc.createElementNS(HTML_NS, 'span');
-      statusEl.style.cssText = 'max-width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;padding-right:2px;';
+      statusEl.style.cssText = 'max-width:136px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;padding-right:2px;';
 
       const primaryBtn = makeBtn(doc, '', '', () => {
         if (bar._wbPrimaryAction && bar._wbTabId) postAction(win, bar._wbPrimaryAction, bar._wbTabId);
@@ -306,6 +393,13 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
       const stopBtn = makeBtn(doc, L.stop, L.stopTitle, () => {
         if (bar._wbTabId) postAction(win, 'stop-automation', bar._wbTabId);
       });
+      const elevateBtn = makeBtn(doc, L.elevate, L.elevateTitle, () => {
+        postAction(win, 'set-automation-mode', '', 'elevated', () => {
+          statusEl.textContent = L.saveFailed;
+        });
+      }, { requireTrusted: true });
+      elevateBtn.style.display = 'none';
+
       const revertBtn = makeBtn(doc, L.revert, L.revertTitle, () => postAction(win, 'revert-standard', ''));
       revertBtn.style.background = '#d97706';
       revertBtn.style.borderColor = '#f59e0b';
@@ -315,12 +409,14 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
 
       const revokeBtn = makeBtn(doc, L.revoke, L.revokeTitle, () => postAction(win, 'revoke', ''));
 
-      bar.append(dot, statusEl, primaryBtn, returnAllBtn, stopBtn, revertBtn, revokeBtn);
+      bar.append(profileEl, dot, statusEl, primaryBtn, returnAllBtn, stopBtn, elevateBtn, revertBtn, revokeBtn);
+      bar._wbProfile = profileEl;
       bar._wbDot = dot;
       bar._wbStatus = statusEl;
       bar._wbPrimary = primaryBtn;
       bar._wbReturnAll = returnAllBtn;
       bar._wbStop = stopBtn;
+      bar._wbElevate = elevateBtn;
       bar._wbRevert = revertBtn;
 
       nav.insertBefore(bar, panelBtn || null);
@@ -464,6 +560,8 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
 
 export class ChromeToolbarClient extends EventEmitter {
   #getRdp;
+  #getExpectedPid;
+  #onAction;
   #server = null;
   #port = 0;
   #token = randomBytes(32).toString('base64url');
@@ -475,9 +573,11 @@ export class ChromeToolbarClient extends EventEmitter {
   #retryTimer = null;
   #lastState = null;
 
-  constructor({ getRdp, headless = false, locale = 'ko-KR' } = {}) {
+  constructor({ getRdp, getExpectedPid = null, onAction = null, headless = false, locale = 'ko-KR' } = {}) {
     super();
     this.#getRdp = getRdp;
+    this.#getExpectedPid = getExpectedPid;
+    this.#onAction = onAction;
     this.headless = headless;
     this.locale = locale;
   }
@@ -537,22 +637,42 @@ export class ChromeToolbarClient extends EventEmitter {
       });
       req.on('end', () => {
         if (tooLarge) return;
-        try {
-          const parsed = JSON.parse(body);
-          const action = typeof parsed?.action === 'string' ? parsed.action : '';
-          const tabId = typeof parsed?.tabId === 'string' && /^t[1-9]\d{0,9}$/.test(parsed.tabId) ? parsed.tabId : null;
-          if (!ALLOWED_BAR_ACTIONS.has(action)) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end('{"ok":false}');
-            return;
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end('{"ok":true}');
-          this.emit('action', action, tabId);
-        } catch {
+        let parsed;
+        try { parsed = JSON.parse(body); } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end('{"ok":false}');
+          return;
         }
+        const action = typeof parsed?.action === 'string' ? parsed.action : '';
+        const tabId = typeof parsed?.tabId === 'string' && /^t[1-9]\d{0,9}$/.test(parsed.tabId) ? parsed.tabId : null;
+        const mode = typeof parsed?.mode === 'string' ? parsed.mode : null;
+        if (!ALLOWED_BAR_ACTIONS.has(action)
+          || (action === 'set-automation-mode' && !ALLOWED_AUTOMATION_MODES.has(mode))
+          || (action !== 'set-automation-mode' && mode !== null)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"ok":false}');
+          return;
+        }
+        if (this.#onAction) {
+          Promise.resolve().then(() => this.#onAction(action, tabId, mode)).then(outcome => {
+            if (outcome === false) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end('{"ok":false}');
+            } else {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end('{"ok":true}');
+            }
+          }).catch(() => {
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end('{"ok":false}');
+            }
+          });
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+        this.emit('action', action, tabId, mode);
       });
     });
     server.unref();
@@ -583,13 +703,16 @@ export class ChromeToolbarClient extends EventEmitter {
       if (!rdp || rdp.closed) return;
       if (!(await rdp.ensureConnected().catch(() => false))) return;
       const port = await this.#ensureServer();
+      const expectedPid = Number(this.#getExpectedPid?.() ?? 0) || 0;
       const script = buildChromeToolbarBootstrap({
         port,
         token: this.#token,
         locale: this.locale,
         initialState: this.#lastState,
+        expectedPid,
       });
-      await rdp.chromeEval(script, 6000);
+      const res = await rdp.chromeEval(script, 6000);
+      if (res === -1) throw new Error('Refused toolbar mount: Firefox RDP process PID mismatch');
       this.#installed = true;
       if (this.#lastState) this.#broadcast({ type: 'state', state: this.#lastState });
     })().catch(() => {
@@ -752,12 +875,12 @@ export class CamoufoxPresentation {
         primaryText = s.retryReturn;
         primaryAction = 'resume';
       } else {
-        status = this.pausedReason ? `${s.paused}: ${this.pausedReason}` : s.draining;
+        status = this.pausedReason ? formatPausedStatus(this.locale, this.pausedReason) : s.draining;
         primaryText = s.resumeAgent;
         primaryAction = 'resume';
       }
     } else if (this.pausedReason) {
-      status = `${s.paused}: ${this.pausedReason}`;
+      status = formatPausedStatus(this.locale, this.pausedReason);
       primaryText = s.resumeAgent;
       primaryAction = 'resume';
       stopEnabled = this.pausedReason !== 'explicit-stop';
@@ -778,6 +901,7 @@ export class CamoufoxPresentation {
       browsingContextId: typeof browsingContextId === 'number' ? browsingContextId : null,
       mode: this.mode,
       paused: Boolean(this.pausedReason),
+      rawPausedReason: this.pausedReason || null,
       status,
       primaryText,
       primaryAction,

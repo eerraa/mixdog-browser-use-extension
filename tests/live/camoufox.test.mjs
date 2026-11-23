@@ -372,8 +372,9 @@ test('live Camoufox 158: token-saving perception, complete network/WebSocket/wor
     const hasRedir = res.rows.some(r => r.u.includes('/redir-start')) && res.rows.some(r => r.u.includes('/redir-final'));
     const has404 = res.rows.some(r => r.u.includes('/missing-api') && r.s === 404);
     const hasWs = res.rows.some(r => r.ty === 'websocket');
-    return hasRedir && has404 && hasWs ? res : null;
-  }, 'network rows (redirect, 404, websocket)', 10000);
+    const hasWorker = res.rows.some(r => r.u.includes('/worker-api'));
+    return hasRedir && has404 && hasWs && hasWorker ? res : null;
+  }, 'network rows (redirect, 404, websocket, worker-api)', 12000);
 
   const redirStart = netList.rows.find(r => r.u.includes('/redir-start'));
   const redirFinal = netList.rows.find(r => r.u.includes('/redir-final'));
@@ -674,6 +675,9 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
 
   toolbar.sync({
     elevated: false,
+    canElevate: true,
+    profileLabel: 'default',
+    profilePersistent: true,
     activeId: 't1',
     visible: true,
     tabs: [{
@@ -698,6 +702,8 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
       if (!bar || bar.style.display === "none") return null;
       return {
         heightDelta: (w.outerHeight - w.innerHeight) - ${Number(heightBefore)},
+        profileText: bar._wbProfile?.textContent || "",
+        elevateVisible: bar._wbElevate?.style?.display !== "none",
         primaryText: bar._wbPrimary?.textContent || "",
         statusText: bar._wbStatus?.textContent || "",
         parentId: bar.parentElement?.id || "",
@@ -708,9 +714,16 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
 
   assert.equal(mounted.parentId, 'nav-bar');
   assert.equal(mounted.heightDelta, 0, 'mounting inside #nav-bar must not change outerHeight - innerHeight');
+  assert.equal(mounted.profileText, 'default');
+  assert.equal(mounted.elevateVisible, true);
   assert.equal(mounted.statusText, '에이전트 자동화 중');
   assert.equal(mounted.primaryText, '직접 조작');
   assert.equal(chromeEvalCount, 1, 'initial mount uses exactly one chromeEval');
+
+  // Untrusted synthetic .click() on the Elevate button must be ignored (requireTrusted: true)
+  await origChromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); w.document.getElementById("wb-agent-nav-bar")._wbElevate.click(); return true; })()');
+  await delay(150);
+  assert.equal(received.length, 0, 'untrusted synthetic .click() on Elevate button must never trigger elevation');
 
   // Push handoff state update over SSE stream (must update #nav-bar WITHOUT another chromeEval!)
   toolbar.sync({

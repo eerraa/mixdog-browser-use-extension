@@ -1,12 +1,15 @@
 // Camoufox-backed BrowserHost (pure Node.js, zero Electron dependency).
-// Preserves the full 32-action browse contract, token-saving perception
-// pipeline (walker, composeModel, persistent e<n> refs, diffs, find, budgets),
+// Preserves the full browse contract, token-saving perception pipeline
+// (walker, composeModel, persistent e<n> refs, diffs, find, budgets),
 // complete Juggler + WebSocket + Firefox RDP network/DevTools debugging with
-// privacy windows, isolated multi-sessions via Firefox BrowserContexts,
-// native alert/confirm/prompt dialogs, standard vs elevated automation mode,
-// Win32 Control Bar handoff/Stop/Revert, and hardened Camoufox `run` sandboxes.
+// privacy windows, isolated temporary sessions via Firefox BrowserContexts,
+// named persistent on-disk profiles (`default`, `work`, `personal`, plus
+// validated slugs) each backed by its own locked Camoufox process, native
+// alert/confirm/prompt dialogs, standard vs elevated automation mode with
+// persisted user preference, native Firefox #nav-bar Agent Control toolbar,
+// and hardened Camoufox `run` sandboxes.
 import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { FenceQueue } from '../queue.mjs';
@@ -17,18 +20,20 @@ import { DEVTOOLS_LIMITS, DevToolsRecorder, PrivacyWindows, responseBody } from 
 import { rankBrowserSemanticMatch } from '../perception/match.mjs';
 import { composeModel } from '../perception/model.mjs';
 import { RefRegistry } from '../perception/refs.mjs';
-import { displayURL, quote, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from '../perception/render.mjs';
+import { quote, renderDiff, renderFind, renderHeader, renderSnapshot, renderText } from '../perception/render.mjs';
 import { armNavigation, settle } from '../settle.mjs';
 import { CONTROL_SIGNALS, formatSignals, SignalQueue } from '../signals.mjs';
 import { runScript } from '../runner/run.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
 } from '../../shared/contract.mjs';
+import { isProtectedInternalPath, saveUserPreferences } from '../../shared/preferences.mjs';
 import { CamoufoxProcess } from './juggler.mjs';
 import { FirefoxRdpClient } from './rdp.mjs';
 import { CamoufoxFrameDriver } from './driver.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient } from './presentation.mjs';
 import { createCamoufoxRunnerSandboxFactory } from './runner-sandbox.mjs';
+import { acquireProfileLock, inspectProfiles, releaseProfileLock, slugFromDirName } from './profile-lock.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
@@ -39,6 +44,7 @@ const MIN_POINT_OPACITY = 0.1;
 const TILE = 32;
 const MAX_SESSION_TABS = 32;
 const MAX_TEMPORARY_SESSIONS = 16;
+const MAX_PERSISTENT_PROFILES = 8;
 const RETURN_TIMEOUT_MS = 25000;
 const NATIVE_REQUEST_ACK_GRACE_MS = 250;
 const L = DEVTOOLS_LIMITS;
@@ -124,11 +130,11 @@ function mapPermissionKind(kind) {
 
 export class CamoufoxHost {
   #pages = new Map();
-  #bySessionId = new Map(); // juggler sessionId → page
-  #byTargetId = new Map();  // juggler targetId → page
-  #profiles = new Map();    // callerSessionId → default profile
-  #sessions = new Map();    // ctx<n> → profile
-  #byBrowserContext = new Map(); // juggler browserContextId → profile
+  #profiles = new Map();           // callerSessionId → default profile
+  #sessions = new Map();           // ctx<n> → profile
+  #runtimes = new Map();           // 'default' | 'profile:<slug>' → runtime
+  #runtimeStartFlights = new Map();// runtimeKey → Promise<runtime>
+  #profileBindFlights = new Map(); // `${owner}\0${slug}` → Promise<profile>
   #sessionSequence = 0;
   #queue = new FenceQueue();
   #closed = false;
@@ -137,27 +143,26 @@ export class CamoufoxHost {
   #automationMode = 'standard';
   #configuredAutomationMode = 'standard';
   #automationModeSource = 'default';
+  #automationModePinned = false;
+  #automationPreferenceReason = null;
+  #revertedThisConnection = false;
   #refs = new RefRegistry();
   #signals = new SignalQueue();
   #tabSequence = 0;
   #snapshotSequence = 0;
-  #proc = null;
-  #rdp = null;
-  #startFlight = null;
-  #chromeToolbar = null;
-  #downloadsByUuid = new Map();
-  #permissionGrants = new Map(); // `${origin}\0${kind}` → 'allow' | 'deny'
+  #permissionGrants = new Map();   // `${origin}\0${kind}` → 'allow' | 'deny'
   #activeTabId = null;
-  #pendingAttach = null;
-  #earlyMessages = new Map(); // sessionId → Array<{ method, params }>
-  #profileLockPath = null;
-  #profilePersistence = 'ephemeral';
+  #defaultProfilePersistence = 'ephemeral';
 
   constructor({
-    dataDir, persistentProfileDir = null, executablePath, camoufoxVersion = '158.0.1-beta.41',
+    dataDir, dataRoot = null, profilesRoot = null, persistentProfileDir = null,
+    persistentProfilesEnabled = undefined, authorityMode = 'connection',
+    executablePath, camoufoxVersion = '158.0.1-beta.41',
     onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
     automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
+    automationModePinned = undefined,
+    automationPreferenceReason = null,
     headless = false, enableRdp = true, locale = 'ko-KR',
     createProcess = null, createRdp = null, createRunnerSandbox = null,
   }) {
@@ -167,10 +172,23 @@ export class CamoufoxHost {
     if (automationMode !== 'standard' && automationMode !== 'elevated') {
       throw new TypeError('automationMode must be standard or elevated');
     }
-    this.dataDir = dataDir;
-    this.persistentProfileDir = typeof persistentProfileDir === 'string' && path.isAbsolute(persistentProfileDir)
-      ? persistentProfileDir : null;
-    this.#profilePersistence = this.persistentProfileDir ? 'persistent-pending' : 'ephemeral';
+    this.dataDir = path.resolve(dataDir);
+    this.dataRoot = typeof dataRoot === 'string' && path.isAbsolute(dataRoot) ? path.resolve(dataRoot) : null;
+    this.authorityMode = authorityMode;
+    this.defaultProfileSlug = 'default';
+    if (typeof profilesRoot === 'string' && path.isAbsolute(profilesRoot)) {
+      this.profilesRoot = path.resolve(profilesRoot);
+      this.persistentProfilesEnabled = persistentProfilesEnabled !== false;
+    } else if (typeof persistentProfileDir === 'string' && path.isAbsolute(persistentProfileDir)) {
+      const resolved = path.resolve(persistentProfileDir);
+      this.profilesRoot = path.dirname(resolved);
+      this.defaultProfileSlug = slugFromDirName(path.basename(resolved)) ?? 'default';
+      this.persistentProfilesEnabled = persistentProfilesEnabled !== false;
+    } else {
+      this.profilesRoot = null;
+      this.persistentProfilesEnabled = false;
+    }
+    this.#defaultProfilePersistence = this.persistentProfilesEnabled ? 'persistent-pending' : 'ephemeral';
     this.executablePath = executablePath;
     this.camoufoxVersion = camoufoxVersion;
     this.headless = headless;
@@ -182,28 +200,34 @@ export class CamoufoxHost {
     this.#automationMode = automationMode;
     this.#configuredAutomationMode = automationMode;
     this.#automationModeSource = automationModeSource;
+    this.#automationModePinned = automationModePinned ?? ['env', 'policy', 'policy-invalid'].includes(automationModeSource);
+    this.#automationPreferenceReason = automationPreferenceReason;
     this.nativeRequests = new BrowserRequests();
     this.createProcess = createProcess;
     this.createRdp = createRdp;
     this.createRunnerSandbox = createRunnerSandbox ?? (executablePath ? createCamoufoxRunnerSandboxFactory({ executablePath }) : null);
-    this.#chromeToolbar = new ChromeToolbarClient({
-      getRdp: () => this.#rdp,
-      headless: headless || !enableRdp,
-      locale,
-    });
-    this.#chromeToolbar.on('action', (action, tabId) => this.#onControlBarAction(action, tabId));
+  }
+
+  #canElevate() {
+    return !this.#closed
+      && !this.#revoking
+      && this.#automationMode === 'standard'
+      && !this.#automationModePinned
+      && !this.#revertedThisConnection
+      && Boolean(this.dataRoot);
   }
 
   status() {
     const elevated = this.#automationMode === 'elevated';
-    const rdpActive = !!this.#rdp?.connected;
+    const rdpActive = [...this.#runtimes.values()].some(r => !r.closed && r.rdp?.connected);
+    const namedPersistentSupported = Boolean(this.persistentProfilesEnabled && this.profilesRoot);
     return {
       state: this.#closed ? 'closed' : this.#revoking ? 'terminating-revocation' : 'connected',
       engine: 'camoufox',
       runtime: `Camoufox ${this.camoufoxVersion}`,
       connectionId: this.connectionId,
       automationMode: this.#automationMode,
-      profilePersistence: this.#profilePersistence,
+      profilePersistence: this.#defaultProfilePersistence,
       tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
       capabilities: {
@@ -213,8 +237,12 @@ export class CamoufoxHost {
           mode: this.#automationMode,
           configuredMode: this.#configuredAutomationMode,
           source: this.#automationModeSource,
+          pinned: this.#automationModePinned,
+          canElevate: this.#canElevate(),
+          persistentPreference: Boolean(this.dataRoot),
+          ...(this.#automationPreferenceReason ? { preferenceReason: this.#automationPreferenceReason } : {}),
           scope: elevated
-            ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted; user-revocable via Control Bar'
+            ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted; user-revocable via #nav-bar'
             : 'standard safety boundary: human handles sign-in and secrets; trusted page input pauses automation',
           shieldAutoHandoff: false,
           trustedInputGuard: true,
@@ -232,7 +260,13 @@ export class CamoufoxHost {
           inspect: this.enableRdp ? ['computed-style', 'matched-css-rules', 'event-listeners'] : ['computed-style'],
           consoleExpression: this.enableRdp ? 'firefox-rdp-eager' : 'unavailable',
         },
-        sessions: { temporary: true, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
+        sessions: {
+          temporary: true,
+          namedPersistentProfiles: namedPersistentSupported,
+          maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS,
+          maxActivePersistentProfiles: MAX_PERSISTENT_PROFILES,
+          defaultClosable: false,
+        },
         nativeRequests: ['javascript-dialog', 'file-picker', 'notifications', 'geolocation'],
         javascriptDialogs: {
           supported: ['alert', 'confirm', 'prompt'],
@@ -245,179 +279,336 @@ export class CamoufoxHost {
         },
         unsupported: ['hid', 'usb', 'display-capture', 'serial', 'bluetooth'],
         mandatoryHuman: elevated
-          ? ['OS identity', 'CAPTCHA', 'human Resume in the Control Bar after Stop/handoff']
-          : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the Control Bar after Stop/handoff'],
+          ? ['OS identity', 'CAPTCHA', 'human Resume in the #nav-bar after Stop/handoff']
+          : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the #nav-bar after Stop/handoff'],
         delegation: this.policy.describe(),
       },
     };
   }
 
-  static #pidAlive(pid) {
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    try { process.kill(pid, 0); return true; }
-    catch (error) { return error?.code === 'EPERM'; }
+  #activePersistentRuntimes() {
+    return [...this.#runtimes.values()].filter(r => !r.closed && r.persistence === 'persistent');
   }
 
-  async #acquireProfileDir() {
+  async #startRuntime({ key, profileSlug = null, strictPersistent = false }) {
+    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
     const connProfilesRoot = path.join(this.dataDir, 'profiles');
     await mkdir(connProfilesRoot, { recursive: true });
-    if (this.persistentProfileDir) {
-      const lockPath = `${this.persistentProfileDir}.lock`;
-      await mkdir(path.dirname(this.persistentProfileDir), { recursive: true });
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const fh = await open(lockPath, 'wx');
-          try {
-            await fh.writeFile(JSON.stringify({ pid: process.pid, connectionId: this.connectionId, acquiredAt: Date.now() }));
-          } finally {
-            await fh.close();
-          }
-          await mkdir(this.persistentProfileDir, { recursive: true });
-          this.#profileLockPath = lockPath;
-          this.#profilePersistence = 'persistent';
-          await writeFile(path.join(connProfilesRoot, 'camoufox.persistent.json'),
-            JSON.stringify({ profileDir: this.persistentProfileDir, persistent: true }), 'utf8').catch(() => {});
-          return this.persistentProfileDir;
-        } catch (error) {
-          if (error?.code !== 'EEXIST') break;
-          let ownerPid = 0;
-          try { ownerPid = JSON.parse(await readFile(lockPath, 'utf8'))?.pid ?? 0; } catch { ownerPid = 0; }
-          if (ownerPid === 0) {
-            const info = await stat(lockPath).catch(() => null);
-            if (info && Date.now() - info.mtimeMs < 2000) {
-              await pause(50);
-              try { ownerPid = JSON.parse(await readFile(lockPath, 'utf8'))?.pid ?? 0; } catch { ownerPid = 0; }
-              if (ownerPid === 0) {
-                this.#profilePersistence = 'ephemeral-busy';
-                break;
-              }
-            }
-          }
-          if (CamoufoxHost.#pidAlive(ownerPid)) {
-            this.#profilePersistence = 'ephemeral-busy';
-            break;
-          }
-          await unlink(lockPath).catch(() => {});
-        }
+
+    let lockHandle = null;
+    let profileDir = null;
+    let persistence = 'ephemeral';
+    let boundSlug = null;
+
+    if (strictPersistent) {
+      if (!this.persistentProfilesEnabled || !this.profilesRoot) {
+        fail('PERSISTENT_PROFILES_DISABLED', 'Persistent profiles are disabled for this connection');
       }
+      const acquired = await acquireProfileLock(this.profilesRoot, profileSlug, { connectionId: this.connectionId });
+      if (!acquired.ok) {
+        if (acquired.reason === 'busy') {
+          fail('PROFILE_IN_USE', `Persistent profile "${profileSlug}" is currently held by another live browser process`);
+        }
+        fail('PROFILE_IO_ERROR', `Unable to acquire persistent profile "${profileSlug}": ${acquired.error?.message ?? 'I/O error'}`);
+      }
+      lockHandle = acquired;
+      profileDir = acquired.profileDir;
+      persistence = 'persistent';
+      boundSlug = profileSlug;
+      if (key === 'default') this.#defaultProfilePersistence = 'persistent';
+    } else if (this.persistentProfilesEnabled && this.profilesRoot) {
+      const acquired = await acquireProfileLock(this.profilesRoot, this.defaultProfileSlug, { connectionId: this.connectionId });
+      if (acquired.ok) {
+        lockHandle = acquired;
+        profileDir = acquired.profileDir;
+        persistence = 'persistent';
+        boundSlug = this.defaultProfileSlug;
+        this.#defaultProfilePersistence = 'persistent';
+        await writeFile(path.join(connProfilesRoot, 'camoufox.persistent.json'),
+          JSON.stringify({ profileDir, profile: boundSlug, persistent: true }), 'utf8').catch(() => {});
+      } else if (acquired.reason === 'busy') {
+        profileDir = path.join(connProfilesRoot, 'camoufox');
+        await mkdir(profileDir, { recursive: true });
+        persistence = 'ephemeral-busy';
+        boundSlug = null;
+        this.#defaultProfilePersistence = 'ephemeral-busy';
+      } else {
+        fail('PROFILE_IO_ERROR', `Unable to acquire persistent default profile: ${acquired.error?.message ?? 'I/O error'}`);
+      }
+    } else {
+      profileDir = path.join(connProfilesRoot, 'camoufox');
+      await mkdir(profileDir, { recursive: true });
+      persistence = 'ephemeral';
+      boundSlug = null;
+      this.#defaultProfilePersistence = 'ephemeral';
     }
-    const fallbackDir = path.join(connProfilesRoot, 'camoufox');
-    await mkdir(fallbackDir, { recursive: true });
-    if (this.#profilePersistence !== 'ephemeral-busy') this.#profilePersistence = 'ephemeral';
-    return fallbackDir;
-  }
 
-  async #releaseProfileLock() {
-    if (!this.#profileLockPath) return;
-    const lockPath = this.#profileLockPath;
-    this.#profileLockPath = null;
-    await unlink(lockPath).catch(() => {});
-  }
+    const runtime = {
+      key,
+      profileSlug: boundSlug,
+      profileDir,
+      persistence,
+      lockHandle,
+      proc: null,
+      rdp: null,
+      toolbar: null,
+      bySessionId: new Map(),
+      byTargetId: new Map(),
+      byBrowserContext: new Map(),
+      earlyMessages: new Map(),
+      downloadsByUuid: new Map(),
+      attachWaiters: new Map(),
+      bufferedAttaches: new Map(),
+      activeTabId: null,
+      closed: false,
+      closeFlight: null,
+    };
 
-  async #ensureBrowser() {
-    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
-    if (this.#proc && !this.#proc.closed) return this.#proc;
-    if (this.#startFlight) return this.#startFlight;
-    this.#startFlight = (async () => {
-      const profileDir = await this.#acquireProfileDir();
+    try {
       const proc = this.createProcess
-        ? await this.createProcess({ profileDir, enableRdp: this.enableRdp, headless: this.headless, locale: this.locale })
+        ? await this.createProcess({
+          profileDir, profileSlug: boundSlug, enableRdp: this.enableRdp, headless: this.headless, locale: this.locale,
+        })
         : new CamoufoxProcess({
           executablePath: this.executablePath, profileDir, headless: this.headless,
           enableRdp: this.enableRdp, locale: this.locale,
         });
-      proc.on('message', (method, params, sessionId) => this.#onJugglerMessage(method, params, sessionId));
+      runtime.proc = proc;
+      proc.on('message', (method, params, sessionId) => this.#onJugglerMessage(runtime, method, params, sessionId));
       proc.on('close', () => {
         for (const p of this.#pages.values()) {
-          if (!p.closed) { p.connected = false; this.#pause(p, 'presentation-lost'); }
+          if (!p.closed && p.runtime === runtime) {
+            p.connected = false;
+            this.#pause(p, 'presentation-lost');
+          }
         }
       });
-      try {
-        await proc.start();
-      } catch (error) {
-        await this.#releaseProfileLock();
-        throw error;
+      await proc.start();
+      if (this.#closed || this.#revoking) {
+        await proc.close().catch(() => {});
+        await releaseProfileLock(lockHandle);
+        fail('CONNECTION_CLOSED', 'Browser connection closed during startup');
       }
-      this.#proc = proc;
       if (this.enableRdp && proc.rdpPort) {
-        this.#rdp = this.createRdp ? this.createRdp(proc.rdpPort) : new FirefoxRdpClient(proc.rdpPort);
+        runtime.rdp = this.createRdp ? this.createRdp(proc.rdpPort) : new FirefoxRdpClient(proc.rdpPort);
       }
-      return proc;
-    })().finally(() => { this.#startFlight = null; });
-    return this.#startFlight;
+      runtime.toolbar = new ChromeToolbarClient({
+        getRdp: () => runtime.rdp,
+        getExpectedPid: () => runtime.proc?.pid ?? 0,
+        headless: this.headless || !this.enableRdp,
+        locale: this.locale,
+        onAction: (action, tabId, mode) => this.#onControlBarAction(action, tabId, mode, runtime),
+      });
+      this.#runtimes.set(key, runtime);
+      return runtime;
+    } catch (error) {
+      runtime.closed = true;
+      runtime.toolbar?.close();
+      runtime.rdp?.close();
+      await runtime.proc?.close?.().catch(() => {});
+      await releaseProfileLock(lockHandle);
+      throw error;
+    }
   }
 
-  #syncControlBar() {
-    if (this.#closed) return;
-    const tabs = [...this.#pages.values()]
-      .filter(p => !p.closed)
-      .map(p => p.presentation.barEntry({
-        title: p.currentTitle,
-        url: p.currentUrl,
-        browsingContextId: this.#rdp?.browsingContextId?.(p.id) ?? null,
-      }));
-    const browserPid = this.#proc?.pid ?? 0;
-    const payload = !tabs.length
-      ? { elevated: this.#automationMode === 'elevated', activeId: '', tabs: [], visible: false, browserPid }
-      : (() => {
-        if (!this.#activeTabId || !this.#pages.get(this.#activeTabId) || this.#pages.get(this.#activeTabId).closed) {
-          this.#activeTabId = tabs.at(-1).id;
+  async #ensureRuntime(key, opts = {}) {
+    if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
+    const existing = this.#runtimes.get(key);
+    if (existing && !existing.closed && existing.proc && !existing.proc.closed) return existing;
+    if (this.#runtimeStartFlights.has(key)) return this.#runtimeStartFlights.get(key);
+    const flight = this.#startRuntime({ key, ...opts }).finally(() => {
+      if (this.#runtimeStartFlights.get(key) === flight) this.#runtimeStartFlights.delete(key);
+    });
+    this.#runtimeStartFlights.set(key, flight);
+    return flight;
+  }
+
+  async #ensureDefaultRuntime({ strictPersistent = false } = {}) {
+    const existing = this.#runtimes.get('default');
+    if (existing && !existing.closed && existing.proc && !existing.proc.closed) {
+      if (strictPersistent && existing.persistence !== 'persistent') {
+        fail('PROFILE_IN_USE', `Persistent profile "${this.defaultProfileSlug}" is currently held by another live browser process`);
+      }
+      return existing;
+    }
+    return this.#ensureRuntime('default', { profileSlug: this.defaultProfileSlug, strictPersistent });
+  }
+
+  async #disposeRuntime(runtime) {
+    if (!runtime) return { clean: true, failures: [] };
+    if (runtime.closeFlight) return runtime.closeFlight;
+    runtime.closed = true;
+    runtime.closeFlight = (async () => {
+      const failures = [];
+      try { runtime.toolbar?.close(); } catch (err) { failures.push({ stage: 'toolbar', reason: err.message }); }
+      try { runtime.rdp?.close(); } catch (err) { failures.push({ stage: 'rdp', reason: err.message }); }
+      if (runtime.proc && !runtime.proc.closed) {
+        try {
+          await bounded(Promise.resolve(runtime.proc.close()), 8000, `Camoufox process close (${runtime.key})`);
+        } catch (err) {
+          failures.push({ stage: 'process-exit', reason: err.message });
         }
-        return {
-          elevated: this.#automationMode === 'elevated',
-          activeId: this.#activeTabId,
-          tabs,
-          visible: true,
-          browserPid,
-        };
-      })();
-    this.#chromeToolbar.sync(payload);
+      }
+      // Only release the cross-process lock once the process has stopped or closed.
+      if (runtime.lockHandle && (!runtime.proc || runtime.proc.closed || failures.every(f => f.stage !== 'process-exit'))) {
+        await releaseProfileLock(runtime.lockHandle);
+        runtime.lockHandle = null;
+      }
+      if (this.#runtimes.get(runtime.key) === runtime) this.#runtimes.delete(runtime.key);
+      return { clean: failures.length === 0, failures };
+    })();
+    return runtime.closeFlight;
+  }
+
+  #profileBadgeLabel(runtime) {
+    if (runtime.profileSlug) return runtime.profileSlug;
+    if (runtime.persistence === 'ephemeral-busy') {
+      return String(this.locale).toLowerCase().startsWith('ko') ? '임시' : 'temp';
+    }
+    return '';
+  }
+
+  #syncControlBar(targetRuntime = null) {
+    if (this.#closed) return;
+    const targets = targetRuntime ? [targetRuntime] : [...this.#runtimes.values()];
+    const elevated = this.#automationMode === 'elevated';
+    const canElevate = this.#canElevate();
+    for (const runtime of targets) {
+      if (!runtime || runtime.closed || !runtime.toolbar) continue;
+      const tabs = [...this.#pages.values()]
+        .filter(p => !p.closed && p.runtime === runtime)
+        .map(p => p.presentation.barEntry({
+          title: p.currentTitle,
+          url: p.currentUrl,
+          browsingContextId: runtime.rdp?.browsingContextId?.(p.id) ?? null,
+        }));
+      const browserPid = runtime.proc?.pid ?? 0;
+      const profileLabel = this.#profileBadgeLabel(runtime);
+      const profilePersistent = runtime.persistence === 'persistent';
+      const payload = !tabs.length
+        ? { elevated, canElevate, profileLabel, profilePersistent, activeId: '', tabs: [], visible: false, browserPid }
+        : (() => {
+          const activePage = runtime.activeTabId ? this.#pages.get(runtime.activeTabId) : null;
+          if (!activePage || activePage.closed || activePage.runtime !== runtime) {
+            runtime.activeTabId = tabs.at(-1).id;
+          }
+          return {
+            elevated,
+            canElevate,
+            profileLabel,
+            profilePersistent,
+            activeId: runtime.activeTabId,
+            tabs,
+            visible: true,
+            browserPid,
+          };
+        })();
+      runtime.toolbar.sync(payload);
+    }
   }
 
   #flashControlBar(tabId = '') {
-    this.#chromeToolbar.flash(tabId);
+    const p = tabId ? this.#pages.get(tabId) : null;
+    if (p && !p.closed && p.runtime?.toolbar) {
+      p.runtime.toolbar.flash(tabId);
+      return;
+    }
+    for (const runtime of this.#runtimes.values()) {
+      if (!runtime.closed) runtime.toolbar?.flash(tabId);
+    }
   }
 
   // Exposed for live/unit tests that simulate a person clicking a Control Bar button.
-  triggerControlBarAction(action, tabId = null) {
-    this.#onControlBarAction(action, tabId);
+  triggerControlBarAction(action, tabId = null, mode = null) {
+    return this.#onControlBarAction(action, tabId, mode, null);
   }
 
-  #onControlBarAction(action, tabId) {
-    if (this.#closed || this.#revoking) return;
-    if (action === 'revoke') { this.#revoke().catch(() => {}); return; }
-    if (action === 'revert-standard') { this.#revertToStandard(); return; }
+  #onControlBarAction(action, tabId, mode = null, sourceRuntime = null) {
+    if (this.#closed || this.#revoking) return false;
+    if (action === 'revoke') { this.#revoke().catch(() => {}); return true; }
+    if (action === 'revert-standard') { return this.#revertToStandard(); }
+    if (action === 'set-automation-mode') {
+      if (mode === 'standard') return this.#revertToStandard();
+      if (mode === 'elevated') return this.#elevateByPerson();
+      return false;
+    }
     if (action === 'resume-all') {
       for (const q of this.#pages.values()) {
         if (!q.closed && (q.presentation.mode !== 'automation' || q.paused)) {
           this.#resume(q).catch(() => {});
         }
       }
-      return;
+      return true;
     }
-    const p = (tabId && this.#pages.get(tabId)) || (this.#activeTabId && this.#pages.get(this.#activeTabId));
-    if (!p || p.closed) return;
+    let p = null;
+    if (tabId) {
+      p = this.#pages.get(tabId) ?? null;
+      if (!p || p.closed || (sourceRuntime && p.runtime !== sourceRuntime)) return false;
+    } else {
+      const candidateId = sourceRuntime?.activeTabId ?? this.#activeTabId;
+      p = candidateId ? this.#pages.get(candidateId) : null;
+      if (p && (p.closed || (sourceRuntime && p.runtime !== sourceRuntime))) p = null;
+    }
+    if (!p || p.closed) return false;
     if (action === 'stop-automation') {
       this.#pause(p, 'explicit-stop');
       p.presentation.pauseInAutomation('explicit-stop');
       this.#signal(p, { kind: 'state', state: 'stopped' });
-    } else if (action === 'take-control') {
-      this.#handoff(p, 'human-handoff', 'human').catch(() => {});
-    } else if (action === 'resume') {
-      this.#resume(p).catch(() => {});
+      return true;
     }
+    if (action === 'take-control') {
+      this.#handoff(p, 'human-handoff', 'human').catch(() => {});
+      return true;
+    }
+    if (action === 'resume') {
+      this.#resume(p).catch(() => {});
+      return true;
+    }
+    return false;
   }
 
   #revertToStandard() {
-    if (this.#closed || this.#revoking || this.#automationMode === 'standard') return;
-    this.#automationMode = 'standard';
-    this.#automationModeSource = 'revoked-by-user';
+    if (this.#closed || this.#revoking) return false;
+    const wasElevated = this.#automationMode === 'elevated';
+    this.#revertedThisConnection = true;
+    if (wasElevated) {
+      // Synchronous downgrade takes effect immediately BEFORE any disk I/O.
+      this.#automationMode = 'standard';
+      this.#automationModeSource = 'revoked-by-user';
+      for (const q of this.#pages.values()) {
+        if (q.closed) continue;
+        q.presentation.refresh();
+        this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
+      }
+      this.#syncControlBar();
+    }
+    if (!this.#automationModePinned && this.dataRoot) {
+      return saveUserPreferences(this.dataRoot, { automationMode: 'standard' })
+        .then(() => true)
+        .catch(() => false);
+    }
+    return true;
+  }
+
+  async #elevateByPerson() {
+    if (!this.#canElevate()) return false;
+    try {
+      await saveUserPreferences(this.dataRoot, { automationMode: 'elevated' });
+    } catch {
+      return false;
+    }
+    // Re-check after disk write in case Revert or Revoke intervened.
+    if (!this.#canElevate()) return false;
+    this.#automationMode = 'elevated';
+    this.#automationModeSource = 'user-preference';
+    this.#automationPreferenceReason = null;
     for (const q of this.#pages.values()) {
       if (q.closed) continue;
       q.presentation.refresh();
-      this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
+      this.#signal(q, { kind: 'state', state: 'automation mode elevated by person (saved)' });
     }
     this.#syncControlBar();
+    return true;
   }
 
   #assertCaller(caller, signal) {
@@ -437,7 +628,7 @@ export class CamoufoxHost {
     if (!p || p.closed) fail('CLOSED_TAB', 'Unknown or closed tab');
     if (p.owner !== caller.sessionId) fail('FOREIGN_TAB', 'Tab is owned by another session');
     if (p.profile.state !== 'open') fail('CLOSED_SESSION', 'Browser session is closing or closed');
-    if (input && p.paused) fail('AUTOMATION_PAUSED', `Automation paused: ${p.paused}; only the person can resume it from the Control Bar`, { paused: p.paused });
+    if (input && p.paused) fail('AUTOMATION_PAUSED', `Automation paused: ${p.paused}; only the person can resume it from the #nav-bar`, { paused: p.paused });
     if (input && !p.visible) fail('PAGE_HIDDEN', 'Page is hidden; show and observe before input');
     if (input && !p.connected && !allowDisconnected) fail('DEBUGGER_DISCONNECTED', 'Browser disconnected; observe or explicitly navigate before new input');
     if (input && !dialogCleanup) p.driver.assertNoDialogCleanup();
@@ -457,7 +648,7 @@ export class CamoufoxHost {
       if (!q.closed && q.profile === p.profile) q.devtools.boundary();
     }
     const allow = p.presentation.mode === 'automation';
-    if (this.#rdp?.connected) this.#rdp.setWatching(p.id, allow).catch(() => {});
+    if (p.runtime?.rdp?.connected) p.runtime.rdp.setWatching(p.id, allow).catch(() => {});
   }
 
   #beginPrivate(p) {
@@ -477,8 +668,11 @@ export class CamoufoxHost {
   #pause(p, reason) {
     if (p.closed) return;
     p.paused = reason;
+    if (p.presentation.mode === 'automation' && p.presentation.pausedReason !== reason) {
+      p.presentation.pauseInAutomation(reason);
+    }
     this.#invalidate(p, reason);
-    this.#syncControlBar();
+    this.#syncControlBar(p.runtime);
   }
 
   #ownerPages(owner) { return [...this.#pages.values()].filter(p => !p.closed && p.owner === owner); }
@@ -491,42 +685,123 @@ export class CamoufoxHost {
     }
   }
 
-  async #newProfile(owner, { name, temporary }) {
-    const proc = await this.#ensureBrowser();
+  async #newProfile(owner, { name, temporary, runtime = null, profileSlug = null, isDefault = !temporary }) {
+    const rt = runtime ?? await this.#ensureDefaultRuntime();
     if (temporary) {
       const created = [...this.#sessions.values()].filter(s => s.owner === owner && s.temporary).length;
       if (created >= MAX_TEMPORARY_SESSIONS) fail('SESSION_LIMIT', `At most ${MAX_TEMPORARY_SESSIONS} temporary browser sessions may be created per caller`);
     }
     const id = `ctx${++this.#sessionSequence}`;
-    const downloadDir = path.join(this.dataDir, 'downloads', hash(temporary ? `${owner}\0${id}` : owner));
+    const downloadDir = path.join(this.dataDir, 'downloads', hash(temporary ? `${owner}\0${id}` : profileSlug ? `${owner}\0profile:${profileSlug}` : owner));
     await mkdir(downloadDir, { recursive: true });
+
+    // Under hook authority, distinct callers sharing one companion must never
+    // share the underlying Firefox default BrowserContext (C8 caller isolation).
+    const needIsolatedContext = temporary || (isDefault && this.#profiles.size > 0);
     let browserContextId = undefined;
-    if (temporary) {
-      const created = await proc.send('Browser.createBrowserContext', { removeOnDetach: true });
+    if (needIsolatedContext) {
+      const created = await rt.proc.send('Browser.createBrowserContext', { removeOnDetach: true });
       browserContextId = created.browserContextId;
     }
-    await proc.send('Browser.setDownloadOptions', {
+    const dlRes = await rt.proc.send('Browser.setDownloadOptions', {
       ...(browserContextId ? { browserContextId } : {}),
       downloadOptions: { behavior: 'saveToDisk', downloadsDir: downloadDir },
-    }).catch(() => {});
+    }).catch(err => ({ error: err?.message ?? String(err) }));
+    const effectivePersistence = temporary || needIsolatedContext ? 'ephemeral' : rt.persistence;
+    const effectiveSlug = temporary || needIsolatedContext ? null : (profileSlug ?? rt.profileSlug ?? null);
     const profile = {
-      id, owner, name: name || (temporary ? `Session ${id}` : 'Default'), temporary, isDefault: !temporary,
-      state: 'open', browserContextId, downloadDir, downloads: [],
+      id,
+      owner,
+      name: name?.trim() || (temporary ? `Session ${id}` : effectiveSlug && !isDefault ? effectiveSlug : 'Default'),
+      temporary,
+      isDefault,
+      profileSlug: effectiveSlug,
+      persistence: effectivePersistence,
+      runtime: rt,
+      state: 'open',
+      browserContextId,
+      downloadDir,
+      downloadSetupError: dlRes?.error ?? null,
+      downloads: [],
+      closeFlight: null,
       devtoolsPrivacy: new PrivacyWindows(() => this.#ownerPages(owner).filter(p => p.profile === profile)
         .every(p => p.presentation.mode === 'automation')),
     };
     this.#sessions.set(id, profile);
-    if (browserContextId) this.#byBrowserContext.set(browserContextId, profile);
+    if (browserContextId) rt.byBrowserContext.set(browserContextId, profile);
     return profile;
   }
 
-  async #defaultProfile(owner) {
+  async #defaultProfile(owner, { strictPersistent = false } = {}) {
     let profile = this.#profiles.get(owner);
-    if (!profile) {
-      profile = await this.#newProfile(owner, { name: 'Default', temporary: false });
-      this.#profiles.set(owner, profile);
+    if (profile) {
+      if (strictPersistent && profile.persistence !== 'persistent') {
+        fail('PROFILE_IN_USE', `Persistent profile "${this.defaultProfileSlug}" is currently held by another live browser process`);
+      }
+      return profile;
     }
+    const rt = await this.#ensureDefaultRuntime({ strictPersistent });
+    profile = await this.#newProfile(owner, {
+      name: 'Default',
+      temporary: false,
+      runtime: rt,
+      profileSlug: rt.profileSlug,
+      isDefault: true,
+    });
+    this.#profiles.set(owner, profile);
     return profile;
+  }
+
+  async #bindPersistentProfile(owner, slug, displayName) {
+    if (!this.persistentProfilesEnabled || !this.profilesRoot) {
+      fail('PERSISTENT_PROFILES_DISABLED', 'Named persistent profiles are disabled (set WB_PERSISTENT_PROFILE=1 or use connection authority)');
+    }
+    // Check if this caller already holds an open binding for this slug.
+    const existingOwn = [...this.#sessions.values()].find(
+      s => s.owner === owner && s.state === 'open' && s.persistence === 'persistent' && s.profileSlug === slug,
+    );
+    if (existingOwn) return existingOwn;
+
+    // Check if another caller in this same companion already holds this slug.
+    const existingOther = [...this.#sessions.values()].find(
+      s => s.owner !== owner && s.state === 'open' && s.persistence === 'persistent' && s.profileSlug === slug,
+    );
+    if (existingOther) {
+      fail('PROFILE_IN_USE', `Persistent profile "${slug}" is currently in use by another caller`);
+    }
+
+    // Coalesce concurrent requests from the same caller for the same slug.
+    const flightKey = `${owner}\0${slug}`;
+    if (this.#profileBindFlights.has(flightKey)) return this.#profileBindFlights.get(flightKey);
+
+    const flight = (async () => {
+      if (slug === this.defaultProfileSlug) {
+        if (this.authorityMode === 'hook' && this.#profiles.size > 0 && !this.#profiles.has(owner)) {
+          fail('PROFILE_IN_USE', `Persistent profile "${slug}" is currently in use by another caller`);
+        }
+        return this.#defaultProfile(owner, { strictPersistent: true });
+      }
+      if (this.#activePersistentRuntimes().length >= MAX_PERSISTENT_PROFILES) {
+        fail('PROFILE_LIMIT', `At most ${MAX_PERSISTENT_PROFILES} persistent profiles may be open simultaneously in one connection`);
+      }
+      const rt = await this.#ensureRuntime(`profile:${slug}`, { profileSlug: slug, strictPersistent: true });
+      try {
+        return await this.#newProfile(owner, {
+          name: displayName?.trim() || slug,
+          temporary: false,
+          runtime: rt,
+          profileSlug: slug,
+          isDefault: false,
+        });
+      } catch (error) {
+        await this.#disposeRuntime(rt);
+        throw error;
+      }
+    })().finally(() => {
+      if (this.#profileBindFlights.get(flightKey) === flight) this.#profileBindFlights.delete(flightKey);
+    });
+    this.#profileBindFlights.set(flightKey, flight);
+    return flight;
   }
 
   async #selectedSession(owner, sessionId) {
@@ -540,21 +815,29 @@ export class CamoufoxHost {
 
   #sessionInfo(profile) {
     return {
-      sessionId: profile.id, name: profile.name, temporary: profile.temporary,
-      isolated: true, isDefault: profile.isDefault, state: profile.state,
+      sessionId: profile.id,
+      name: profile.name,
+      profile: profile.profileSlug ?? null,
+      persistent: profile.persistence === 'persistent',
+      persistence: profile.persistence,
+      temporary: profile.temporary,
+      isolated: true,
+      isDefault: profile.isDefault,
+      state: profile.state,
       tabCount: [...this.#pages.values()].filter(p => !p.closed && p.profile === profile).length,
     };
   }
 
-  #onJugglerMessage(method, params, sessionId) {
+  #onJugglerMessage(runtime, method, params, sessionId) {
     if (method === 'Browser.attachedToTarget') {
       const info = params.targetInfo ?? {};
-      if (this.#bySessionId.has(params.sessionId)) return;
-      const opener = info.openerId ? this.#byTargetId.get(info.openerId) : null;
-      if (opener && !opener.closed) {
+      const targetId = info.targetId;
+      if (runtime.bySessionId.has(params.sessionId)) return;
+      const opener = info.openerId ? runtime.byTargetId.get(info.openerId) : null;
+      if (opener && !opener.closed && opener.profile.state === 'open') {
         const popup = this.#registerPage({
-          owner: opener.owner, profile: opener.profile,
-          sessionId: params.sessionId, targetId: info.targetId,
+          owner: opener.owner, profile: opener.profile, runtime,
+          sessionId: params.sessionId, targetId,
           actor: opener.actor,
         });
         if (opener.presentation.mode !== 'automation' || opener.paused) {
@@ -569,16 +852,24 @@ export class CamoufoxHost {
         popup.driver.start().catch(() => {});
         return;
       }
-      this.#pendingAttach?.(params);
+      if (targetId) {
+        const waiter = runtime.attachWaiters.get(targetId);
+        if (waiter) {
+          runtime.attachWaiters.delete(targetId);
+          waiter(params);
+        } else {
+          runtime.bufferedAttaches.set(targetId, params);
+        }
+      }
       return;
     }
     if (method === 'Browser.detachedFromTarget') {
-      const p = this.#bySessionId.get(params.sessionId) ?? this.#byTargetId.get(params.targetId);
+      const p = runtime.bySessionId.get(params.sessionId) ?? runtime.byTargetId.get(params.targetId);
       if (p && !p.closed) this.#closePageRecord(p);
       return;
     }
     if (method === 'Browser.downloadCreated') {
-      const p = this.#byTargetId.get(params.pageTargetId);
+      const p = runtime.byTargetId.get(params.pageTargetId);
       if (!p || p.closed) return;
       const isPrivate = p.presentation.mode !== 'automation';
       const safeName = path.basename(String(params.suggestedFileName || 'download')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120) || 'download';
@@ -588,7 +879,7 @@ export class CamoufoxHost {
         path: path.join(p.profile.downloadDir, params.uuid),
         state: 'progressing', receivedBytes: 0, totalBytes: 0, private: isPrivate,
       };
-      this.#downloadsByUuid.set(params.uuid, { item, page: p });
+      runtime.downloadsByUuid.set(params.uuid, { item, page: p });
       if (!isPrivate) {
         p.downloads.push(item);
         p.profile.downloads.push(item);
@@ -597,7 +888,7 @@ export class CamoufoxHost {
       return;
     }
     if (method === 'Browser.downloadFinished') {
-      const record = this.#downloadsByUuid.get(params.uuid);
+      const record = runtime.downloadsByUuid.get(params.uuid);
       if (!record) return;
       const { item, page: p } = record;
       item.state = params.canceled ? 'cancelled' : params.error ? 'interrupted' : 'completed';
@@ -608,21 +899,21 @@ export class CamoufoxHost {
       return;
     }
     if (sessionId) {
-      const p = this.#bySessionId.get(sessionId);
+      const p = runtime.bySessionId.get(sessionId);
       if (p && !p.closed) p.driver.onMessage(method, params);
       else if (!p) {
-        let queue = this.#earlyMessages.get(sessionId);
-        if (!queue) { queue = []; this.#earlyMessages.set(sessionId, queue); }
+        let queue = runtime.earlyMessages.get(sessionId);
+        if (!queue) { queue = []; runtime.earlyMessages.set(sessionId, queue); }
         if (queue.length < 256) queue.push({ method, params });
       }
     }
   }
 
-  #registerPage({ owner, profile, sessionId, targetId, actor = null }) {
+  #registerPage({ owner, profile, runtime, sessionId, targetId, actor = null }) {
     const id = `t${++this.#tabSequence}`;
     const navListeners = new Set();
     const p = {
-      id, owner, profile, sessionId, targetId, actor,
+      id, owner, profile, runtime, sessionId, targetId, actor,
       currentUrl: 'about:blank', currentTitle: '',
       visible: true, connected: true, closed: false, closedByAgent: false,
       paused: null, actorGeneration: null, privateSince: null,
@@ -637,7 +928,7 @@ export class CamoufoxHost {
       sessionLabel: `${profile.name} (${profile.id})`,
       locale: this.locale,
       isElevated: () => this.#automationMode === 'elevated',
-      onSync: () => this.#syncControlBar(),
+      onSync: () => this.#syncControlBar(runtime),
     });
     p.devtools = new DevToolsRecorder(
       () => p.presentation.mode,
@@ -647,7 +938,7 @@ export class CamoufoxHost {
       profile.devtoolsPrivacy,
     );
     p.driver = new CamoufoxFrameDriver({
-      page: p, process: this.#proc, sessionId, rdp: this.#rdp,
+      page: p, process: runtime.proc, sessionId, rdp: runtime.rdp,
       invalidate: reason => this.#invalidate(p, reason),
     });
     p.onNavigated = url => {
@@ -680,15 +971,16 @@ export class CamoufoxHost {
       this.#nativeFilePicker(p, evt);
     };
     this.#pages.set(id, p);
-    this.#bySessionId.set(sessionId, p);
-    this.#byTargetId.set(targetId, p);
-    const early = this.#earlyMessages.get(sessionId);
+    runtime.bySessionId.set(sessionId, p);
+    runtime.byTargetId.set(targetId, p);
+    const early = runtime.earlyMessages.get(sessionId);
     if (early) {
-      this.#earlyMessages.delete(sessionId);
+      runtime.earlyMessages.delete(sessionId);
       for (const msg of early) p.driver.onMessage(msg.method, msg.params);
     }
+    runtime.activeTabId = id;
     this.#activeTabId = id;
-    this.#syncControlBar();
+    this.#syncControlBar(runtime);
     return p;
   }
 
@@ -799,14 +1091,14 @@ export class CamoufoxHost {
     if (!p.closedByAgent) this.#signal(p, { kind: 'closed', closedTabId: p.id });
     p.closed = true;
     p.connected = false;
-    this.#rdp?.detachTab(p.id);
+    p.runtime?.rdp?.detachTab(p.id);
     this.nativeRequests.withdrawPage(p);
     this.#refs.retireTab(p.id);
     p.presentation.destroy();
-    this.#bySessionId.delete(p.sessionId);
-    this.#byTargetId.delete(p.targetId);
+    p.runtime?.bySessionId.delete(p.sessionId);
+    p.runtime?.byTargetId.delete(p.targetId);
     this.#queue.abort(p.id, new BrowserHostError('CLOSED_TAB', 'Tab closed'));
-    this.#syncControlBar();
+    this.#syncControlBar(p.runtime);
   }
 
   async #validateFiles(files, multiple) {
@@ -821,6 +1113,9 @@ export class CamoufoxHost {
       let resolved, info;
       try { resolved = await realpath(file); } catch { refuse(); }
       if (!local(resolved)) refuse();
+      if (isProtectedInternalPath(resolved, { dataRoot: this.dataRoot, connectionDataDir: this.dataDir })) {
+        fail('INVALID_UPLOAD_FILE', 'Uploading internal browser profile, preference, or connection control files is refused');
+      }
       try { info = await stat(resolved); } catch { refuse(); }
       if (!info.isFile()) refuse();
       real.push(resolved);
@@ -833,21 +1128,31 @@ export class CamoufoxHost {
     if (this.#ownerPages(owner).length >= MAX_SESSION_TABS) {
       fail('TAB_LIMIT', `At most ${MAX_SESSION_TABS} open tabs are allowed per caller`);
     }
-    const proc = await this.#ensureBrowser();
-    let attachedInfo = null;
-    let attachResolve;
-    const attachWait = new Promise(resolve => { attachResolve = resolve; });
-    this.#pendingAttach = params => { attachedInfo = params; attachResolve?.(); };
-    let targetId;
-    try {
-      const res = await proc.send('Browser.newPage', profile.browserContextId ? { browserContextId: profile.browserContextId } : {}, undefined, { signal });
-      targetId = res.targetId;
-      if (!attachedInfo) await bounded(attachWait, 10000, 'Camoufox page attach', signal);
-    } finally {
-      this.#pendingAttach = null;
+    const runtime = profile.runtime;
+    if (!runtime || runtime.closed || !runtime.proc || runtime.proc.closed) {
+      fail('CLOSED_SESSION', `Browser runtime for session ${profile.id} is closed`);
+    }
+    const res = await runtime.proc.send('Browser.newPage', profile.browserContextId ? { browserContextId: profile.browserContextId } : {}, undefined, { signal });
+    const targetId = res.targetId;
+    if (!targetId) fail('BROWSER_ERROR', 'Camoufox did not return a targetId for Browser.newPage');
+
+    let attachedInfo = runtime.bufferedAttaches.get(targetId) ?? null;
+    if (attachedInfo) {
+      runtime.bufferedAttaches.delete(targetId);
+    } else {
+      const waitAttach = new Promise(resolve => { runtime.attachWaiters.set(targetId, resolve); });
+      try {
+        attachedInfo = await bounded(waitAttach, 10000, 'Camoufox page attach', signal);
+      } finally {
+        runtime.attachWaiters.delete(targetId);
+      }
+    }
+    if (profile.state !== 'open' || runtime.closed || this.#closed || this.#revoking) {
+      await runtime.proc.send('Page.close', {}, attachedInfo.sessionId, { timeoutMs: 3000 }).catch(() => {});
+      fail('CLOSED_SESSION', 'Browser session closed during page creation');
     }
     const p = this.#registerPage({
-      owner, profile, sessionId: attachedInfo.sessionId, targetId,
+      owner, profile, runtime, sessionId: attachedInfo.sessionId, targetId,
       actor: caller.requestOwner ?? { caller, signal },
     });
     await p.driver.start();
@@ -856,15 +1161,15 @@ export class CamoufoxHost {
     if (!root) fail('ROOT_UNAVAILABLE', 'Camoufox root frame failed to initialize');
     // Attach Firefox RDP watcher BEFORE initial navigation so worker/SW
     // network resources and eager console reads are active from the first load.
-    if (this.#rdp) {
-      await this.#rdp.attachTab(p.id, {
+    if (runtime.rdp) {
+      await runtime.rdp.attachTab(p.id, {
         matchTab: t => t.url === 'about:blank' || t.url === url,
         onResource: (phase, rtype, item, _from, target) => {
           p.devtools.recordRdp(phase, rtype, item, target?.targetType || null);
         },
         watchResources: p.presentation.mode === 'automation',
       }).catch(() => {});
-      this.#syncControlBar();
+      this.#syncControlBar(runtime);
     }
     await this.#navigatePage(p, url, signal);
     return p;
@@ -884,14 +1189,14 @@ export class CamoufoxHost {
       p.onDomContentLoaded = null;
     }
     p.currentUrl = p.driver.rootFrame()?.url || url;
-    if (this.#rdp) {
-      this.#rdp.attachTab(p.id, {
+    if (p.runtime?.rdp) {
+      p.runtime.rdp.attachTab(p.id, {
         matchTab: t => t.url === p.currentUrl,
         onResource: (phase, rtype, item, _from, target) => {
           p.devtools.recordRdp(phase, rtype, item, target?.targetType || null);
         },
         watchResources: p.presentation.mode === 'automation',
-      }).then(() => this.#syncControlBar()).catch(() => {});
+      }).then(() => this.#syncControlBar(p.runtime)).catch(() => {});
     }
   }
 
@@ -923,7 +1228,7 @@ export class CamoufoxHost {
     const prevUrl = p.currentUrl, prevTitle = p.currentTitle;
     p.currentUrl = model.url || p.currentUrl;
     p.currentTitle = model.title || p.currentTitle;
-    if (p.currentUrl !== prevUrl || p.currentTitle !== prevTitle) this.#syncControlBar();
+    if (p.currentUrl !== prevUrl || p.currentTitle !== prevTitle) this.#syncControlBar(p.runtime);
     return model;
   }
 
@@ -1318,6 +1623,64 @@ export class CamoufoxHost {
     }
   }
 
+  async #closeProfileSession(caller, profile) {
+    if (profile.closeFlight) return profile.closeFlight;
+    if (profile.state !== 'open') {
+      return {
+        disposition: 'executed',
+        ...this.#sessionInfo(profile),
+        ...(profile.persistence === 'persistent' ? { storagePreserved: true } : {}),
+        closedTabIds: [],
+        cleanupComplete: profile.state === 'closed',
+      };
+    }
+    this.#assertSessionMutationAllowed(caller.sessionId, profile);
+    profile.state = 'closing';
+    const pages = this.#ownerPages(caller.sessionId).filter(q => q.profile === profile);
+    const closedTabIds = pages.map(q => q.id);
+
+    profile.closeFlight = (async () => {
+      const failures = [];
+      const rt = profile.runtime;
+      for (const p of pages) {
+        p.closedByAgent = true;
+        try { await rt?.proc?.send('Page.close', {}, p.sessionId, { timeoutMs: 5000 }); }
+        catch (err) { failures.push({ stage: `tab ${p.id}`, reason: err.message }); }
+        this.#closePageRecord(p);
+      }
+      for (const dl of profile.downloads) {
+        if (dl.state === 'progressing') {
+          await rt?.proc?.send('Browser.cancelDownload', { uuid: dl.id }, undefined, { timeoutMs: 3000 }).catch(() => {});
+        }
+      }
+      if (profile.temporary) {
+        if (profile.browserContextId && rt?.proc && !rt.proc.closed) {
+          try {
+            await rt.proc.send('Browser.removeBrowserContext', { browserContextId: profile.browserContextId }, undefined, { timeoutMs: 5000 });
+          } catch (err) {
+            failures.push({ stage: 'removeBrowserContext', reason: err.message });
+          }
+          rt.byBrowserContext.delete(profile.browserContextId);
+        }
+      } else {
+        // Named persistent profile: close its dedicated Camoufox process and
+        // release its lock AFTER exit, preserving all on-disk login storage.
+        const disposed = await this.#disposeRuntime(rt);
+        failures.push(...disposed.failures);
+      }
+      profile.state = failures.length ? 'cleanup-failed' : 'closed';
+      return {
+        disposition: failures.length ? 'failed' : 'executed',
+        ...this.#sessionInfo(profile),
+        ...(!profile.temporary ? { storagePreserved: true } : {}),
+        closedTabIds,
+        cleanupComplete: failures.length === 0,
+        ...(failures.length ? { code: 'SESSION_CLEANUP_FAILED', replaySafe: false, failures } : {}),
+      };
+    })();
+    return profile.closeFlight;
+  }
+
   async #execute(args, caller, requestSignal) {
     this.#assertCaller(caller, requestSignal);
     const signal = requestSignal ? AbortSignal.any([caller.signal, requestSignal]) : caller.signal;
@@ -1326,9 +1689,41 @@ export class CamoufoxHost {
     if (action === 'status') return this.status();
     if (action === 'revoke') return this.#revoke();
 
+    if (action === 'list_profiles') {
+      const activeBySlug = new Map();
+      for (const s of this.#sessions.values()) {
+        if (s.state !== 'open' || s.persistence !== 'persistent' || !s.profileSlug) continue;
+        if (s.owner === caller.sessionId) {
+          activeBySlug.set(s.profileSlug, {
+            sessionId: s.id,
+            sessionName: s.name,
+            tabCount: this.#ownerPages(caller.sessionId).filter(p => p.profile === s).length,
+          });
+        }
+      }
+      const profiles = await inspectProfiles(this.profilesRoot, {
+        activeBySlug,
+        persistenceEnabled: Boolean(this.persistentProfilesEnabled && this.profilesRoot),
+      });
+      // Mark profiles held by another caller inside this same companion as in-use-other without leaking their handles.
+      for (const s of this.#sessions.values()) {
+        if (s.state !== 'open' || s.persistence !== 'persistent' || !s.profileSlug || s.owner === caller.sessionId) continue;
+        const entry = profiles.find(row => row.profile === s.profileSlug);
+        if (entry) entry.state = 'in-use-other';
+      }
+      return {
+        supported: true,
+        engine: 'camoufox',
+        persistenceEnabled: Boolean(this.persistentProfilesEnabled && this.profilesRoot),
+        profiles,
+      };
+    }
+
     if (action === 'create_session') {
       this.#assertSessionMutationAllowed(caller.sessionId);
-      const profile = await this.#newProfile(caller.sessionId, { name: args.name, temporary: true });
+      const profile = args.profile !== undefined
+        ? await this.#bindPersistentProfile(caller.sessionId, args.profile, args.name)
+        : await this.#newProfile(caller.sessionId, { name: args.name, temporary: true });
       return { disposition: 'executed', ...this.#sessionInfo(profile) };
     }
     if (action === 'list_sessions') {
@@ -1343,41 +1738,7 @@ export class CamoufoxHost {
       if (!profile) fail('CLOSED_SESSION', `Unknown browser session ${args.sessionId}`);
       if (profile.owner !== caller.sessionId) fail('FOREIGN_SESSION', `Browser session ${args.sessionId} belongs to another caller`);
       if (profile.isDefault) fail('DEFAULT_SESSION', 'The default browser session cannot be closed');
-      if (profile.state !== 'open') {
-        return { disposition: 'executed', ...this.#sessionInfo(profile), closedTabIds: [], cleanupComplete: profile.state === 'closed' };
-      }
-      this.#assertSessionMutationAllowed(caller.sessionId, profile);
-      profile.state = 'closing';
-      const pages = this.#ownerPages(caller.sessionId).filter(q => q.profile === profile);
-      const closedTabIds = pages.map(q => q.id);
-      const failures = [];
-      for (const p of pages) {
-        p.closedByAgent = true;
-        try { await this.#proc?.send('Page.close', {}, p.sessionId, { timeoutMs: 5000 }); }
-        catch (err) { failures.push({ stage: `tab ${p.id}`, reason: err.message }); }
-        this.#closePageRecord(p);
-      }
-      for (const dl of profile.downloads) {
-        if (dl.state === 'progressing') {
-          await this.#proc?.send('Browser.cancelDownload', { uuid: dl.id }, undefined, { timeoutMs: 3000 }).catch(() => {});
-        }
-      }
-      if (profile.browserContextId && this.#proc && !this.#proc.closed) {
-        try {
-          await this.#proc.send('Browser.removeBrowserContext', { browserContextId: profile.browserContextId }, undefined, { timeoutMs: 5000 });
-        } catch (err) {
-          failures.push({ stage: 'removeBrowserContext', reason: err.message });
-        }
-        this.#byBrowserContext.delete(profile.browserContextId);
-      }
-      profile.state = failures.length ? 'cleanup-failed' : 'closed';
-      return {
-        disposition: failures.length ? 'failed' : 'executed',
-        ...this.#sessionInfo(profile),
-        closedTabIds,
-        cleanupComplete: failures.length === 0,
-        ...(failures.length ? { code: 'SESSION_CLEANUP_FAILED', replaySafe: false, failures } : {}),
-      };
+      return this.#closeProfileSession(caller, profile);
     }
 
     if (action === 'list_tabs') {
@@ -1385,6 +1746,8 @@ export class CamoufoxHost {
         const priv = p.presentation.mode !== 'automation';
         return {
           tabId: p.id, sessionId: p.profile.id, sessionName: p.profile.name,
+          profile: p.profile.profileSlug ?? null,
+          persistent: p.profile.persistence === 'persistent',
           url: priv ? null : p.currentUrl, title: priv ? null : p.currentTitle,
           mode: p.presentation.mode, generation: p.presentation.generation,
           paused: p.paused, visible: p.visible, connected: p.connected, busy: this.#queue.isBusy(p.id),
@@ -1449,10 +1812,11 @@ export class CamoufoxHost {
       }
       if (action === 'network' && !args.body) {
         const rdpActor = p.devtools.rdpActorForEnrichment(args.id);
-        if (rdpActor && this.#rdp?.connected) {
+        const rdp = p.runtime?.rdp;
+        if (rdpActor && rdp?.connected) {
           const [hdrs, reqBody] = await Promise.all([
-            this.#rdp.getNetworkHeaders(rdpActor, signal).catch(() => ({})),
-            this.#rdp.getNetworkPostData(rdpActor, signal).catch(() => undefined),
+            rdp.getNetworkHeaders(rdpActor, signal).catch(() => ({})),
+            rdp.getNetworkPostData(rdpActor, signal).catch(() => undefined),
           ]);
           p.devtools.enrichRdp(args.id, { ...hdrs, reqBody });
         }
@@ -1556,8 +1920,8 @@ export class CamoufoxHost {
         disposition: res.mode === 'native-handoff' ? 'executed' : 'uncertain',
         action: 'handoff', tabId: p.id,
         text: res.mode === 'native-handoff'
-          ? `mode ${res.mode}; the Control Bar flashes for the person. Only the person can return control; no tool can resume`
-          : `mode ${res.mode}; handoff did not finish entering native control; the person can use Take control or Resume in the Control Bar`,
+          ? `mode ${res.mode}; the #nav-bar flashes for the person. Only the person can return control; no tool can resume`
+          : `mode ${res.mode}; handoff did not finish entering native control; the person can use Take control or Resume in the #nav-bar`,
       };
     }
     if (action === 'hide' || action === 'show') {
@@ -1573,7 +1937,7 @@ export class CamoufoxHost {
     if (action === 'close_tab') {
       const p = this.#owned(args.tabId, caller, signal, false);
       p.closedByAgent = true;
-      await this.#proc?.send('Page.close', {}, p.sessionId, { timeoutMs: 5000 }).catch(() => {});
+      await p.runtime?.proc?.send('Page.close', {}, p.sessionId, { timeoutMs: 5000 }).catch(() => {});
       this.#closePageRecord(p);
       return { disposition: 'executed', action: 'close_tab', tabId: p.id, text: 'tab closed' };
     }
@@ -1913,7 +2277,7 @@ export class CamoufoxHost {
     }
     const assertSensitiveInputAllowed = () => {
       if (['fill', 'type'].includes(args.action) && info.sensitive && args.text && this.#automationMode !== 'elevated') {
-        fail('SENSITIVE_INPUT_REFUSED', 'Typing into sensitive fields (passwords, OTP, verification codes) requires human handoff in standard mode; clear with text:"" or opt in with WB_AUTOMATION_MODE=elevated');
+        fail('SENSITIVE_INPUT_REFUSED', 'Typing into sensitive fields (passwords, OTP, verification codes) requires human handoff in standard mode; clear with text:"" or enable elevated mode');
       }
     };
     assertSensitiveInputAllowed();
@@ -1934,14 +2298,23 @@ export class CamoufoxHost {
       if (missed(outcome)) state.code = 'TARGET_MISMATCH';
       return;
     }
+    // Check effective automationMode synchronously right at the final text send
+    // boundary so an intervening Revert prevents any characters from dispatching.
+    const beforeSensitiveInsert = () => {
+      assertSensitiveInputAllowed();
+      markSent();
+    };
     if (args.action === 'fill') {
       await ensureFocused();
-      const clearOutcome = await guarded('keydown', () => p.driver.dispatchSelectAllDelete({ beforeSend: markSent, signal }));
+      const clearOutcome = await guarded('keydown', () => p.driver.dispatchSelectAllDelete({
+        beforeSend: () => { if (args.text) assertSensitiveInputAllowed(); markSent(); },
+        signal,
+      }));
       if (missed(clearOutcome)) { state.code = 'TARGET_MISMATCH'; return; }
       if (args.text) {
         assertSensitiveInputAllowed();
         await ensureFocused();
-        const insOutcome = await guarded('beforeinput', () => p.driver.dispatchInsertText(args.text, { beforeSend: markSent, signal }));
+        const insOutcome = await guarded('beforeinput', () => p.driver.dispatchInsertText(args.text, { beforeSend: beforeSensitiveInsert, signal }));
         if (missed(insOutcome)) state.code = 'TARGET_MISMATCH';
       }
       return;
@@ -1949,17 +2322,20 @@ export class CamoufoxHost {
     if (args.action === 'type' && args.text) {
       assertSensitiveInputAllowed();
       await ensureFocused();
-      const insOutcome = await guarded('beforeinput', () => p.driver.dispatchInsertText(args.text, { beforeSend: markSent, signal }));
+      const insOutcome = await guarded('beforeinput', () => p.driver.dispatchInsertText(args.text, { beforeSend: beforeSensitiveInsert, signal }));
       if (missed(insOutcome)) state.code = 'TARGET_MISMATCH';
     }
   }
 
-  async grantPermission(owner, origin, kind) {
+  async grantPermission(owner, origin, kind, targetProfile = null) {
     const mapped = mapPermissionKind(kind);
     if (!mapped) fail('UNSUPPORTED_PERMISSION', `Permission ${kind} is not supported on Camoufox/Firefox`);
     if (!this.policy.permits(kind)) fail('POLICY_DENIED', `Policy does not delegate ${kind}`);
-    const proc = await this.#ensureBrowser();
-    await proc.send('Browser.grantPermissions', { origin, permissions: [mapped] });
+    const runtime = targetProfile?.runtime ?? await this.#ensureDefaultRuntime();
+    await runtime.proc.send('Browser.grantPermissions', {
+      origin, permissions: [mapped],
+      ...(targetProfile?.browserContextId ? { browserContextId: targetProfile.browserContextId } : {}),
+    });
     this.#permissionGrants.set(`${origin}\0${kind}`, 'allow');
   }
 
@@ -1973,16 +2349,17 @@ export class CamoufoxHost {
   async close() {
     if (this.#closed) return;
     this.#closed = true;
-    this.#chromeToolbar.close();
-    this.#rdp?.close();
     this.nativeRequests.close();
     for (const p of this.#pages.values()) {
       if (!p.closed) { p.closedByAgent = true; this.#closePageRecord(p); }
     }
-    try {
-      await this.#proc?.close();
-    } finally {
-      await this.#releaseProfileLock();
-    }
+    // Wait for any in-flight runtime startups or profile binds so nothing leaks.
+    await Promise.allSettled([
+      ...this.#runtimeStartFlights.values(),
+      ...this.#profileBindFlights.values(),
+    ]);
+    await Promise.allSettled(
+      [...this.#runtimes.values()].map(runtime => this.#disposeRuntime(runtime)),
+    );
   }
 }

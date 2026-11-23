@@ -12,6 +12,7 @@ const engines = new Set(['camoufox', 'electron']);
 // The companion loads one immutable snapshot before it admits tool calls.
 export class BrowserPolicy {
   constructor(value, problem) {
+    this.valid = false;
     this.mode = 'disabled';
     this.permissions = Object.freeze([]);
     this.automationMode = 'standard';
@@ -27,6 +28,7 @@ export class BrowserPolicy {
       const validEngine = !hasEngine || engines.has(value.engine);
       if (validAutomationMode && validEngine && value.version === 1 && ['manual', 'disabled'].includes(value.mode)
         && fields.every(key => simpleAllowed.has(key))) {
+        this.valid = true;
         this.mode = value.mode;
         this.automationMode = hasAutomationMode ? value.automationMode : 'standard';
         this.explicitAutomationMode = hasAutomationMode;
@@ -41,6 +43,7 @@ export class BrowserPolicy {
         && new Set(value.permissions).size === value.permissions.length
         && value.origins === 'owned-pages' && value.selection === 'offered-option'
         && value.lifetime === 'caller-generation' && value.newGrants === true) {
+        this.valid = true;
         this.mode = 'delegated';
         this.permissions = Object.freeze([...value.permissions]);
         this.automationMode = hasAutomationMode ? value.automationMode : 'standard';

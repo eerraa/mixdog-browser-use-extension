@@ -1,7 +1,7 @@
 import { actions, keys } from '../shared/contract.mjs';
 
 // These results stay compact JSON; every other action returns text (D13).
-export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
+export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'list_profiles', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
   'console', 'network', 'inspect', 'performance']);
 
 // Server instructions under connection authority (a plain MCP registration such
@@ -9,9 +9,9 @@ export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'create_session', 'l
 // travel with the server. Claude Code shows at most 4096 characters.
 export const CONNECTION_INSTRUCTIONS = `Independent Windows Browser: browse drives real owned browser windows (default Camoufox/Firefox 158; optional WB_ENGINE=electron fallback for WebHID/WebUSB; own profiles, never shared with other browsers). Use for interactive web apps, forms, sign-in flows, uploads, downloads, dialogs (alert/confirm/prompt), HTTP/WebSocket DevTools debugging, and WebHID/WebUSB (Electron). Use web fetch/search for plain text research.
 
-Calls: every call needs action. This connection is its own caller authority: never send _lease. A restarted or reconnected server is a new browser with no tabs: earlier tab ids and refs fail CLOSED_TAB, so open the page again (Camoufox persists its default profile in WB_DATA_DIR unless another live connection holds its lock; see status.profilePersistence).
+Calls: every call needs action. This connection is its own caller authority: never send _lease. A restarted or reconnected server is a new browser with no tabs: earlier tab ids and refs fail CLOSED_TAB, so open the page again (Camoufox persists owned profiles in WB_DATA_DIR; see status.profilePersistence and list_profiles).
 
-Pages: open {url,sessionId?} (http/https) returns tab t<n>, session ctx<n> and e<n> refs; omit sessionId for default. create_session {name?} makes an empty temporary session; list_sessions/list_tabs show ids/names; close_session {sessionId} clears only that temporary session. Tabs in one session share login; sessions never copy storage. Refs stay valid while unchanged: act on them and read diffs. scroll takes a target or scrolls the page with deltaY/deltaX. observe takes find:"words", scope:"e5", mode:"full"|"text" or screenshot:true. run scripts known flows. console, network (HTTP/redirects/WS/worker), inspect and performance are DevTools reads.
+Pages & profiles: open {url,sessionId?} (http/https) returns tab t<n>, session ctx<n> and e<n> refs; omit sessionId for default. list_profiles lists persistent Camoufox profiles (default, work, personal, plus existing slugs) and lock state. create_session {profile,name?} binds a named persistent profile (creating it on first use, failing PROFILE_IN_USE if another live process holds it); create_session {name?} makes an empty temporary session. close_session {sessionId} clears temporary data or detaches a named persistent profile while keeping its disk logins. list_sessions/list_tabs show ids/names/profiles. Tabs in one session share login; sessions never copy storage. Refs stay valid while unchanged: act on them and read diffs. scroll takes a target or scrolls the page with deltaY/deltaX. observe takes find:"words", scope:"e5", mode:"full"|"text" or screenshot:true. run scripts known flows. console, network (HTTP/redirects/WS/worker), inspect and performance are DevTools reads.
 
 Results: first line is status. not-executed with dispatched=false means nothing was sent. uncertain or replaySafe=false means input may have run: inspect and never repeat it. STALE_REF after handoff/return: observe the same tab for fresh element/iframe refs. DevTools withheld counts are cumulative privacy exclusions; returning control never restores them.
 
@@ -19,7 +19,7 @@ Native requests (file chooser, alert/confirm/prompt, notifications, geolocation,
 
 WebHID/WebUSB (WB_ENGINE=electron): click the page's connect button normally. Options carry vendorId, productId, name; respond with the exact device the task identifies, never choose by list order or sole offer. Missing/disabled policy is a blocker, not something to change.
 
-Sign-in, passwords, CAPTCHA, 2FA: check status.automationMode (list_tabs[].automationMode). In standard mode, call handoff on that tab for sign-in, passwords, OTP, CAPTCHA or 2FA (non-empty sensitive fill/type fails SENSITIVE_INPUT_REFUSED; empty fill "" clears). In explicit elevated mode (WB_AUTOMATION_MODE=elevated or browser-policy.json), fill/type/click/observe continue on sensitive fields with masking while evaluate/console expressions stay blocked beside secrets; still call handoff for CAPTCHA/human verification and respect user Revert/Stop/Take control immediately. On handoff the Control Bar or window flashes without taking focus; tell the person which window needs them and wait until they return control. Pages cannot be observed meanwhile. Failed return: list_tabs.returnFailure gives stage/code; only the person can use Retry return or Take control. Never replay input or replace the session.
+Sign-in, passwords, CAPTCHA, 2FA: check status.automationMode (list_tabs[].automationMode). In standard mode, call handoff on that tab for sign-in, passwords, OTP, CAPTCHA or 2FA (non-empty sensitive fill/type fails SENSITIVE_INPUT_REFUSED; empty fill "" clears). In explicit elevated mode (WB_AUTOMATION_MODE=elevated, browser-policy.json, or user-saved #nav-bar preference), fill/type/click/observe continue on sensitive fields with masking while evaluate/console expressions stay blocked beside secrets; still call handoff for CAPTCHA/human verification and respect user Revert/Stop/Take control immediately. On handoff the toolbar or window flashes without taking focus; tell the person which window needs them and wait until they return control. Pages cannot be observed meanwhile. Failed return: list_tabs.returnFailure gives stage/code; only the person can use Retry return or Take control. Never replay input or replace the session.
 
 Stop, denial, cancellation and handoff are never bypassed: no new session, tab, connection or retry loop; no call resumes a stopped page. revoke closes every window of this connection; use only when asked. Report completion only from observed effects.`;
 
@@ -43,7 +43,8 @@ export function browserTool(channel = null) {
         } : {}),
         tabId: { type: 'string', description: 'Tab id (t<n>) returned by this connection.' },
         sessionId: { type: 'string', pattern: '^ctx[1-9]\\d{0,9}$', description: 'open/close_session: browser session from create_session/list_sessions, never caller authority. Omit on open for the default.' },
-        name: { type: 'string', maxLength: 80, description: 'create_session: human-readable name for a new empty temporary session.' },
+        name: { type: 'string', maxLength: 80, description: 'create_session: human-readable display name for a temporary session or named persistent profile binding.' },
+        profile: { type: 'string', pattern: '^[a-z0-9][a-z0-9_-]{0,39}$', description: 'create_session only: bind a named persistent Camoufox profile (e.g. default, work, personal, or new slug from list_profiles) instead of a temporary session.' },
         url: { type: 'string', description: 'Credential-free HTTP(S) URL for open or navigate.' },
         ref: { type: 'string', description: 'Element ref (e<n>) from a result.' },
         target: {

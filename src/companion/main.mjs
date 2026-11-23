@@ -7,6 +7,7 @@ import { CallerAuthority, withoutLease } from '../shared/authority.mjs';
 import { BrowserHost } from '../browser/host.mjs';
 import { BrowserPolicy } from '../browser/policy.mjs';
 import { configureBrowserIdentity } from '../browser/user-agent.mjs';
+import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { automationMode, connectionPaths, pluginData } from '../shared/paths.mjs';
 
@@ -14,7 +15,8 @@ const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
 const envAutomationMode = automationMode();
-const paths = connectionPaths(pluginData(), channel);
+const dataRoot = pluginData();
+const paths = connectionPaths(dataRoot, channel);
 if (!key || !/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error('Companion launch credential is missing');
 const userData = path.join(paths.directory, 'electron');
 mkdirSync(userData, { recursive: true });
@@ -58,17 +60,22 @@ function terminate(reason) {
 }
 
 app.whenReady().then(async () => {
-  const policy = await BrowserPolicy.load(root);
-  const configuredAutomationMode = envAutomationMode ?? policy.automationMode;
-  const automationModeSource = envAutomationMode ? 'env' : policy.explicitAutomationMode ? 'policy' : 'default';
+  const [policy, prefs] = await Promise.all([
+    BrowserPolicy.load(root),
+    loadUserPreferences(dataRoot),
+  ]);
+  const resolvedMode = resolveAutomationMode({ envMode: envAutomationMode, policy, prefs });
   host = new BrowserHost({
     dataDir: paths.directory,
+    dataRoot,
     consentHelperPath: path.join(root, 'bin', 'native-consent.exe'),
     toolbarPreloadPath: path.join(root, 'app', 'toolbar-preload.cjs'),
     runnerPreloadPath: path.join(root, 'app', 'runner-preload.cjs'),
     policy,
-    automationMode: configuredAutomationMode,
-    automationModeSource,
+    automationMode: resolvedMode.mode,
+    automationModeSource: resolvedMode.source,
+    automationModePinned: resolvedMode.pinned,
+    automationPreferenceReason: resolvedMode.preferenceReason,
     onRevokeConnection: () => terminate('permission-revocation'),
   });
   listener = net.createServer(socket => {

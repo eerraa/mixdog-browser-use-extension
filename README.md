@@ -18,7 +18,7 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 | 범위 | action |
 | --- | --- |
 | 페이지·탭 | `open`, `navigate`, `list_tabs`, `close_tab` |
-| 로그인 상태가 분리된 세션 | `create_session`, `list_sessions`, `close_session` |
+| 로그인 상태가 분리된 세션·영구 프로필 | `list_profiles`, `create_session`, `list_sessions`, `close_session` |
 | 관측·읽기 | `observe`, `read`, `evaluate` |
 | 개발자 도구(디버깅) | `console`, `network`, `inspect`, `performance` |
 | 입력·폼 | `click`, `fill`, `type`, `press`, `select`, `scroll` |
@@ -154,8 +154,8 @@ C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 
   시작 시 거부). Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` →
   공유 `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
 - **Camoufox 제어 툴바**: 웹페이지 DOM에는 아무것도 주입하지 않고, Camoufox 자체 주소창 툴바(`#nav-bar`)
-  오른쪽에 다크/라이트 테마와 맞춘 1클릭 네이티브 제어 버튼(**직접 조작 / 에이전트에게 돌려주기 / 모두 반환 /
-  중지 / 권한 해제 / 종료**)을 직접 내장합니다. 별도 떠다니는 창 없이 브라우저와 한 몸으로 움직이므로 창
+  오른쪽에 다크/라이트 테마와 맞춘 프로필 배지(`default`·`work`·`personal` 등)와 1클릭 네이티브 제어 버튼(**직접 조작 / 에이전트에게 돌려주기 / 모두 반환 /
+  중지 / 권한 상승 · 권한 해제 / 종료**)을 직접 내장합니다. 별도 떠다니는 창 없이 브라우저와 한 몸으로 움직이므로 창
   이동·크기 조절·DPI 배율 변경 시 지연이나 어긋남이 없으며, 창 높이(`outerHeight - innerHeight`) 변화도
   0px입니다. 상태 동기화와 버튼 클릭은 32바이트 랜덤 토큰으로 보호된 로컬 루프백(`127.0.0.1`) 스트림으로
   즉시 처리됩니다. Camoufox에서는 `window.prompt()`까지 네이티브로 지원하며, `WB_ENGINE=electron`에서는
@@ -173,16 +173,21 @@ C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 
 - Claude Code는 긴 MCP 결과를 줄이거나 파일로 넘기므로 큰 페이지는 `mode:"full"`보다
   `find`·`scope`로 읽습니다.
 
-`create_session`으로 기존 계정의 로그인 상태를 유지하면서 쿠키가 비어 있는 임시 세션을
-만들 수 있습니다. `sessionId`는 브라우저 저장소 선택용이며 호출자 인증 정보를 바꾸지 않습니다.
+`list_profiles`로 기본 제공 영구 프로필(`default`, `work`, `personal`)과 이미 생성된 커스텀 영구 프로필의
+사용 가능 여부(`available`·`in-use-here`·`in-use-other`)를 조회하고, `create_session { profile, name? }`로
+원하는 영구 프로필을 열어 계정별 로그인을 디스크(`WB_DATA_DIR\profiles\camoufox-<프로필명>`)에 유지할 수 있습니다.
+서로 다른 MCP 스레드가 각각 다른 영구 프로필(`default`와 `work` 등)을 열면 잠금 충돌 없이 동시에 로그인 상태를 유지합니다.
+`profile`을 생략한 `create_session { name? }`은 기존과 같이 쿠키가 비어 있는 임시 세션을 만듭니다.
+`sessionId`는 브라우저 저장소 선택용이며 호출자 인증 정보를 바꾸지 않습니다.
 
 ```javascript
-browse({ action: "create_session", name: "참조 계정" }); // 반환 sessionId를 사용
-browse({ action: "open", sessionId: "ctx2", url: "https://account.apple.com/" });
-browse({ action: "handoff", tabId: "t2" }); // 반환된 실제 tabId 사용; 로그인은 사람이 처리
+browse({ action: "list_profiles" }); // default, work, personal 등 영구 프로필 목록과 잠금 상태 확인
+browse({ action: "create_session", profile: "work", name: "업무 계정" }); // 영구 프로필 바인딩 (로그인 유지)
+browse({ action: "create_session", name: "참조 계정" }); // profile 생략 시 빈 임시 세션
+browse({ action: "open", sessionId: "ctx2", url: "https://example.com/" });
 browse({ action: "list_sessions" });
 browse({ action: "list_tabs" });
-// 사람이 제어권을 돌려준 뒤 필요한 비교를 마치고 종료
+// 임시 세션은 데이터 정리, 영구 프로필 세션은 프로세스 종료·잠금 해제만 수행하고 디스크 로그인은 보존(storagePreserved:true)
 browse({ action: "close_session", sessionId: "ctx2" });
 ```
 
@@ -264,8 +269,9 @@ browse({ action: "close_session", sessionId: "ctx2" });
 켜거나 바꿀 수는 없으며, 허용되지 않은 값(`standard`·`elevated` 외)을 주면 서버가 시작 시
 실패합니다.
 
-- **환경 변수로 옵트인**: MCP 서버 등록에 `WB_AUTOMATION_MODE=elevated`를 추가합니다(정책 파일보다 우선).
+- **환경 변수로 옵트인**: MCP 서버 등록에 `WB_AUTOMATION_MODE=elevated`를 추가합니다(가장 높은 우선순위; `WB_AUTOMATION_MODE=standard`로 고정하면 아래 저장 설정보다 우선합니다).
 - **정책 파일로 옵트인**: 등록 전 `browser-policy.json`에 `"automationMode": "elevated"`를 추가합니다(`disabled`·`manual`·`delegated` 정책 모두에 선택 필드로 지정 가능; 배포 기본 파일에는 들어 있지 않습니다).
+- **브라우저 `#nav-bar` 1클릭 영구 저장 (권장, 호스트 설정 편집 불필요)**: 환경 변수나 정책으로 고정되지 않은 연결에서는 Camoufox `#nav-bar`의 **`[권한 상승]`** 버튼을 사람이 직접 클릭해 즉시 전환하고 `WB_DATA_DIR\user-preferences.json`에 저장할 수 있습니다. 이후 버전 업그레이드나 같은 `WB_DATA_DIR`를 쓰는 다른 호스트 연결에서도 `elevated`가 계속 유지되며, **`[권한 해제]`** 를 누르면 해당 연결은 즉시 단방향으로 `standard`로 내려가고 저장 설정도 `standard`로 되돌아갑니다. (에이전트가 MCP 인수나 스크립트로 이 설정을 올릴 수는 없으며, `user-preferences.json`과 프로필 파일은 웹 업로드에서도 자동 차단됩니다.)
 
 권한 상승 모드가 활성화된 동안의 동작과 안전 장치는 다음과 같습니다.
 
