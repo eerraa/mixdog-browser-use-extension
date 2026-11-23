@@ -24,6 +24,8 @@ export function electronCapabilities({
   automationModeSource = 'default',
   automationModePinned = false,
   automationPreferenceReason = null,
+  canElevate = false,
+  persistentPreference = false,
   maxTemporarySessions = 16,
 }) {
   const elevated = automationMode === 'elevated';
@@ -34,6 +36,8 @@ export function electronCapabilities({
       configuredMode: configuredAutomationMode,
       source: automationModeSource,
       pinned: automationModePinned,
+      canElevate: Boolean(canElevate),
+      persistentPreference: Boolean(persistentPreference),
       ...(automationPreferenceReason ? { preferenceReason: automationPreferenceReason } : {}),
       scope: elevated
         ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted without shield auto-handoff'

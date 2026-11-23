@@ -715,6 +715,7 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
         elevateVisible: bar._wbElevate?.style?.display !== "none",
         primaryText: bar._wbPrimary?.textContent || "",
         statusText: bar._wbStatus?.textContent || "",
+        revokeText: bar._wbRevoke?.textContent || "",
         parentId: bar.parentElement?.id || "",
       };
     })())`).catch(() => null);
@@ -727,12 +728,13 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
   assert.equal(mounted.elevateVisible, true);
   assert.equal(mounted.statusText, '에이전트 자동화 중');
   assert.equal(mounted.primaryText, '직접 조작');
+  assert.equal(mounted.revokeText, '연결 종료');
   assert.equal(chromeEvalCount, 1, 'initial mount uses exactly one chromeEval');
 
-  // Untrusted synthetic .click() on the Elevate button must be ignored (requireTrusted: true)
-  await origChromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); w.document.getElementById("wb-agent-nav-bar")._wbElevate.click(); return true; })()');
+  // Untrusted synthetic .click() on the Elevate and Disconnect buttons must be ignored (requireTrusted: true)
+  await origChromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); const b = w.document.getElementById("wb-agent-nav-bar"); b._wbElevate.click(); b._wbRevoke.click(); return true; })()');
   await delay(150);
-  assert.equal(received.length, 0, 'untrusted synthetic .click() on Elevate button must never trigger elevation');
+  assert.equal(received.length, 0, 'untrusted synthetic .click() on Elevate or Disconnect must never trigger actions');
 
   // Push handoff state update over SSE stream (must update #nav-bar WITHOUT another chromeEval!)
   toolbar.sync({

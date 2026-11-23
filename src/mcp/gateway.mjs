@@ -221,6 +221,8 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
             automationModeSource: resolvedMode.source,
             automationModePinned: resolvedMode.pinned,
             automationPreferenceReason: resolvedMode.preferenceReason,
+            canElevate: resolvedMode.mode === 'standard' && !resolvedMode.pinned && Boolean(data),
+            persistentPreference: Boolean(data),
           }),
         };
       }

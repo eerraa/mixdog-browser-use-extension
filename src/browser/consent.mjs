@@ -1,7 +1,8 @@
-import { BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { showManualMessageBox } from './dialogs.mjs';
 import { spawn } from 'node:child_process';
 import { bounded } from '../shared/async.mjs';
+import { controlStrings } from '../shared/ui-strings.mjs';
 
 // Trusted native surface: deliberately has no page ID, debugger, preload or IPC.
 // Web input and a native-dialog click are NOT approval evidence. Windows-owned
@@ -140,23 +141,36 @@ export class ConsentSurface {
   }
 }
 
-export function installPageMenu(window, { stop, resume, handoff, revoke, acceptDialog, dismissDialog, openDevTools, revertStandard }) {
+export async function confirmDisconnectDialog(window, locale = app?.getLocale?.() ?? 'en') {
+  if (!window || window.isDestroyed()) return false;
+  const c = controlStrings(locale);
+  const result = await showManualMessageBox(window, {
+    type: 'warning',
+    title: c.disconnectConfirmTitle,
+    message: c.disconnectConfirmMessage,
+    detail: c.disconnectConfirmDetail,
+    buttons: [c.cancel, c.disconnect],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  return result?.response === 1;
+}
+
+export function installPageMenu(window, { stop, resume, handoff, elevate, confirmRevoke, revoke, acceptDialog, dismissDialog, openDevTools, revertStandard }) {
   const menu = Menu.buildFromTemplate([
     { label: 'Stop automation', click: stop },
     { label: 'Resume automation', click: resume },
     { label: 'Human handoff', click: handoff },
+    { id: 'elevate-automation', label: 'Elevate automation', enabled: false, click: () => { void elevate?.(); } },
     { id: 'revert-standard', label: 'Revert connection to standard mode', enabled: false, click: revertStandard },
     { label: 'Accept pending page dialog', click: acceptDialog },
     { label: 'Dismiss pending page dialog', click: dismissDialog },
     // Enabled only in native handoff; the host refuses it in every other mode.
     { id: 'open-devtools', label: 'Open DevTools (while you have control)', enabled: false, click: openDevTools },
-    { label: 'Revoke permissions and close connection', click: async () => {
-      const result = await showManualMessageBox(window, {
-        type: 'warning', message: 'Close all plugin browser windows in this connection?',
-        detail: 'This stops automation and terminates this connection’s companion process to remove Chromium device grants. Profiles/cookies remain recoverable. It does not change external accounts.',
-        buttons: ['Cancel', 'Revoke and close'], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      if (result.response === 1) revoke();
+    { id: 'disconnect-connection', label: 'Revoke permissions and close connection', click: async () => {
+      if (confirmRevoke) { await confirmRevoke(); return; }
+      if (await confirmDisconnectDialog(window)) revoke();
     } },
   ]);
   window.setMenu(menu);

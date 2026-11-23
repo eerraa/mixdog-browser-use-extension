@@ -9,7 +9,7 @@ import { BrowserPermissions } from './permissions.mjs';
 import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from './policy.mjs';
 import { BrowserRequests } from './requests.mjs';
 import { BrowserDialogs } from './dialogs.mjs';
-import { installPageMenu } from './consent.mjs';
+import { confirmDisconnectDialog, installPageMenu } from './consent.mjs';
 import { PagePresentation, TOOLBAR_HEIGHT } from './presentation.mjs';
 import {
   DEVTOOLS_LIMITS, DevToolsRecorder, INSPECT_ELEMENT, PrivacyWindows, inspectNode, pageRead, performanceSnapshot, responseBody, selectElement,
@@ -25,7 +25,7 @@ import { createRunnerSandbox } from './runner/sandbox.mjs';
 import {
   BrowserHostError, devtoolsActions, fail, freshId, inputActions, keys, matchesTarget, pageURL, RUN_BOUNDS, validateArgs,
 } from '../shared/contract.mjs';
-import { isProtectedInternalPath } from '../shared/preferences.mjs';
+import { isProtectedInternalPath, saveUserPreferences } from '../shared/preferences.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
@@ -65,6 +65,8 @@ export class BrowserHost {
   #automationModeSource = 'default';
   #automationModePinned = false;
   #automationPreferenceReason = null;
+  #revertedThisConnection = false;
+  #disconnectPrompting = new WeakSet();
   // Connection-wide refs (D14), result signals and short ids.
   #refs = new RefRegistry();
   #signals = new SignalQueue();
@@ -113,6 +115,15 @@ export class BrowserHost {
     });
   }
 
+  #canElevate() {
+    return !this.#closed
+      && !this.#revoking
+      && this.#automationMode === 'standard'
+      && !this.#automationModePinned
+      && !this.#revertedThisConnection
+      && Boolean(this.dataRoot);
+  }
+
   status() {
     return {
       state: this.#closed ? 'closed' : this.#revoking ? 'terminating-revocation' : 'connected',
@@ -128,22 +139,90 @@ export class BrowserHost {
         automationModeSource: this.#automationModeSource,
         automationModePinned: this.#automationModePinned,
         automationPreferenceReason: this.#automationPreferenceReason,
+        canElevate: this.#canElevate(),
+        persistentPreference: Boolean(this.dataRoot),
         maxTemporarySessions: MAX_TEMPORARY_SESSIONS,
       }),
     };
+  }
+  #refreshAllToolbars() {
+    for (const q of this.#pages.values()) {
+      if (q.closed) continue;
+      if (q.elevateMenuItem) q.elevateMenuItem.enabled = this.#canElevate();
+      if (q.revertStandardMenuItem) q.revertStandardMenuItem.enabled = this.#automationMode === 'elevated';
+      q.presentation?.refresh();
+    }
+  }
+  async #setAutomationModeFromToolbar(mode) {
+    if (mode !== 'elevated' || !this.#canElevate()) return false;
+    try {
+      await saveUserPreferences(this.dataRoot, { automationMode: 'elevated' });
+    } catch {
+      return false;
+    }
+    // Re-verify after async write so an intervening Revert or Revoke always wins.
+    if (!this.#canElevate()) return false;
+    this.#automationMode = 'elevated';
+    this.#automationModeSource = 'user-preference';
+    this.#automationPreferenceReason = null;
+    this.#refreshAllToolbars();
+    for (const q of this.#pages.values()) {
+      if (!q.closed) this.#signal(q, { kind: 'state', state: 'automation mode elevated by person' });
+    }
+    return true;
   }
   // One-way connection-wide user downgrade back to standard mode. Takes effect
   // synchronously across all existing tabs, popups, queued work, and active
   // script runs while preserving Stop and native-handoff states.
   #revertToStandard() {
-    if (this.#closed || this.#revoking || this.#automationMode === 'standard') return;
+    if (this.#closed || this.#revoking) return;
+    this.#revertedThisConnection = true;
+    const wasElevated = this.#automationMode === 'elevated';
+    if (!wasElevated) {
+      this.#refreshAllToolbars();
+      return;
+    }
     this.#automationMode = 'standard';
     this.#automationModeSource = 'revoked-by-user';
+    if (!this.#automationModePinned && this.dataRoot) {
+      saveUserPreferences(this.dataRoot, { automationMode: 'standard' }).catch(() => {});
+    }
+    this.#refreshAllToolbars();
     for (const q of this.#pages.values()) {
-      if (q.closed) continue;
-      if (q.revertStandardMenuItem) q.revertStandardMenuItem.enabled = false;
-      q.presentation.refresh();
-      this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
+      if (!q.closed) this.#signal(q, { kind: 'state', state: 'automation mode reverted to standard by person' });
+    }
+  }
+  #pendingReturnsFor(page) {
+    const out = [];
+    for (const q of this.#pages.values()) {
+      if (q.closed || q.owner !== page.owner) continue;
+      if (q.presentation?.mode === 'native-handoff' || Boolean(q.returnFailure)) {
+        out.push({ id: q.id, self: q.id === page.id });
+      }
+    }
+    return out;
+  }
+  async #resumeAll(owner) {
+    const targets = [...this.#pages.values()].filter(
+      q => !q.closed && q.owner === owner && (q.presentation?.mode === 'native-handoff' || Boolean(q.returnFailure)),
+    );
+    await Promise.all(targets.map(q => this.#resume(q)));
+  }
+  async #resumeTabById(owner, tabId) {
+    const q = this.#pages.get(tabId);
+    if (!q || q.closed || q.owner !== owner) return;
+    await this.#resume(q);
+  }
+  async #confirmAndRevoke(p) {
+    if (this.#closed || this.#revoking || !p?.frame || p.frame.isDestroyed()) return;
+    if (this.#disconnectPrompting.has(p.frame)) return;
+    this.#disconnectPrompting.add(p.frame);
+    try {
+      if (await confirmDisconnectDialog(p.frame)) {
+        this.#revoke().catch(() => {});
+      }
+    } finally {
+      this.#disconnectPrompting.delete(p.frame);
     }
   }
   #assertCaller(caller, signal) {
@@ -261,6 +340,7 @@ export class BrowserHost {
       p.driver.assertNoDialogCleanup();
       p.presentation.enterNative(generation, { activate: p.manualActivate });
       this.#devtoolsMode(p);
+      this.#refreshAllToolbars();
       this.#signal(p, { kind: 'state', state: 'handoff' });
     }).catch(() => {
       if (!p.closed && !this.#closed && !this.#revoking && p.paused !== 'explicit-stop' && p.presentation.mode === 'draining') {
@@ -344,7 +424,7 @@ export class BrowserHost {
           p.detachedWhilePrivate = false;
           p.paused = null;
           this.#devtoolsMode(p);
-          p.presentation.refresh();
+          this.#refreshAllToolbars();
           this.#signal(p, { kind: 'state', state: 'returned' });
         } finally { p.driver.actorSignal = undefined; }
       }, controller.signal);
@@ -367,6 +447,7 @@ export class BrowserHost {
         p.presentation.failClosed(interrupted ? p.paused : 'return-failed');
       }
       p.presentation.clear('returnFailed', p.returnFailure);
+      this.#refreshAllToolbars();
     } finally {
       if (p.returnController === controller) p.returnController = null;
     }
@@ -715,10 +796,14 @@ export class BrowserHost {
     const humanActions = {
       stop: () => this.#pause(p, 'explicit-stop'),
       resume: () => this.#resume(p),
+      resumeAll: () => this.#resumeAll(p.owner),
+      resumeTab: targetId => this.#resumeTabById(p.owner, targetId),
       handoff: () => this.#handoff(p, 'human-handoff', { source: 'human' }),
+      elevate: () => this.#setAutomationModeFromToolbar('elevated'),
       revertStandard: () => this.#revertToStandard(),
       acceptDialog: () => this.#humanDialog(p, true),
       dismissDialog: () => this.#humanDialog(p, false),
+      confirmRevoke: () => this.#confirmAndRevoke(p),
       revoke: () => { this.#revoke().catch(() => {}); },
       openDevTools: () => this.#openDevTools(p),
     };
@@ -729,6 +814,8 @@ export class BrowserHost {
       guardNativeInput: () => p.driver.assertNoDialogCleanup(),
       paused: () => p.paused,
       elevated: () => this.#automationMode === 'elevated',
+      canElevate: () => this.#canElevate(),
+      pendingReturns: () => this.#pendingReturnsFor(p),
       returnFailure: () => p.returnFailure,
       visibility: visible => {
         if (p.visible !== visible) { p.visible = visible; this.#invalidate(p, 'logical-visibility'); }
@@ -740,7 +827,9 @@ export class BrowserHost {
     if (inheritedManual) { p.paused ||= 'inherited-native-handoff'; p.presentation.beginDrain(); }
     const pageMenu = installPageMenu(p.frame, humanActions);
     p.devtoolsMenuItem = pageMenu.items.find(item => item.id === 'open-devtools');
+    p.elevateMenuItem = pageMenu.items.find(item => item.id === 'elevate-automation');
     p.revertStandardMenuItem = pageMenu.items.find(item => item.id === 'revert-standard');
+    if (p.elevateMenuItem) p.elevateMenuItem.enabled = this.#canElevate();
     if (p.revertStandardMenuItem) p.revertStandardMenuItem.enabled = this.#automationMode === 'elevated';
     // DevTools outside native handoff would be human input that bypasses the shield.
     wc.on('devtools-opened', () => {
@@ -764,6 +853,7 @@ export class BrowserHost {
       this.dialogs.destroyed(p);
       this.#invalidate(p, 'closed');
       this.#queue.abort(p.id, new BrowserHostError('CLOSED_TAB', 'Tab closed'));
+      this.#refreshAllToolbars();
     });
     wc.on('render-process-gone', () => {
       p.connected = false;

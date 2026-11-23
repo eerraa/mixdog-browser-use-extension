@@ -74,6 +74,11 @@ export function defaultCamouPrefs({ enableRdp = true, hardenedRunner = false } =
     'devtools.debugger.force-local': true,
     'devtools.chrome.enabled': Boolean(enableRdp),
     'focusmanager.testmode': true,
+    // Keep new windows/tabs from grabbing foreground focus away from the user's active app.
+    'browser.tabs.loadDivertedInBackground': true,
+    'browser.tabs.loadInBackground': true,
+    'dom.disable_window_flip': true,
+    'browser.startup.preXulSkeletonUI': false,
     // Block unsolicited persistent-storage doorhangers by default (SitePermissions
     // DENY_ACTION = 2); explicit per-origin user decisions and normal cookies /
     // localStorage / IndexedDB persistence remain intact.

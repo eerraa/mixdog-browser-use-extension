@@ -68,6 +68,10 @@ test('chunkCamouEnv and defaultCamouConfig/Prefs shape Camoufox environment clea
   assert.equal(cfg['navigator.userAgent'], cfg['headers.User-Agent']);
   const defaultPrefs = defaultCamouPrefs({ enableRdp: true });
   assert.equal(defaultPrefs['permissions.default.persistent-storage'], 2);
+  assert.equal(defaultPrefs['browser.tabs.loadDivertedInBackground'], true);
+  assert.equal(defaultPrefs['browser.tabs.loadInBackground'], true);
+  assert.equal(defaultPrefs['dom.disable_window_flip'], true);
+  assert.equal(defaultPrefs['browser.startup.preXulSkeletonUI'], false);
   const runnerPrefs = defaultCamouPrefs({ enableRdp: true, hardenedRunner: true });
   assert.equal(runnerPrefs['media.peerconnection.enabled'], false);
   assert.equal(runnerPrefs['devtools.debugger.remote-enabled'], false);
@@ -1457,12 +1461,18 @@ test('CamoufoxHost reclaims idle non-default persistent profiles into dormant st
 test('Camoufox #nav-bar uses Disconnect/연결 종료 with × window-close guidance, and AC18 respawns default runtime after last-window exit', async () => {
   const ko = toolbarLabels('ko-KR');
   assert.equal(ko.revoke, '연결 종료');
+  assert.equal(ko.cancel, '취소');
   assert.match(ko.revokeTitle, /모든 브라우저 창/);
   assert.match(ko.revokeTitle, /×/);
+  assert.match(ko.revokeConfirmMessage, /연결을 종료/);
+  assert.match(ko.revokeConfirmDetail, /×/);
   const en = toolbarLabels('en-US');
   assert.equal(en.revoke, 'Disconnect');
+  assert.equal(en.cancel, 'Cancel');
   assert.match(en.revokeTitle, /every browser window/);
   assert.match(en.revokeTitle, /×/);
+  assert.match(en.revokeConfirmMessage, /Disconnect/);
+  assert.match(en.revokeConfirmDetail, /×/);
 
   const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-ac18-'));
   try {
@@ -1556,6 +1566,13 @@ test('Camoufox #nav-bar uses Disconnect/연결 종료 with × window-close guida
     assert.notEqual(second.tabId, first.tabId);
     assert.equal(spawned.length, 2, 'fresh Camoufox process launched on same channel after last-window ×');
     assert.equal(existsSync(lockPath), true, 'fresh default process reacquired persistent lock');
+
+    // Unified background visibility policy: show highlights taskbar without taking focus, and withholds private title during handoff.
+    const shown = await host.execute({ action: 'show', tabId: second.tabId }, caller);
+    assert.match(shown.text, /taskbar highlighted without taking focus/);
+    await host.execute({ action: 'handoff', tabId: second.tabId }, caller);
+    const shownPrivate = await host.execute({ action: 'show', tabId: second.tabId }, caller);
+    assert.doesNotMatch(shownPrivate.text, /AC18 #2/);
 
     // Unexpected crash while a tab is still open still pauses that tab fail-closed (presentation-lost).
     spawned[1].closed = true;

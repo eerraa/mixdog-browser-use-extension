@@ -12,12 +12,18 @@ window.addEventListener('DOMContentLoaded', () => {
   const $ = id => document.getElementById(id);
   const address = $('address');
   let state = null;
-  const send = (action, value) => ipcRenderer.send(ACTION, value === undefined ? { action } : { action, value });
+  const send = (action, value, extra = null) => ipcRenderer.send(ACTION, {
+    action,
+    ...(value === undefined ? {} : { value }),
+    ...(extra ?? {}),
+  });
   const label = (element, text) => { element.title = text; element.setAttribute('aria-label', text); };
   const actionButton = (button, spec) => {
+    if (!button) return;
     button.hidden = !spec;
     button.textContent = spec?.text ?? '';
     button.dataset.action = spec?.action ?? '';
+    button.dataset.targetId = spec?.targetId ?? '';
     button.title = spec?.title ?? '';
     if (spec?.title) button.setAttribute('aria-label', spec.title);
     else button.removeAttribute('aria-label');
@@ -43,19 +49,35 @@ window.addEventListener('DOMContentLoaded', () => {
     $('omnibox').classList.toggle('invalid', state.invalid);
     $('notice').textContent = state.notice ?? '';
     $('notice').title = state.notice ?? '';
-    actionButton($('elevated'), state.elevated);
+    if ($('agent-bar')) $('agent-bar').dataset.tone = state.chip.tone;
     $('chip').textContent = state.chip.text;
     $('chip').dataset.tone = state.chip.tone;
     $('chip').title = state.chip.title ?? '';
     actionButton($('primary'), state.primary);
+    actionButton($('return-all'), state.returnAll);
     actionButton($('secondary'), state.secondary);
+    actionButton($('elevate'), state.elevate);
+    actionButton($('elevated'), state.elevated);
+    actionButton($('disconnect'), state.disconnect);
   };
   for (const id of ['back', 'forward']) $(id).addEventListener('click', () => send(id));
   $('reload').addEventListener('click', () => send(state?.loading ? 'stop-loading' : 'reload'));
-  for (const id of ['elevated', 'primary', 'secondary']) {
-    $(id).addEventListener('click', event => {
+  for (const id of ['primary', 'return-all', 'secondary', 'elevated']) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.addEventListener('click', event => {
       const action = event.currentTarget.dataset.action;
-      if (action) send(action);
+      const targetId = event.currentTarget.dataset.targetId || undefined;
+      if (action) send(action, targetId);
+    });
+  }
+  for (const id of ['elevate', 'disconnect']) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      const action = event.currentTarget.dataset.action;
+      if (action) send(action, undefined, { trusted: true });
     });
   }
   address.addEventListener('focus', () => { if (state?.editable) address.select(); });

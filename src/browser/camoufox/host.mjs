@@ -185,6 +185,7 @@ export class CamoufoxHost {
   #activeTabId = null;
   #defaultProfilePersistence = 'ephemeral';
   #defaultReleaseFlight = Promise.resolve();
+  #firstWindowCued = false;
 
   constructor({
     dataDir, dataRoot = null, profilesRoot = null, persistentProfileDir = null,
@@ -2093,6 +2094,10 @@ export class CamoufoxHost {
       const profile = await this.#selectedSession(caller.sessionId, args.sessionId);
       const url = pageURL(args.url);
       const p = await this.#createPage(caller, profile, url, signal);
+      if (!this.#firstWindowCued) {
+        this.#firstWindowCued = true;
+        this.#flashControlBar(p.id);
+      }
       const model = await this.#perceive(p, caller, signal);
       return this.#present(p, model, caller, { action: 'open', disposition: 'executed', tabId: p.id }, {
         snapshot: args.snapshot ?? 'full', screenshot: args.screenshot === true,
@@ -2265,9 +2270,14 @@ export class CamoufoxHost {
       const p = this.#owned(args.tabId, caller, signal, false);
       p.visible = action === 'show';
       if (action === 'hide') { p.presentation.generation++; this.#refs.retireTab(p.id); }
+      else this.#flashControlBar(p.id);
+      const title = action === 'show' && p.presentation.mode === 'automation' ? p.currentTitle : '';
       return {
         disposition: 'executed', action, tabId: p.id,
-        text: `window ${p.visible ? 'visible' : 'hidden'}${p.paused ? `; paused: ${p.paused}` : ''}`
+        text: `window ${p.visible ? 'visible' : 'hidden'}`
+          + (action === 'show' && p.visible ? ' (taskbar highlighted without taking focus)' : '')
+          + (title ? `; title ${JSON.stringify(title)}` : '')
+          + `${p.paused ? `; paused: ${p.paused}` : ''}`
           + (action === 'hide' ? '; earlier refs and points of this tab are void (observe again after show)' : '; observe before acting'),
       };
     }

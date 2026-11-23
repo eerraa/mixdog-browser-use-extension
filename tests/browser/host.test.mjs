@@ -18,6 +18,7 @@ const { BrowserHost } = await import('../../src/browser/host.mjs');
 const { BrowserHostError } = await import('../../src/shared/contract.mjs');
 const { FrameDriver, INPUT_BINDING, INPUT_CREDIT_MS } = await import('../../src/browser/frames.mjs');
 const { BrowserPolicy } = await import('../../src/browser/policy.mjs');
+const { loadUserPreferences } = await import('../../src/shared/preferences.mjs');
 
 // Stub ONLY the CDP boundary. Exercise the real host, queue, caller authority
 // checks, permission callback policy, registry and trusted native menu routing.
@@ -126,16 +127,16 @@ function tabFor(contents) {
     view, frame, shield, contents, toolbar: frame.webContents, profile: view.options.webPreferences?.session,
     // A person can reach the live page only while it is uncovered in a shown window.
     exposed: () => frame.isVisible() && !shield.getVisible(),
-    toolbarAction: (action, value, senderFrame = frame.webContents.mainFrame) => frame.webContents.ipc.emit(
-      TOOLBAR_ACTION, { senderFrame }, value === undefined ? { action } : { action, value }),
+    toolbarAction: (action, value, senderFrame = frame.webContents.mainFrame, extra = {}) => frame.webContents.ipc.emit(
+      TOOLBAR_ACTION, { senderFrame }, { action, ...(value === undefined ? {} : { value }), ...extra }),
     toolbarState: () => frame.webContents.sent.findLast(([channel]) => channel === TOOLBAR_STATE)?.[1],
   };
 }
-async function setup({ policy = BrowserPolicy.manual(), automationMode, automationModeSource } = {}) {
+async function setup({ policy = BrowserPolicy.manual(), automationMode, automationModeSource, dataRoot } = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-unit-'));
   const revoked = [];
   const host = new BrowserHost({
-    dataDir, consentHelperPath: path.join(dataDir, 'not-invoked.exe'), toolbarPreloadPath, policy,
+    dataDir, dataRoot: dataRoot ?? null, consentHelperPath: path.join(dataDir, 'not-invoked.exe'), toolbarPreloadPath, policy,
     ...(automationMode !== undefined ? { automationMode } : {}),
     ...(automationModeSource !== undefined ? { automationModeSource } : {}),
     onRevokeConnection: disposition => { revoked.push(disposition); },
@@ -1425,7 +1426,7 @@ test('Stop during human return remains terminal after its late read finishes', a
     let state = (await call({ action: 'list_tabs' })).tabs[0];
     assert.equal(state.paused, 'explicit-stop');
     assert.equal(state.returnFailure.interruptedBy, 'explicit-stop');
-    assert.equal(tab.toolbarState().chip.text, 'Agent stopped');
+    assert.equal(tab.toolbarState().chip.text, 'Stopped');
     release.resolve();
     await tick();
     state = (await call({ action: 'list_tabs' })).tabs[0];
@@ -2927,6 +2928,107 @@ test('Electron status reports engine metadata and visibility cues flash taskbar 
     assert.doesNotMatch(shownPrivate.text, /PRIVATE_SECRET_TITLE/);
     assert.equal(tab2.frame.isFocused(), false);
   } finally { await host.close(); }
+});
+
+test('Electron toolbar parity: 1-click persisted elevation, return-all across handoff tabs, and disconnect confirmation dialog', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'independent-browser-root-'));
+  const { host, call, tabId, tab, revoked } = await setup({ dataRoot });
+  const originalDialog = dialog.showMessageBox;
+  try {
+    tab.toolbarAction('ready');
+    const st0 = host.status();
+    assert.equal(st0.capabilities.automation.canElevate, true);
+    assert.equal(st0.capabilities.automation.persistentPreference, true);
+
+    let bar = tab.toolbarState();
+    assert.equal(bar.chip.text, 'Agent active');
+    assert.equal(bar.primary.text, 'Take control');
+    assert.equal(bar.secondary.text, 'Stop');
+    assert.equal(bar.elevate?.text, 'Elevate');
+    assert.equal(bar.disconnect?.text, 'Disconnect');
+    assert.equal(bar.returnAll, null);
+
+    // Untrusted elevate IPC (without trusted:true) must be ignored.
+    tab.toolbarAction('elevate');
+    await tick();
+    assert.equal(host.status().automationMode, 'standard');
+
+    // Trusted elevate click persists user-preferences.json and flips toolbar + menu.
+    tab.toolbarAction('elevate', undefined, undefined, { trusted: true });
+    for (let i = 0; i < 20 && host.status().automationMode !== 'elevated'; i++) await new Promise(r => setTimeout(r, 10));
+    assert.equal(host.status().automationMode, 'elevated');
+    assert.equal(host.status().capabilities.automation.source, 'user-preference');
+    assert.equal((await loadUserPreferences(dataRoot)).automationMode, 'elevated');
+    bar = tab.toolbarState();
+    assert.equal(bar.chip.text, 'Elevated active');
+    assert.equal(bar.elevate, null);
+    assert.equal(bar.elevated?.text, 'Revert');
+    assert.equal(tab.frame.menu.items.find(item => item.id === 'elevate-automation').enabled, false);
+    assert.equal(tab.frame.menu.items.find(item => item.id === 'revert-standard').enabled, true);
+
+    // One-way Revert persists standard and latches canElevate=false for the connection.
+    tab.toolbarAction('revert-standard');
+    for (let i = 0; i < 20 && (await loadUserPreferences(dataRoot)).automationMode !== 'standard'; i++) await new Promise(r => setTimeout(r, 10));
+    assert.equal(host.status().automationMode, 'standard');
+    assert.equal(host.status().capabilities.automation.canElevate, false);
+    assert.equal((await loadUserPreferences(dataRoot)).automationMode, 'standard');
+    assert.equal(tab.toolbarState().elevate, null);
+    tab.toolbarAction('elevate', undefined, undefined, { trusted: true });
+    await tick();
+    assert.equal(host.status().automationMode, 'standard', 'one-way revert latches against re-elevation');
+
+    // Return-all parity across two handoff tabs.
+    const second = await call({ action: 'open', url: 'http://127.0.0.1:8000/two' });
+    const tab2 = tabFor(ownedViews.findLast(v => v.webContents.url === 'http://127.0.0.1:8000/two').webContents);
+    tab2.toolbarAction('ready');
+    await call({ action: 'handoff', tabId: second.tabId });
+    assert.equal(tab.toolbarState().returnAll?.action, 'resume-other');
+    assert.equal(tab.toolbarState().returnAll?.targetId, second.tabId);
+    assert.equal(tab.toolbarState().returnAll?.text, `Return needed ${second.tabId}`);
+
+    await call({ action: 'handoff', tabId });
+    assert.equal(tab.toolbarState().returnAll?.action, 'resume-all');
+    assert.equal(tab.toolbarState().returnAll?.text, 'Return all (2)');
+    assert.equal(tab2.toolbarState().returnAll?.action, 'resume-all');
+
+    tab.toolbarAction('resume-all');
+    for (let i = 0; i < 40 && host.status().pausedCount > 0; i++) await new Promise(r => setTimeout(r, 10));
+    assert.equal(host.status().pausedCount, 0);
+    assert.equal(tab.toolbarState().returnAll, null);
+    assert.equal(tab2.toolbarState().returnAll, null);
+
+    // Disconnect requires trusted click + explicit confirmation (default/cancel=0 keeps connection alive).
+    const prompts = [];
+    let nextResponse = 0;
+    dialog.showMessageBox = async (_win, options) => {
+      prompts.push(options);
+      return { response: nextResponse };
+    };
+    tab.toolbarAction('disconnect'); // untrusted -> ignored
+    await tick();
+    assert.equal(prompts.length, 0);
+    assert.equal(revoked.length, 0);
+
+    // Trusted click + Cancel (response 0) -> stays connected.
+    tab.toolbarAction('disconnect', undefined, undefined, { trusted: true });
+    await tick();
+    assert.equal(prompts.length, 1);
+    assert.deepEqual(prompts[0].buttons, ['Cancel', 'Disconnect']);
+    assert.deepEqual([prompts[0].defaultId, prompts[0].cancelId], [0, 0]);
+    assert.equal(revoked.length, 0);
+    assert.equal(host.status().state, 'connected');
+
+    // Trusted click + Disconnect (response 1) -> revokes connection.
+    nextResponse = 1;
+    tab.toolbarAction('disconnect', undefined, undefined, { trusted: true });
+    for (let i = 0; i < 20 && revoked.length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    assert.equal(prompts.length, 2);
+    assert.equal(revoked.length, 1);
+    assert.equal(host.status().state, 'terminating-revocation');
+  } finally {
+    dialog.showMessageBox = originalDialog;
+    await host.close();
+  }
 });
 
 test.after(() => {

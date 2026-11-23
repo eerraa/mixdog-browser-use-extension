@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeTheme, WebContentsView } from 'electron';
 import { addressURL, fail, freshId } from '../shared/contract.mjs';
+import { CONTROL_STRINGS } from '../shared/ui-strings.mjs';
 
 // Owned pages must keep producing frames while their window is covered.
 // Windows occlusion tracking stops frames for a window that is occluded before
@@ -14,22 +15,23 @@ const TOOLBAR_STATE = 'independent-browser:state';
 
 const STRINGS = {
   en: {
-    lang: 'en', back: 'Back', forward: 'Forward', reload: 'Reload', stopLoading: 'Stop loading',
+    ...CONTROL_STRINGS.en,
+    back: 'Back', forward: 'Forward', reload: 'Reload', stopLoading: 'Stop loading',
     address: 'Address', addressHint: 'Enter an http(s) address',
     secure: 'Secure connection (HTTPS)', insecure: 'Not secure (HTTP)',
-    takeControl: 'Take control', returnControl: 'Return to agent', resume: 'Resume agent', stopAgent: 'Stop agent',
-    chipAgent: 'Agent in control', chipElevated: 'Elevated automation', chipUser: 'You are in control', chipSwitching: 'Switching…',
-    chipReturning: 'Returning…', chipStopped: 'Agent stopped', chipPaused: 'Agent paused',
-    chipReturnFailed: 'Return failed', retryReturn: 'Retry return',
-    revertStandard: 'Elevated · Revert',
-    revertStandardHint: 'Elevated automation is active for this connection (login/sensitive fill allowed with value masking; shield clicks ignored). Click to immediately revert all tabs to standard mode.',
-    titleElevated: 'Elevated',
+    returnControl: CONTROL_STRINGS.en.returnAgent, resume: CONTROL_STRINGS.en.resumeAgent, stopAgent: CONTROL_STRINGS.en.stop,
+    chipAgent: CONTROL_STRINGS.en.automation, chipElevated: CONTROL_STRINGS.en.elevated, chipUser: CONTROL_STRINGS.en.native,
+    chipSwitching: CONTROL_STRINGS.en.draining, chipReturning: CONTROL_STRINGS.en.returning,
+    chipStopped: CONTROL_STRINGS.en.stopped, chipPaused: CONTROL_STRINGS.en.paused,
+    chipReturnFailed: CONTROL_STRINGS.en.returnFailed,
+    revertStandard: CONTROL_STRINGS.en.revert,
+    revertStandardHint: CONTROL_STRINGS.en.revertTitle,
     returnFailed: failure => `Return failed (${failure.stage}: ${failure.code}). Release held keys/buttons, then use the return/resume button, or Take control to keep using this page.`,
     agentHint: 'The agent is using this page. Click the page to take control.',
-    elevatedHint: 'Elevated automation is active (login/sensitive inputs allowed with value masking; shield clicks ignored). Use toolbar Take control, Stop agent, or Revert.',
+    elevatedHint: 'Elevated automation is active (login/sensitive inputs allowed with value masking; shield clicks ignored). Use toolbar Take control, Stop, or Revert.',
     userHint: 'The agent cannot read or control this page until you return control.',
-    badge: 'Agent in control · click to take over',
-    elevatedBadge: 'Elevated automation · use Take control or Stop in toolbar',
+    badge: `${CONTROL_STRINGS.en.automation} · click to take over`,
+    elevatedBadge: `${CONTROL_STRINGS.en.elevated} · use Take control or Stop in toolbar`,
     stopped: 'The agent is stopped. Take control to use the page, or resume the agent.',
     paused: reason => `The agent is paused (${reason}). Take control to use the page, or resume the agent.`,
     draining: 'Waiting for the agent’s current action to finish. Release any held mouse button or key.',
@@ -42,22 +44,23 @@ const STRINGS = {
     loadFailed: code => `Could not open the page (${code}).`,
   },
   ko: {
-    lang: 'ko', back: '뒤로', forward: '앞으로', reload: '새로고침', stopLoading: '로딩 중지',
+    ...CONTROL_STRINGS.ko,
+    back: '뒤로', forward: '앞으로', reload: '새로고침', stopLoading: '로딩 중지',
     address: '주소', addressHint: 'http(s) 주소 입력',
     secure: '보안 연결(HTTPS)', insecure: '보안 연결 아님(HTTP)',
-    takeControl: '직접 조작', returnControl: '에이전트에게 돌려주기', resume: '에이전트 재개', stopAgent: '에이전트 중지',
-    chipAgent: '에이전트 조작 중', chipElevated: '권한 상승 자동화', chipUser: '직접 조작 중', chipSwitching: '전환 중…',
-    chipReturning: '돌려주는 중…', chipStopped: '에이전트 중지됨', chipPaused: '에이전트 일시정지',
-    chipReturnFailed: '반환 실패', retryReturn: '반환 재시도',
-    revertStandard: '권한 상승 · 해제',
-    revertStandardHint: '이 연결에 권한 상승 자동화가 활성화되어 있습니다(민감 필드 입력 허용·값 마스킹 유지, 보호막 클릭 무시). 클릭하면 모든 탭을 즉시 표준 안전 모드로 되돌립니다.',
-    titleElevated: '권한 상승',
+    returnControl: CONTROL_STRINGS.ko.returnAgent, resume: CONTROL_STRINGS.ko.resumeAgent, stopAgent: CONTROL_STRINGS.ko.stop,
+    chipAgent: CONTROL_STRINGS.ko.automation, chipElevated: CONTROL_STRINGS.ko.elevated, chipUser: CONTROL_STRINGS.ko.native,
+    chipSwitching: CONTROL_STRINGS.ko.draining, chipReturning: CONTROL_STRINGS.ko.returning,
+    chipStopped: CONTROL_STRINGS.ko.stopped, chipPaused: CONTROL_STRINGS.ko.paused,
+    chipReturnFailed: CONTROL_STRINGS.ko.returnFailed,
+    revertStandard: CONTROL_STRINGS.ko.revert,
+    revertStandardHint: CONTROL_STRINGS.ko.revertTitle,
     returnFailed: failure => `반환에 실패했습니다(${failure.stage}: ${failure.code}). 누른 키·버튼을 놓고 반환·재개 버튼을 다시 누르거나, 직접 조작으로 이 페이지를 계속 사용하세요.`,
     agentHint: '에이전트가 이 페이지를 사용하고 있습니다. 페이지를 클릭하면 직접 조작으로 전환합니다.',
-    elevatedHint: '권한 상승 자동화가 활성화되어 있습니다(민감 필드 입력 허용·값 마스킹 유지, 보호막 클릭 무시). 개입은 툴바의 직접 조작·에이전트 중지·해제를 사용하세요.',
+    elevatedHint: '권한 상승 자동화가 활성화되어 있습니다(민감 필드 입력 허용·값 마스킹 유지, 보호막 클릭 무시). 개입은 툴바의 직접 조작·중지·권한 해제를 사용하세요.',
     userHint: '돌려주기 전까지 에이전트는 이 페이지를 읽거나 조작할 수 없습니다.',
-    badge: '에이전트 조작 중 · 클릭하면 직접 조작',
-    elevatedBadge: '권한 상승 자동화 · 직접 조작·중지는 툴바 사용',
+    badge: `${CONTROL_STRINGS.ko.automation} · 클릭하면 직접 조작`,
+    elevatedBadge: `${CONTROL_STRINGS.ko.elevated} · 직접 조작·중지는 툴바 사용`,
     stopped: '에이전트가 중지되었습니다. 페이지를 쓰려면 직접 조작을 누르거나 에이전트를 재개하세요.',
     paused: reason => `에이전트가 일시정지되었습니다(${reason}). 페이지를 쓰려면 직접 조작을 누르거나 에이전트를 재개하세요.`,
     draining: '에이전트의 진행 중인 동작이 끝나기를 기다리는 중입니다. 누르고 있는 마우스 버튼이나 키를 놓아 주세요.',
@@ -107,17 +110,26 @@ border-radius:16px;background:var(--field);border:1px solid var(--line)}
 #address{flex:1;min-width:0;height:30px;border:0;outline:0;background:none;color:inherit;font:inherit}
 #address:read-only{color:var(--muted)}
 #notice{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--stop);font-size:12px}
-#chip{flex:none;padding:5px 10px;border-radius:12px;border:1px solid currentColor;font-size:12px;font-weight:600;white-space:nowrap}
-#chip[data-tone=agent]{color:var(--agent)}#chip[data-tone=elevated]{color:var(--wait);background:rgba(176,96,0,.12)}
-#chip[data-tone=user]{color:var(--user)}
-#chip[data-tone=wait]{color:var(--wait)}#chip[data-tone=stop]{color:var(--stop)}
-#elevated{flex:none;height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--wait);background:rgba(176,96,0,.16);color:var(--wait);font-size:12px;font-weight:700}
-#elevated:hover:not(:disabled){background:rgba(176,96,0,.26)}
-#session{flex:0 1 auto;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
-#primary{background:var(--agent);color:var(--on-accent)}
-#primary:hover:not(:disabled){background:var(--agent);filter:brightness(1.08)}
-#secondary{border-color:var(--line)}
-#secondary[data-action=stop-automation]{color:var(--stop)}
+#agent-bar{flex:none;display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 7px;border-radius:8px;
+border:1px solid color-mix(in srgb,currentColor 20%,transparent);background:color-mix(in srgb,currentColor 6%,transparent);
+font-size:12px;transition:border-color 120ms ease,background-color 120ms ease}
+#agent-bar[data-tone=user]{border-color:rgba(59,130,246,.65);background:rgba(37,99,235,.14)}
+#agent-bar[data-tone=elevated]{border-color:rgba(245,158,11,.7);background:rgba(217,119,6,.16)}
+#agent-bar[data-tone=stop],#agent-bar[data-tone=wait]{border-color:rgba(239,68,68,.6);background:rgba(220,38,38,.14)}
+#agent-bar button{height:24px;min-width:0;padding:0 8px;border-radius:5px;font-size:11.5px;font-weight:500;
+border:1px solid color-mix(in srgb,currentColor 24%,transparent);background:color-mix(in srgb,currentColor 8%,transparent)}
+#agent-bar button:hover:not(:disabled){filter:brightness(1.12)}
+#session{flex:0 1 auto;display:inline-flex;align-items:center;height:20px;padding:0 6px;border-radius:4px;
+border:1px solid color-mix(in srgb,currentColor 24%,transparent);background:color-mix(in srgb,currentColor 8%,transparent);
+max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600}
+#dot{width:7px;height:7px;border-radius:50%;background:#22c55e;flex:none}
+#agent-bar[data-tone=user] #dot{background:#3b82f6}
+#agent-bar[data-tone=elevated] #dot{background:#f59e0b}
+#agent-bar[data-tone=stop] #dot,#agent-bar[data-tone=wait] #dot{background:#ef4444}
+#chip{flex:none;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;font-weight:600;padding-right:2px}
+#primary[data-action=resume]{background:#2563eb;border-color:#3b82f6;color:#fff;font-weight:600}
+#return-all{background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600}
+#elevated{background:#d97706;border-color:#f59e0b;color:#fff;font-weight:600}
 #progress{position:fixed;left:0;right:0;top:${TOOLBAR_HEIGHT - 2}px;height:2px;background:var(--agent);opacity:0;transform-origin:left}
 body.loading #progress{opacity:1;animation:load 1.4s ease-in-out infinite}
 @keyframes load{0%{transform:scaleX(.08)}60%{transform:scaleX(.7)}100%{transform:scaleX(.96)}}
@@ -129,8 +141,9 @@ ${button('reload', t.reload, `<svg id="reload-icon" viewBox="0 0 24 24" aria-hid
 <label id="omnibox"><span id="security" hidden>${icon('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>')}</span>
 <input id="address" aria-label="${escape(t.address)}" placeholder="${escape(t.addressHint)}" spellcheck="false" autocomplete="off" readonly>
 <span id="notice" role="alert"></span></label>
-<span id="session"></span><button id="elevated" hidden></button><span id="chip" role="status"></span>
-<button id="primary" hidden></button><button id="secondary" hidden></button>
+<div id="agent-bar" data-tone="agent"><span id="session"></span><span id="dot" aria-hidden="true"></span><span id="chip" role="status"></span>
+<button id="primary" hidden></button><button id="return-all" hidden></button><button id="secondary" hidden></button>
+<button id="elevate" hidden></button><button id="elevated" hidden></button><button id="disconnect" type="button"></button></div>
 </div><div id="progress"></div>`;
 }
 
@@ -572,6 +585,15 @@ export class PagePresentation {
     const url = this.contents.getURL(), loading = this.contents.isLoading(), history = this.contents.navigationHistory;
     const take = { text: t.takeControl, action: 'take-control' }, resume = { text: t.resume, action: 'resume' };
     const retry = { text: t.retryReturn, action: 'resume' };
+    const stopBtn = { text: t.stopAgent, action: 'stop-automation', title: t.stopTitle };
+    const canElevate = !elevated && this.callbacks.canElevate?.() === true;
+    const pending = this.callbacks.pendingReturns?.() ?? [];
+    const otherPending = pending.filter(entry => !entry.self);
+    const returnAll = pending.length >= 2
+      ? { text: `${t.returnAll} (${pending.length})`, action: 'resume-all', title: t.returnAll }
+      : otherPending.length === 1
+        ? { text: `${t.pendingReturn} ${otherPending[0].id}`, action: 'resume-other', targetId: otherPending[0].id, title: t.returnAll }
+        : null;
     const [chip, primary, secondary] = failure && this.mode !== 'returning' && paused !== 'explicit-stop'
       ? [{ text: t.chipReturnFailed, tone: 'stop' }, retry, native ? null : take]
       : paused === 'explicit-stop' && this.mode !== 'returning'
@@ -582,19 +604,22 @@ export class PagePresentation {
         : this.mode === 'draining' ? [{ text: t.chipSwitching, tone: 'wait' }, take, resume]
           : paused ? [{ text: paused === 'explicit-stop' ? t.chipStopped : t.chipPaused, tone: 'stop', title: paused }, take, resume]
             : elevated
-              ? [{ text: t.chipElevated, tone: 'elevated', title: t.elevatedHint }, take, { text: t.stopAgent, action: 'stop-automation' }]
-              : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, { text: t.stopAgent, action: 'stop-automation' }];
+              ? [{ text: t.chipElevated, tone: 'elevated', title: t.elevatedHint }, take, stopBtn]
+              : [{ text: t.chipAgent, tone: 'agent', title: t.agentHint }, take, stopBtn];
     return {
       browserSession: this.browserSession,
       automationMode: elevated ? 'elevated' : 'standard',
+      elevate: canElevate ? { text: t.elevate, action: 'elevate', title: t.elevateTitle } : null,
       elevated: elevated ? { text: t.revertStandard, action: 'revert-standard', title: t.revertStandardHint } : null,
+      returnAll,
+      disconnect: { text: t.disconnect, action: 'disconnect', title: t.disconnectTitle },
       url: url === 'about:blank' ? '' : url, secure: url.startsWith('https:'),
       securityTitle: url.startsWith('https:') ? t.secure : t.insecure,
       editable: native, navigable: native, loading,
       canGoBack: native && history.canGoBack(), canGoForward: native && history.canGoForward(),
       reloadTitle: loading ? t.stopLoading : t.reload, invalid: this.addressError,
       notice: this.addressError ? t.invalidAddress : this.loadError ? t.loadFailed(this.loadError)
-        : failure ? this.#message() : native && this.notice ? this.#message() : null,
+        : failure ? this.#message() : this.notice?.key === 'saveFailed' ? t.saveFailed : native && this.notice ? this.#message() : null,
       chip, primary, secondary,
     };
   }
@@ -613,8 +638,22 @@ export class PagePresentation {
       case 'navigate': if (native) this.#navigate(message.value); return;
       case 'take-control': if (!native && this.mode !== 'returning') void this.actions.handoff(); return;
       case 'resume': if (native || this.mode === 'draining' || this.callbacks.paused()) void this.actions.resume(); return;
+      case 'resume-all': void this.actions.resumeAll?.(); return;
+      case 'resume-other': if (typeof message.value === 'string' && /^t[1-9]\d{0,9}$/.test(message.value)) void this.actions.resumeTab?.(message.value); return;
       case 'stop-automation': if (!native) this.actions.stop(); return;
+      case 'elevate':
+        if (message.trusted !== true) return;
+        Promise.resolve(this.actions.elevate?.()).then(ok => {
+          if (ok === false && !this.closed) { this.notice = { key: 'saveFailed' }; this.#publish(); }
+        }).catch(() => {
+          if (!this.closed) { this.notice = { key: 'saveFailed' }; this.#publish(); }
+        });
+        return;
       case 'revert-standard': if (this.#isElevated()) this.actions.revertStandard?.(); return;
+      case 'disconnect':
+        if (message.trusted !== true) return;
+        void this.actions.confirmRevoke?.();
+        return;
       default:
     }
   }

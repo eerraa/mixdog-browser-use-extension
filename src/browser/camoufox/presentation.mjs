@@ -9,35 +9,9 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import { fail } from '../../shared/contract.mjs';
+import { CONTROL_STRINGS, controlStrings } from '../../shared/ui-strings.mjs';
 
-const STRINGS = {
-  en: {
-    automation: 'Agent active',
-    elevated: 'Elevated active',
-    paused: 'Paused',
-    draining: 'Switching…',
-    native: 'You have control',
-    returning: 'Returning…',
-    returnFailed: 'Return failed',
-    takeControl: 'Take control',
-    returnAgent: 'Return to agent',
-    resumeAgent: 'Resume agent',
-    retryReturn: 'Retry return',
-  },
-  ko: {
-    automation: '에이전트 자동화 중',
-    elevated: '권한 상승 자동화 중',
-    paused: '일시정지됨',
-    draining: '전환 중…',
-    native: '직접 조작 중',
-    returning: '반환 중…',
-    returnFailed: '반환 실패',
-    takeControl: '직접 조작',
-    returnAgent: '에이전트에게 돌려주기',
-    resumeAgent: '에이전트 재개',
-    retryReturn: '반환 재시도',
-  },
-};
+const STRINGS = CONTROL_STRINGS;
 
 const PAUSE_REASONS = {
   en: {
@@ -88,40 +62,27 @@ function sameToken(supplied, expected) {
 }
 
 export function toolbarLabels(locale) {
-  const isKo = String(locale).toLowerCase().startsWith('ko');
-  return isKo
-    ? {
-      stop: '중지',
-      stopTitle: '에이전트 자동화 중지',
-      elevate: '권한 상승',
-      elevateTitle: '권한 상승 자동화(elevated)로 전환하고 저장합니다 (비밀번호/OTP 자동 입력 허용, CAPTCHA는 직접 처리)',
-      revert: '권한 해제',
-      revertTitle: '권한 상승 모드를 기본(standard)으로 즉시 해제합니다',
-      revoke: '연결 종료',
-      revokeTitle: '이 연결의 모든 브라우저 창을 닫습니다. 다시 사용하려면 MCP 호스트에서 새로 연결하세요. 이 창만 닫으려면 창 오른쪽 위의 ×를 누르세요.',
-      returnAll: '모두 반환',
-      pendingReturn: '반환 대기',
-      idle: '대기 중',
-      persistentProfileTitle: '영구 프로필 (로그인 유지)',
-      ephemeralProfileTitle: '임시 프로필 (종료 시 초기화)',
-      saveFailed: '설정 저장 실패',
-    }
-    : {
-      stop: 'Stop',
-      stopTitle: 'Stop agent automation',
-      elevate: 'Elevate',
-      elevateTitle: 'Switch to elevated automation and remember preference (CAPTCHA stays manual)',
-      revert: 'Revert',
-      revertTitle: 'Revert connection to standard mode',
-      revoke: 'Disconnect',
-      revokeTitle: 'Close every browser window on this connection (reconnect from the MCP host to use again). To close only this window, click × at the top right.',
-      returnAll: 'Return all',
-      pendingReturn: 'Return needed',
-      idle: 'Idle',
-      persistentProfileTitle: 'Persistent profile (logins kept)',
-      ephemeralProfileTitle: 'Temporary profile (cleared on close)',
-      saveFailed: 'Failed to save preference',
-    };
+  const c = controlStrings(locale);
+  return {
+    stop: c.stop,
+    stopTitle: c.stopTitle,
+    elevate: c.elevate,
+    elevateTitle: c.elevateTitle,
+    revert: c.revert,
+    revertTitle: c.revertTitle,
+    revoke: c.disconnect,
+    revokeTitle: c.disconnectTitle,
+    cancel: c.cancel,
+    revokeConfirmTitle: c.disconnectConfirmTitle,
+    revokeConfirmMessage: c.disconnectConfirmMessage,
+    revokeConfirmDetail: c.disconnectConfirmDetail,
+    returnAll: c.returnAll,
+    pendingReturn: c.pendingReturn,
+    idle: c.idle,
+    persistentProfileTitle: c.persistentProfileTitle,
+    ephemeralProfileTitle: c.ephemeralProfileTitle,
+    saveFailed: c.saveFailed,
+  };
 }
 
 function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedNonce = '' }) {
@@ -410,7 +371,24 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       revertBtn.style.fontWeight = '600';
       revertBtn.style.display = 'none';
 
-      const revokeBtn = makeBtn(doc, L.revoke, L.revokeTitle, () => postAction(win, 'revoke', ''));
+      const revokeBtn = makeBtn(doc, L.revoke, L.revokeTitle, () => {
+        try {
+          const PS = Services.prompt;
+          // In Gecko nsIPromptService.confirmEx, BUTTON_POS_1 is ALWAYS the
+          // Escape/window-close cancel button; making it default as well ensures
+          // Cancel, Enter, Escape and dialog × all cancel safely, and only an
+          // explicit click on Disconnect (0) revokes the connection.
+          const flags = (PS.BUTTON_POS_0 * PS.BUTTON_TITLE_IS_STRING)
+            + (PS.BUTTON_POS_1 * PS.BUTTON_TITLE_IS_STRING)
+            + PS.BUTTON_POS_1_DEFAULT;
+          const body = L.revokeConfirmMessage + '\\n\\n' + L.revokeConfirmDetail;
+          const choice = PS.confirmEx(win, L.revokeConfirmTitle, body, flags, L.revoke, L.cancel, null, null, { value: false });
+          if (choice !== 0) return;
+        } catch {
+          return;
+        }
+        postAction(win, 'revoke', '');
+      }, { requireTrusted: true });
 
       bar.append(profileEl, dot, statusEl, primaryBtn, returnAllBtn, stopBtn, elevateBtn, revertBtn, revokeBtn);
       bar._wbProfile = profileEl;
@@ -421,6 +399,7 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       bar._wbStop = stopBtn;
       bar._wbElevate = elevateBtn;
       bar._wbRevert = revertBtn;
+      bar._wbRevoke = revokeBtn;
 
       nav.insertBefore(bar, panelBtn || null);
       const onTabSelect = () => renderWindow(win);
