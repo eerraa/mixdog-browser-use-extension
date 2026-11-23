@@ -42,6 +42,13 @@ export function engineMode(env = process.env) {
   return engine;
 }
 
+/** Whether named persistent Camoufox profiles are enabled for this authority. */
+export function persistentProfilesEnabled(authMode = authorityMode(), env = process.env) {
+  const pref = env.WB_PERSISTENT_PROFILE;
+  return pref === '1' || pref === 'true'
+    || (authMode === 'connection' && pref !== '0' && pref !== 'false');
+}
+
 function resolveCamoufoxDir(dir) {
   if (!dir) return null;
   const resolved = path.resolve(dir);

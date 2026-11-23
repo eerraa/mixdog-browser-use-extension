@@ -247,7 +247,10 @@ export class CamoufoxProcess extends EventEmitter {
     if (this.#rdpPort) args.push('--start-debugger-server', String(this.#rdpPort));
     if (this.headless) args.push('-headless');
 
-    const config = this.camouConfig ?? (this.hardenedRunner ? {} : defaultCamouConfig({ locale: this.locale }));
+    // Always populate CAMOU_CONFIG (including for hardenedRunner): omitting
+    // CAMOU_CONFIG_1 triggers Camoufox's full fallback probe in both parent and
+    // first content process (+3.2 s cold-boot penalty).
+    const config = this.camouConfig ?? defaultCamouConfig({ locale: this.locale });
     const prefs = { ...defaultCamouPrefs({ enableRdp: this.enableRdp, hardenedRunner: this.hardenedRunner }), ...(this.extraPrefs ?? {}) };
     const env = {
       ...this.env,

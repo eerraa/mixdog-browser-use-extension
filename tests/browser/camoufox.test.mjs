@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
+import { JugglerTransport, CamoufoxProcess, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus, toolbarLabels } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
@@ -59,7 +59,7 @@ test('JugglerTransport frames NUL-delimited JSON-RPC across split chunks, routes
   await assert.rejects(pending, /eof/);
 });
 
-test('chunkCamouEnv and defaultCamouConfig/Prefs shape Camoufox environment cleanly', () => {
+test('chunkCamouEnv and defaultCamouConfig/Prefs shape Camoufox environment cleanly', async () => {
   const chunks = chunkCamouEnv('CAMOU_CONFIG', { a: 'x'.repeat(2500) });
   assert.ok(chunks.CAMOU_CONFIG_1 && chunks.CAMOU_CONFIG_2);
   assert.equal(JSON.parse(chunks.CAMOU_CONFIG_1 + chunks.CAMOU_CONFIG_2).a.length, 2500);
@@ -79,6 +79,35 @@ test('chunkCamouEnv and defaultCamouConfig/Prefs shape Camoufox environment clea
   assert.equal(formatPausedStatus('ko-KR', 'explicit-stop'), '사용자 중지');
   assert.equal(formatPausedStatus('en-US', 'unexpected-page-input'), 'Paused: Direct input');
   assert.equal(formatPausedStatus('ko-KR', 'unknown-internal-code'), '일시정지됨');
+
+  // Verify hardenedRunner still passes CAMOU_CONFIG_1 so Camoufox skips its +3.2s fallback probe.
+  let capturedEnv = null;
+  const cfgDir = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-cfg-'));
+  try {
+    const fakeProc = new CamoufoxProcess({
+      executablePath: 'C:\\fake\\camoufox.exe',
+      profileDir: cfgDir,
+      headless: true,
+      enableRdp: false,
+      hardenedRunner: true,
+      spawnImpl: (_exe, _args, opts) => {
+        capturedEnv = opts.env;
+        const child = new EventEmitter();
+        child.pid = 0;
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.stdio = [null, child.stdout, child.stderr, new PassThrough(), new PassThrough()];
+        child.kill = () => {};
+        queueMicrotask(() => child.emit('exit', 1, null));
+        return child;
+      },
+    });
+    await fakeProc.start().catch(() => {});
+    assert.ok(capturedEnv?.CAMOU_CONFIG_1, 'hardenedRunner must populate CAMOU_CONFIG_1');
+    assert.ok(capturedEnv?.CAMOU_PREFS_1?.includes('media.peerconnection.enabled'), 'hardenedRunner preserves network/WebRTC lockdown prefs');
+  } finally {
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
 });
 
 test('FirefoxRdpTransport frames length-prefixed UTF-8 packets, matches replies, and emits unsolicited resources', async () => {

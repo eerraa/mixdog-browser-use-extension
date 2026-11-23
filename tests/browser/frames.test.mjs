@@ -128,6 +128,34 @@ test('first input to a document waits out paint holding of every local root on t
   assert.deepEqual(sent.map(entry => entry.params.contextId), [9], 'only the new document is probed');
 });
 
+test('inputReady wakes immediately on first-contentful-paint when PerformanceObserver is available', async () => {
+  const { driver, debuggerAPI } = fixture();
+  driver.frames.set('root', { id: 'root', contextId: 7, documentId: 'D-fcp' });
+  let disconnected = false;
+  debuggerAPI.sendCommand = async (_method, params) => {
+    const value = await vm.runInNewContext(params.expression, {
+      setTimeout, clearTimeout,
+      performance: {
+        now: () => 100,
+        getEntriesByType: type => (type === 'paint' ? [] : [{ responseStart: 50 }]),
+      },
+      PerformanceObserver: class {
+        constructor(cb) { this.cb = cb; }
+        observe() {
+          setTimeout(() => this.cb({ getEntries: () => [{ name: 'first-contentful-paint' }] }), 15);
+        }
+        disconnect() { disconnected = true; }
+      },
+    });
+    return { result: { value } };
+  };
+  const started = Date.now();
+  await driver.inputReady(driver.frames.get('root'));
+  const elapsed = Date.now() - started;
+  assert.equal(disconnected, true, 'observer is disconnected on FCP');
+  assert.ok(elapsed < 250, `expected early FCP wakeup instead of full 650ms paint-hold sleep, got ${elapsed}ms`);
+});
+
 test('stable geometry measurement never scrolls the target or its ancestors', async () => {
   const rect = { left: 20, top: 30, width: 80, height: 40 };
   let samples = 0;

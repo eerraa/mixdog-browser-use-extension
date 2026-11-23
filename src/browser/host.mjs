@@ -33,6 +33,7 @@ const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 4
 const TILE = 24;
 const WAIT_POLL_MS = 100;
 const SHORT_SETTLE = new Set(['scroll', 'evaluate']);
+const SHORT_PROBE_ACTIONS = new Set(['scroll', 'fill', 'type', 'select', 'upload']);
 // A native request other than a JS dialog leaves the renderer running; the
 // input that opened it gets this long to be acknowledged before the result.
 const NATIVE_REQUEST_ACK_GRACE_MS = 300;
@@ -251,6 +252,7 @@ export class BrowserHost {
   // Page events withdraw permissions, dialogs and DevTools as needed. Refs are
   // not voided here: each one is validated against its own node at use (C7).
   #invalidate(p, reason) {
+    p.modelFresh = null;
     if (reason === 'handoff-draining') this.#beginPrivate(p);
     if (reason === 'debugger-disconnected' && p.presentation?.mode !== 'automation') p.detachedWhilePrivate = true;
     this.#devtoolsMode(p);
@@ -1164,6 +1166,24 @@ export class BrowserHost {
         const p = this.#owned(tabId, caller, both);
         // A lane parked behind a dialog never observes: name the dialog instead.
         if (p.dialog) return this.#dialogFirst(p, caller, 'observe').text;
+        const canReuse = p.model && p.modelFresh
+          && p.modelFresh.generation === p.presentation.generation
+          && p.modelFresh.url === p.contents.getURL()
+          && (Date.now() - p.modelFresh.at) <= 100
+          && p.connected && p.presentation.mode === 'automation';
+        if (canReuse) {
+          const result = await this.#queue.run(p.id, async laneSignal => {
+            this.#owned(p.id, caller, laneSignal);
+            p.presentation.assertObservable();
+            const stillFresh = p.model && p.modelFresh
+              && p.modelFresh.generation === p.presentation.generation
+              && p.modelFresh.url === p.contents.getURL()
+              && (Date.now() - p.modelFresh.at) <= 100;
+            const model = stillFresh ? p.model : await this.#perceive(p, caller, laneSignal);
+            return this.#present(p, model, caller, { action: 'run', disposition: 'executed', tabId: p.id }, { snapshot: 'diff' });
+          }, both);
+          return result.text;
+        }
         const result = await this.#run(p, { action: 'observe', tabId, after: 'run' }, caller, both);
         return result.text;
       },
@@ -1247,7 +1267,7 @@ export class BrowserHost {
     const state = { sent: false, acked: false, delivered: false, preparation: 'none', ref: args.ref };
     let dialogListener;
     const mutation = args.action === 'open' || inputActions.has(args.action);
-    const markSent = () => { state.sent = true; };
+    const markSent = () => { state.sent = true; p.modelFresh = null; };
     // A dialog that opens after dispatch parks the lane; the caller gets the
     // dialog instead of waiting for it. Before every command of the input was
     // acknowledged, its outcome is unknown. A JS dialog blocks the renderer,
@@ -1411,6 +1431,7 @@ export class BrowserHost {
     const interrupt = new Promise(resolve => { p.settleInterrupt = resolve; });
     const settled = await settle({
       armed, signal, interrupt, short: SHORT_SETTLE.has(args.action),
+      bounds: SHORT_PROBE_ACTIONS.has(args.action) ? { probeMs: 20 } : undefined,
       // The host enforces the cap: a page that never answers cannot hold the
       // settle for the CDP command limit.
       quiet: (ms, cap) => {
@@ -1570,6 +1591,7 @@ export class BrowserHost {
     }
     for (const frameId of p.model?.frames.keys() ?? []) if (!model.frames.has(frameId)) this.#refs.retireDocument(p.id, frameId);
     p.model = model;
+    p.modelFresh = { generation, url: p.contents.getURL(), at: Date.now() };
     return model;
   }
   // Text result for a model: signals, page header, then the snapshot, find,

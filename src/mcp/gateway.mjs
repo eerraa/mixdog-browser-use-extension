@@ -7,8 +7,9 @@ import { RpcPeer } from '../shared/rpc.mjs';
 import { bounded } from '../shared/async.mjs';
 import { BROWSER_TOOL } from '../shared/authority.mjs';
 import { fail, validateArgs } from '../shared/contract.mjs';
-import { automationMode, connectionPaths, engineMode } from '../shared/paths.mjs';
-import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from '../shared/policy.mjs';
+import { automationMode, camoufoxExecutable, connectionPaths, engineMode, persistentProfilesEnabled } from '../shared/paths.mjs';
+import { BrowserPolicy, ELECTRON_LIST_PROFILES, camoufoxCapabilities, electronCapabilities } from '../shared/policy.mjs';
+import { inspectProfiles } from '../shared/profile-lock.mjs';
 import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 
 // Under connection authority the MCP connection is the only caller.
@@ -48,7 +49,10 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
   if (authority !== 'hook' && authority !== 'connection') throw new Error('Unknown caller authority');
   const policy = await BrowserPolicy.load(root);
   const engine = engineMode() ?? policy.engine;
-  const lazy = authority === 'connection' && engine === 'electron';
+  // Connection authority defers spawning the companion (both Camoufox and
+  // Electron) until the first operational call so idle MCP registrations keep
+  // zero companion processes; hook authority stays eager for PreToolUse endpoint.json.
+  const lazy = authority === 'connection';
   const channel = randomUUID();
   const connectionId = randomUUID();
   const paths = connectionPaths(data, channel);
@@ -56,7 +60,10 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
   const flag = engine === 'electron' ? '--browser-electron' : '--browser';
 
   // Freeze the trusted configuration snapshot once before admitting any call so
-  // cold metadata (`status`) and a lazily spawned Electron companion agree.
+  // cold metadata (`status`/`list_profiles`) and a lazily spawned companion agree.
+  const camoufoxMeta = lazy && engine === 'camoufox' ? camoufoxExecutable(root) : null;
+  const usePersistent = lazy && engine === 'camoufox' ? persistentProfilesEnabled(authority) : false;
+  const profilesRoot = path.join(data, 'profiles');
   const prefs = lazy ? await loadUserPreferences(data) : null;
   const resolvedMode = lazy ? resolveAutomationMode({ envMode: automationMode(), policy, prefs }) : null;
   const initSnapshot = lazy ? { connectionId, policy: policy.toSnapshot(), prefs } : null;
@@ -161,9 +168,8 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     }
   }
 
-  // Hook authority (needs endpoint.json before PreToolUse) and Camoufox (tiny
-  // pure-Node companion that already defers launching Firefox) start eagerly.
-  // Connection-authority Electron starts lazily on the first operational call.
+  // Hook authority needs endpoint.json before PreToolUse arrives; connection
+  // authority (both Camoufox and Electron) starts lazily on the first call.
   if (!lazy) {
     await startCompanion();
   }
@@ -205,10 +211,39 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         };
       }
       if (lazy && !started) {
+        const companionState = startFlight ? 'starting' : 'not-started';
+        const canElevate = resolvedMode.mode === 'standard' && !resolvedMode.pinned && Boolean(data);
+        if (engine === 'camoufox') {
+          return {
+            channel,
+            state: 'connected',
+            companionState,
+            engine: 'camoufox',
+            runtime: `Camoufox ${camoufoxMeta.version}`,
+            connectionId,
+            automationMode: resolvedMode.mode,
+            profilePersistence: usePersistent ? 'persistent-pending' : 'ephemeral',
+            tabCount: 0,
+            pausedCount: 0,
+            capabilities: camoufoxCapabilities({
+              policy,
+              automationMode: resolvedMode.mode,
+              configuredAutomationMode: resolvedMode.mode,
+              automationModeSource: resolvedMode.source,
+              automationModePinned: resolvedMode.pinned,
+              automationPreferenceReason: resolvedMode.preferenceReason,
+              canElevate,
+              persistentPreference: Boolean(data),
+              enableRdp: true,
+              rdpConnected: false,
+              namedPersistentProfiles: usePersistent,
+            }),
+          };
+        }
         return {
           channel,
           state: 'connected',
-          companionState: startFlight ? 'starting' : 'not-started',
+          companionState,
           engine: 'electron',
           connectionId,
           automationMode: resolvedMode.mode,
@@ -221,7 +256,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
             automationModeSource: resolvedMode.source,
             automationModePinned: resolvedMode.pinned,
             automationPreferenceReason: resolvedMode.preferenceReason,
-            canElevate: resolvedMode.mode === 'standard' && !resolvedMode.pinned && Boolean(data),
+            canElevate,
             persistentPreference: Boolean(data),
           }),
         };
@@ -240,12 +275,16 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         });
       }
       // Narrow connection-authority metadata exception alongside `status`:
-      // Electron has no named persistent profiles, so cold `list_profiles`
-      // answers without launching Electron or creating a connection directory.
+      // cold `list_profiles` is strictly read-only (no companion spawn, lock,
+      // or connection directory creation) on both Electron and Camoufox.
       if (lazy && !started && args?.action === 'list_profiles') {
         const { _channel: _ignored, ...cleaned } = args;
         try { validateArgs(cleaned); }
         catch (error) { throw Object.assign(error, { requestedInputDispatched: false }); }
+        if (engine === 'camoufox') {
+          const profiles = await inspectProfiles(profilesRoot, { persistenceEnabled: usePersistent });
+          return { supported: true, engine: 'camoufox', persistenceEnabled: usePersistent, profiles };
+        }
         return { ...ELECTRON_LIST_PROFILES, profiles: [] };
       }
       if (lazy && !started) {

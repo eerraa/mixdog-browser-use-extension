@@ -14,7 +14,7 @@ import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { FenceQueue } from '../queue.mjs';
 import { bounded, pause } from '../../shared/async.mjs';
-import { BrowserPolicy } from '../policy.mjs';
+import { BrowserPolicy, camoufoxCapabilities } from '../policy.mjs';
 import { BrowserRequests } from '../requests.mjs';
 import { DEVTOOLS_LIMITS, DevToolsRecorder, PrivacyWindows, responseBody } from '../devtools.mjs';
 import { rankBrowserSemanticMatch } from '../perception/match.mjs';
@@ -188,7 +188,7 @@ export class CamoufoxHost {
   #firstWindowCued = false;
 
   constructor({
-    dataDir, dataRoot = null, profilesRoot = null, persistentProfileDir = null,
+    dataDir, dataRoot = null, connectionId = null, profilesRoot = null, persistentProfileDir = null,
     persistentProfilesEnabled = undefined, authorityMode = 'connection',
     executablePath, camoufoxVersion = '158.0.1-beta.41',
     onRevokeConnection, policy = new BrowserPolicy(),
@@ -232,7 +232,7 @@ export class CamoufoxHost {
     const configuredIdle = idleProfileTimeoutMs !== undefined ? Number(idleProfileTimeoutMs)
       : Number.isFinite(envIdle) && envIdle >= 0 ? envIdle : DEFAULT_IDLE_PROFILE_TIMEOUT_MS;
     this.idleProfileTimeoutMs = Number.isFinite(configuredIdle) && configuredIdle >= 0 ? configuredIdle : DEFAULT_IDLE_PROFILE_TIMEOUT_MS;
-    this.connectionId = freshId();
+    this.connectionId = typeof connectionId === 'string' && connectionId ? connectionId : freshId();
     this.onRevokeConnection = onRevokeConnection;
     this.policy = policy;
     this.#automationMode = automationMode;
@@ -256,7 +256,6 @@ export class CamoufoxHost {
   }
 
   status() {
-    const elevated = this.#automationMode === 'elevated';
     const rdpActive = [...this.#runtimes.values()].some(r => !r.closed && r.rdp?.connected);
     const namedPersistentSupported = Boolean(this.persistentProfilesEnabled && this.profilesRoot);
     return {
@@ -268,59 +267,21 @@ export class CamoufoxHost {
       profilePersistence: this.#defaultProfilePersistence,
       tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
-      capabilities: {
-        engine: 'camoufox',
-        fallbackEngine: 'electron (set WB_ENGINE=electron or browser-policy.json engine:"electron" for WebHID/WebUSB)',
-        automation: {
-          mode: this.#automationMode,
-          configuredMode: this.#configuredAutomationMode,
-          source: this.#automationModeSource,
-          pinned: this.#automationModePinned,
-          canElevate: this.#canElevate(),
-          persistentPreference: Boolean(this.dataRoot),
-          ...(this.#automationPreferenceReason ? { preferenceReason: this.#automationPreferenceReason } : {}),
-          scope: elevated
-            ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted; user-revocable via #nav-bar'
-            : 'standard safety boundary: human handles sign-in and secrets; trusted page input pauses automation',
-          shieldAutoHandoff: false,
-          trustedInputGuard: true,
-          controlBar: true,
-          sensitiveInputAllowed: elevated,
-          sensitiveValuesMasked: true,
-          pageCodeBlockedBesideSecrets: true,
-          manualHandoffRequiredFor: ['OS identity', 'CAPTCHA', 'human verification'],
-          revocableByUser: true,
-        },
-        devtools: {
-          protocol: this.enableRdp ? 'juggler+firefox-rdp' : 'juggler',
-          rdpConnected: rdpActive,
-          network: ['http', 'https', 'redirects', 'headers', 'request-body', 'response-body', 'timing', 'tls', 'cache', 'service-worker', 'websocket', ...(this.enableRdp ? ['worker-rdp'] : [])],
-          inspect: this.enableRdp ? ['computed-style', 'matched-css-rules', 'event-listeners'] : ['computed-style'],
-          consoleExpression: this.enableRdp ? 'firefox-rdp-eager' : 'unavailable',
-        },
-        sessions: {
-          temporary: true,
-          namedPersistentProfiles: namedPersistentSupported,
-          maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS,
-          maxActivePersistentProfiles: MAX_PERSISTENT_PROFILES,
-          defaultClosable: false,
-        },
-        nativeRequests: ['javascript-dialog', 'file-picker', 'notifications', 'geolocation'],
-        javascriptDialogs: {
-          supported: ['alert', 'confirm', 'prompt'],
-          unsupported: {},
-          integration: 'Camoufox Juggler native Page.dialogOpened/handleDialog',
-        },
-        filePickers: {
-          supported: ['html-file-input'],
-          unsupported: ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker'],
-        },
-        unsupported: ['hid', 'usb', 'display-capture', 'serial', 'bluetooth'],
-        mandatoryHuman: elevated
-          ? ['OS identity', 'CAPTCHA', 'human Resume in the #nav-bar after Stop/handoff']
-          : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the #nav-bar after Stop/handoff'],
-        delegation: this.policy.describe('camoufox'),
-      },
+      capabilities: camoufoxCapabilities({
+        policy: this.policy,
+        automationMode: this.#automationMode,
+        configuredAutomationMode: this.#configuredAutomationMode,
+        automationModeSource: this.#automationModeSource,
+        automationModePinned: this.#automationModePinned,
+        automationPreferenceReason: this.#automationPreferenceReason,
+        canElevate: this.#canElevate(),
+        persistentPreference: Boolean(this.dataRoot),
+        enableRdp: this.enableRdp,
+        rdpConnected: rdpActive,
+        namedPersistentProfiles: namedPersistentSupported,
+        maxTemporarySessions: MAX_TEMPORARY_SESSIONS,
+        maxActivePersistentProfiles: MAX_PERSISTENT_PROFILES,
+      }),
     };
   }
 
@@ -895,6 +856,7 @@ export class CamoufoxHost {
   }
 
   #invalidate(p, reason) {
+    p.modelFresh = null;
     if (reason === 'handoff-draining') this.#beginPrivate(p);
     this.#devtoolsMode(p);
     if (['Page.frameNavigated', 'Page.frameDetached', 'navigation', 'closed'].includes(reason)) {
@@ -1519,6 +1481,7 @@ export class CamoufoxHost {
     const prevUrl = p.currentUrl, prevTitle = p.currentTitle;
     p.currentUrl = model.url || p.currentUrl;
     p.currentTitle = model.title || p.currentTitle;
+    p.modelFresh = { generation, url: p.currentUrl, at: Date.now() };
     if (p.currentUrl !== prevUrl || p.currentTitle !== prevTitle) this.#syncControlBar(p.runtime);
     return model;
   }
@@ -2126,8 +2089,16 @@ export class CamoufoxHost {
           const both = AbortSignal.any([signal, viewSignal]);
           const t = this.#owned(id, caller, both);
           if (t.dialog) return this.#dialogFirst(t, caller, 'observe').text;
-          const res = await this.#queue.run(t.id, async () => {
-            const model = await this.#perceive(t, caller, both);
+          const res = await this.#queue.run(t.id, async laneSignal => {
+            this.#owned(t.id, caller, laneSignal);
+            t.presentation.assertObservable();
+            const liveUrl = t.driver.rootFrame()?.url || t.currentUrl;
+            const fresh = t.model && t.modelFresh
+              && t.modelFresh.generation === t.presentation.generation
+              && t.modelFresh.url === liveUrl
+              && (Date.now() - t.modelFresh.at) <= 100
+              && t.connected && t.presentation.mode === 'automation';
+            const model = fresh ? t.model : await this.#perceive(t, caller, laneSignal);
             return this.#present(t, model, caller, { action: 'run', disposition: 'executed', tabId: t.id }, { snapshot: 'diff' });
           }, both);
           return res.text;
@@ -2303,7 +2274,7 @@ export class CamoufoxHost {
     const state = { sent: false, acked: false, delivered: false, preparation: 'none', ref: args.ref };
     let dialogListener;
     const mutation = inputActions.has(args.action);
-    const markSent = () => { state.sent = true; };
+    const markSent = () => { state.sent = true; p.modelFresh = null; };
 
     const decide = () => {
       if (!state.sent || state.delivered) return;

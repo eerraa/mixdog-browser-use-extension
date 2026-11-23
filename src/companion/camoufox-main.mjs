@@ -10,11 +10,12 @@ import { CamoufoxHost } from '../browser/camoufox/host.mjs';
 import { BrowserPolicy } from '../browser/policy.mjs';
 import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
-import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, pluginData } from '../shared/paths.mjs';
+import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, persistentProfilesEnabled, pluginData, validChannel } from '../shared/paths.mjs';
 
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
+const lazyInit = process.env.WB_LAZY_INIT === '1';
 const authMode = authorityMode();
 const dataRoot = pluginData();
 const envAutomationMode = automationMode();
@@ -29,6 +30,17 @@ let primary, host, listener, terminating = false;
 function sameKey(supplied) {
   return typeof supplied === 'string' && supplied.length === key.length
     && timingSafeEqual(Buffer.from(supplied), Buffer.from(key));
+}
+
+function normalizePrefsSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  const ok = snapshot.ok === true;
+  const found = snapshot.found === true;
+  const mode = snapshot.automationMode === 'standard' || snapshot.automationMode === 'elevated'
+    ? snapshot.automationMode
+    : null;
+  const reason = typeof snapshot.reason === 'string' ? snapshot.reason : null;
+  return { ok, found, automationMode: ok ? mode : null, reason };
 }
 
 function terminate(reason) {
@@ -54,34 +66,39 @@ function terminate(reason) {
 }
 
 async function main() {
-  const [policy, prefs] = await Promise.all([
-    BrowserPolicy.load(root),
-    loadUserPreferences(dataRoot),
-  ]);
-  const resolvedMode = resolveAutomationMode({ envMode: envAutomationMode, policy, prefs });
   const camoufox = camoufoxExecutable(root);
   const headless = process.env.WB_HEADLESS === '1' || process.env.WB_HEADLESS === 'true';
-  const persistentPref = process.env.WB_PERSISTENT_PROFILE;
-  const usePersistent = persistentPref === '1' || persistentPref === 'true'
-    || (authMode === 'connection' && persistentPref !== '0' && persistentPref !== 'false');
+  const usePersistent = persistentProfilesEnabled(authMode);
   const profilesRoot = path.join(dataRoot, 'profiles');
 
-  host = new CamoufoxHost({
-    dataDir: paths.directory,
-    dataRoot,
-    profilesRoot,
-    persistentProfilesEnabled: usePersistent,
-    authorityMode: authMode,
-    executablePath: camoufox.executablePath,
-    camoufoxVersion: camoufox.version,
-    policy,
-    automationMode: resolvedMode.mode,
-    automationModeSource: resolvedMode.source,
-    automationModePinned: resolvedMode.pinned,
-    automationPreferenceReason: resolvedMode.preferenceReason,
-    headless,
-    onRevokeConnection: () => terminate('permission-revocation'),
-  });
+  const buildHost = ({ policy, prefs, connectionId = null }) => {
+    const resolvedMode = resolveAutomationMode({ envMode: envAutomationMode, policy, prefs });
+    return new CamoufoxHost({
+      dataDir: paths.directory,
+      dataRoot,
+      connectionId: validChannel(connectionId) ? connectionId : null,
+      profilesRoot,
+      persistentProfilesEnabled: usePersistent,
+      authorityMode: authMode,
+      executablePath: camoufox.executablePath,
+      camoufoxVersion: camoufox.version,
+      policy,
+      automationMode: resolvedMode.mode,
+      automationModeSource: resolvedMode.source,
+      automationModePinned: resolvedMode.pinned,
+      automationPreferenceReason: resolvedMode.preferenceReason,
+      headless,
+      onRevokeConnection: () => terminate('permission-revocation'),
+    });
+  };
+
+  if (!lazyInit) {
+    const [policy, prefs] = await Promise.all([
+      BrowserPolicy.load(root),
+      loadUserPreferences(dataRoot),
+    ]);
+    host = buildHost({ policy, prefs });
+  }
 
   listener = net.createServer(socket => {
     let role = null;
@@ -90,6 +107,20 @@ async function main() {
         if (method !== 'hello' || params?.channel !== channel || !sameKey(params?.key)
           || !['gateway', 'hook'].includes(params?.role)) throw new Error('Unauthenticated local connection');
         if (params.role === 'gateway' && primary && !primary.closed) throw new Error('Gateway already connected');
+        if (params.role === 'gateway' && !host) {
+          const snap = params?.snapshot;
+          if (snap && typeof snap === 'object') {
+            const policy = BrowserPolicy.fromSnapshot(snap.policy);
+            const prefs = normalizePrefsSnapshot(snap.prefs) ?? await loadUserPreferences(dataRoot);
+            host = buildHost({ policy, prefs, connectionId: snap.connectionId });
+          } else {
+            const [policy, prefs] = await Promise.all([
+              BrowserPolicy.load(root),
+              loadUserPreferences(dataRoot),
+            ]);
+            host = buildHost({ policy, prefs });
+          }
+        }
         role = params.role;
         if (role === 'gateway') primary = peer;
         return { channel, protocol: 1 };
@@ -99,6 +130,7 @@ async function main() {
         return { terminating: true };
       }
       if (terminating) throw new Error('Browser connection is terminating; it cannot be automatically resumed');
+      if (!host) throw new Error('Browser companion host is not initialized');
       if (role === 'gateway' && method === 'status') return host.status();
       if (role === 'gateway' && method === 'call') {
         const args = params?.args;

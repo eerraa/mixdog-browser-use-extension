@@ -1112,3 +1112,78 @@ test('packaged connection authority: Electron (WB_ENGINE=electron) starts lazily
   const afterRevoke = await revoking.call({ action: 'open', url: page.url });
   assert.equal(afterRevoke.isError, true);
 });
+
+test('packaged connection authority: Camoufox (default) starts lazily, serves cold status/list_profiles without companion, wakes on first call, and confirms cold revoke', { timeout: 120000 }, async t => {
+  const cfxContext = await connectionEnvironment(t);
+  const page = await fixture(t);
+
+  const artifactLower = artifact.toLowerCase();
+  const countCompanions = async () => {
+    const procs = await processes('electron.exe');
+    return procs.filter(p => typeof p.CommandLine === 'string'
+      && p.CommandLine.includes('companion-camoufox.cjs')
+      && p.CommandLine.toLowerCase().includes(artifactLower)).length;
+  };
+  const baselineCompanions = await countCompanions();
+  const hasConnectionDir = async channel => {
+    try { await stat(path.join(cfxContext.directory, 'connections', channel)); return true; }
+    catch (err) { if (err?.code === 'ENOENT') return false; throw err; }
+  };
+
+  // 1. Cold Camoufox connection: tools/list, status, list_profiles, and forged _lease never spawn companion-camoufox.cjs.
+  const cold = await plainClient(t, cfxContext);
+  const coldStatus = dataOf(await cold.call({ action: 'status' }));
+  assert.equal(coldStatus.state, 'connected');
+  assert.equal(coldStatus.companionState, 'not-started');
+  assert.equal(coldStatus.engine, 'camoufox');
+  assert.equal(coldStatus.profilePersistence, 'persistent-pending');
+  assert.equal(coldStatus.capabilities.engine, 'camoufox');
+  assert.equal(coldStatus.capabilities.sessions.namedPersistentProfiles, true);
+  assert.equal(coldStatus.tabCount, 0);
+
+  const coldProfiles = dataOf(await cold.call({ action: 'list_profiles' }));
+  assert.equal(coldProfiles.supported, true);
+  assert.equal(coldProfiles.engine, 'camoufox');
+  assert.deepEqual(coldProfiles.profiles.map(p => p.profile), ['default', 'work', 'personal']);
+  assert.ok(coldProfiles.profiles.every(p => p.state === 'available'));
+
+  const forgedStatus = await cold.call({ action: 'status', _lease: 'model-supplied' });
+  assert.equal(forgedStatus.isError, true);
+  assert.equal(dataOf(forgedStatus).code, 'INVALID_ARGUMENT');
+
+  assert.equal(await hasConnectionDir(cold.channel), false, 'cold Camoufox status/list_profiles never creates connection dir');
+  assert.equal(await countCompanions(), baselineCompanions, 'cold Camoufox connection spawns zero companion-camoufox.cjs processes');
+
+  await cold.client.close();
+  assert.equal(await hasConnectionDir(cold.channel), false);
+  assert.equal(await countCompanions(), baselineCompanions);
+
+  // 2. Concurrent operational calls share one lazy startup and preserve connectionId continuity.
+  const warm = await plainClient(t, cfxContext);
+  const preStatus = dataOf(await warm.call({ action: 'status' }));
+  assert.equal(preStatus.companionState, 'not-started');
+  const [opened, listed] = await Promise.all([
+    warm.call({ action: 'open', url: page.url }),
+    warm.call({ action: 'list_tabs' }),
+  ]);
+  assert.equal(opened.isError, false, textOf(opened));
+  assert.equal(listed.isError, false, textOf(listed));
+  const postStatus = dataOf(await warm.call({ action: 'status' }));
+  assert.equal(postStatus.companionState, 'running');
+  assert.equal(postStatus.engine, 'camoufox');
+  assert.equal(postStatus.connectionId, preStatus.connectionId, 'cold and warm Camoufox status keep the exact same connectionId');
+  assert.equal(postStatus.tabCount, 1);
+  assert.equal(await countCompanions(), baselineCompanions + 1);
+  await warm.client.close();
+
+  // 3. Explicit revoke on a cold Camoufox connection runs the ticketed teardown path and latches ended.
+  const revoking = await plainClient(t, cfxContext);
+  assert.equal(dataOf(await revoking.call({ action: 'status' })).companionState, 'not-started');
+  const rev = await revoking.call({ action: 'revoke' });
+  assert.equal(rev.isError, false, textOf(rev));
+  assert.equal(dataOf(rev).disposition, 'connection-terminated');
+  assert.equal(dataOf(rev).processTeardownConfirmed, true);
+  const endedStatus = dataOf(await revoking.call({ action: 'status' }));
+  assert.equal(endedStatus.state, 'connection-ended');
+  assert.equal(endedStatus.companionState, 'ended');
+});

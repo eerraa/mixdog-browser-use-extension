@@ -68,6 +68,79 @@ export function electronCapabilities({
   };
 }
 
+// Shared capability snapshot for both live CamoufoxHost.status() and cold
+// connection-authority gateway status() before companion-camoufox is started.
+export function camoufoxCapabilities({
+  policy,
+  automationMode = 'standard',
+  configuredAutomationMode = automationMode,
+  automationModeSource = 'default',
+  automationModePinned = false,
+  automationPreferenceReason = null,
+  canElevate = false,
+  persistentPreference = false,
+  enableRdp = true,
+  rdpConnected = false,
+  namedPersistentProfiles = false,
+  maxTemporarySessions = 16,
+  maxActivePersistentProfiles = 8,
+}) {
+  const elevated = automationMode === 'elevated';
+  return {
+    engine: 'camoufox',
+    fallbackEngine: 'electron (set WB_ENGINE=electron or browser-policy.json engine:"electron" for WebHID/WebUSB)',
+    automation: {
+      mode: automationMode,
+      configuredMode: configuredAutomationMode,
+      source: automationModeSource,
+      pinned: automationModePinned,
+      canElevate: Boolean(canElevate),
+      persistentPreference: Boolean(persistentPreference),
+      ...(automationPreferenceReason ? { preferenceReason: automationPreferenceReason } : {}),
+      scope: elevated
+        ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted; user-revocable via #nav-bar'
+        : 'standard safety boundary: human handles sign-in and secrets; trusted page input pauses automation',
+      shieldAutoHandoff: false,
+      trustedInputGuard: true,
+      controlBar: true,
+      sensitiveInputAllowed: elevated,
+      sensitiveValuesMasked: true,
+      pageCodeBlockedBesideSecrets: true,
+      manualHandoffRequiredFor: ['OS identity', 'CAPTCHA', 'human verification'],
+      revocableByUser: true,
+    },
+    devtools: {
+      protocol: enableRdp ? 'juggler+firefox-rdp' : 'juggler',
+      rdpConnected: Boolean(rdpConnected),
+      network: ['http', 'https', 'redirects', 'headers', 'request-body', 'response-body', 'timing', 'tls', 'cache', 'service-worker', 'websocket', ...(enableRdp ? ['worker-rdp'] : [])],
+      inspect: enableRdp ? ['computed-style', 'matched-css-rules', 'event-listeners'] : ['computed-style'],
+      consoleExpression: enableRdp ? 'firefox-rdp-eager' : 'unavailable',
+    },
+    sessions: {
+      temporary: true,
+      namedPersistentProfiles: Boolean(namedPersistentProfiles),
+      maxCreatedPerCaller: maxTemporarySessions,
+      maxActivePersistentProfiles,
+      defaultClosable: false,
+    },
+    nativeRequests: ['javascript-dialog', 'file-picker', 'notifications', 'geolocation'],
+    javascriptDialogs: {
+      supported: ['alert', 'confirm', 'prompt'],
+      unsupported: {},
+      integration: 'Camoufox Juggler native Page.dialogOpened/handleDialog',
+    },
+    filePickers: {
+      supported: ['html-file-input'],
+      unsupported: ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker'],
+    },
+    unsupported: ['hid', 'usb', 'display-capture', 'serial', 'bluetooth'],
+    mandatoryHuman: elevated
+      ? ['OS identity', 'CAPTCHA', 'human Resume in the #nav-bar after Stop/handoff']
+      : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the #nav-bar after Stop/handoff'],
+    delegation: policy.describe('camoufox'),
+  };
+}
+
 // A trusted package/host configuration, never an MCP argument or chat receipt.
 // The companion loads one immutable snapshot before it admits tool calls.
 export class BrowserPolicy {
