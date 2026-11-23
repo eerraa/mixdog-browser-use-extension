@@ -184,6 +184,7 @@ export class CamoufoxHost {
   #permissionGrants = new Map();   // `${origin}\0${kind}` → 'allow' | 'deny'
   #activeTabId = null;
   #defaultProfilePersistence = 'ephemeral';
+  #defaultReleaseFlight = Promise.resolve();
 
   constructor({
     dataDir, dataRoot = null, profilesRoot = null, persistentProfileDir = null,
@@ -389,6 +390,40 @@ export class CamoufoxHost {
   async #withProfileRuntime(profile, fn) {
     const coord = profile?.coord;
     if (!coord) {
+      const cur = profile?.runtime;
+      if (cur && !cur.closed && cur.proc && !cur.proc.closed) {
+        return fn(cur);
+      }
+      // AC18: If the user closed the last Firefox window via × (zero live tabs
+      // remain on the default profile), keep the connection alive and start a
+      // fresh default Camoufox process on the next open.
+      if (profile?.isDefault && profile.state === 'open' && !this.#closed && !this.#revoking) {
+        const liveOnProfile = [...this.#pages.values()].filter(p => !p.closed && p.profile === profile);
+        if (liveOnProfile.length === 0) {
+          const freshRt = await this.#ensureDefaultRuntime();
+          const dlRes = await freshRt.proc.send('Browser.setDownloadOptions', {
+            downloadOptions: { behavior: 'saveToDisk', downloadsDir: profile.downloadDir },
+          }).catch(err => ({ error: err?.message ?? String(err) }));
+          profile.downloadSetupError = dlRes?.error ?? null;
+          profile.runtime = freshRt;
+          profile.persistence = freshRt.persistence;
+          profile.profileSlug = freshRt.profileSlug;
+          profile.runtimeState = 'running';
+          const grantPrefix = `${profile.owner}\0${profile.id}\0`;
+          for (const [k, state] of this.#permissionGrants) {
+            if (state !== 'allow' || !k.startsWith(grantPrefix)) continue;
+            const rest = k.slice(grantPrefix.length);
+            const sep = rest.lastIndexOf('\0');
+            if (sep < 0) continue;
+            const origin = rest.slice(0, sep);
+            const kind = rest.slice(sep + 1);
+            const mapped = mapPermissionKind(kind);
+            if (!mapped || !this.policy.permits(kind)) continue;
+            await freshRt.proc.send('Browser.grantPermissions', { origin, permissions: [mapped] }).catch(() => {});
+          }
+          return fn(freshRt);
+        }
+      }
       return fn(profile.runtime);
     }
     if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
@@ -442,6 +477,7 @@ export class CamoufoxHost {
 
   async #startRuntime({ key, profileSlug = null, strictPersistent = false, existingLockHandle = null }) {
     if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
+    if (key === 'default') await this.#defaultReleaseFlight;
     const connProfilesRoot = path.join(this.dataDir, 'profiles');
     await mkdir(connProfilesRoot, { recursive: true });
 
@@ -533,10 +569,35 @@ export class CamoufoxHost {
       runtime.proc = proc;
       proc.on('message', (method, params, sessionId) => this.#onJugglerMessage(runtime, method, params, sessionId));
       proc.on('close', () => {
+        runtime.closed = true;
         for (const p of this.#pages.values()) {
           if (!p.closed && p.runtime === runtime) {
             p.connected = false;
             this.#pause(p, 'presentation-lost');
+          }
+        }
+        try { runtime.toolbar?.close(); } catch {}
+        try { runtime.rdp?.close(); } catch {}
+        if (this.#runtimes.get(runtime.key) === runtime) this.#runtimes.delete(runtime.key);
+        if (!runtime.closeFlight) {
+          // Process exited outside host disposal (e.g., user clicked × on the last window).
+          if (runtime.key === 'default' && runtime.lockHandle) {
+            const handle = runtime.lockHandle;
+            runtime.lockHandle = null;
+            this.#defaultReleaseFlight = this.#defaultReleaseFlight
+              .catch(() => {})
+              .then(() => releaseProfileLock(handle).catch(() => {}));
+          } else {
+            for (const coord of this.#slugCoords.values()) {
+              if (coord.runtime === runtime) {
+                coord.runtime = null;
+                coord.runtimeGen++;
+                if (coord.profile && coord.profile.state === 'open') {
+                  coord.profile.runtime = null;
+                  coord.profile.runtimeState = 'dormant';
+                }
+              }
+            }
           }
         }
       });
@@ -2669,6 +2730,7 @@ export class CamoufoxHost {
     ]);
     await Promise.allSettled([
       ...this.#runtimes.values().map(runtime => this.#disposeRuntime(runtime)),
+      this.#defaultReleaseFlight,
       Promise.resolve(this.createRunnerSandbox?.close?.()),
     ]);
     // Release any locks still held by dormant named persistent profiles.

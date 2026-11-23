@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
-import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus } from '../../src/browser/camoufox/presentation.mjs';
+import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus, toolbarLabels } from '../../src/browser/camoufox/presentation.mjs';
 import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
 import { CAMOUFOX_BOOTSTRAP_URL, createCamoufoxRunnerSandboxFactory } from '../../src/browser/camoufox/runner-sandbox.mjs';
 import { deflateSync } from 'node:zlib';
@@ -1448,6 +1448,122 @@ test('CamoufoxHost reclaims idle non-default persistent profiles into dormant st
     assert.equal(existsSync(path.join(profilesRoot, 'camoufox-stuck-exit.lock')), true, 'lock must remain held when process exit is unconfirmed');
 
     failExitForSlug = null;
+    await host.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Camoufox #nav-bar uses Disconnect/연결 종료 with × window-close guidance, and AC18 respawns default runtime after last-window exit', async () => {
+  const ko = toolbarLabels('ko-KR');
+  assert.equal(ko.revoke, '연결 종료');
+  assert.match(ko.revokeTitle, /모든 브라우저 창/);
+  assert.match(ko.revokeTitle, /×/);
+  const en = toolbarLabels('en-US');
+  assert.equal(en.revoke, 'Disconnect');
+  assert.match(en.revokeTitle, /every browser window/);
+  assert.match(en.revokeTitle, /×/);
+
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-ac18-'));
+  try {
+    const profilesRoot = path.join(root, 'profiles');
+    const spawned = [];
+    const makeProc = () => {
+      const idx = spawned.length + 1;
+      const p = new EventEmitter();
+      p.idx = idx;
+      p.closed = false;
+      p.exited = false;
+      p.rdpPort = 0;
+      p.pid = 75000 + idx;
+      p.start = async () => p;
+      p.send = async (method, params = {}, sessionId) => {
+        if (method === 'Browser.newPage') {
+          const sid = `s-${idx}`;
+          const tid = `t-${idx}`;
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: `https://ac18.test/${idx}`, title: `AC18 #${idx}`, scrollHeight: 600,
+                  checkpoint: { documentId: `doc-${idx}`, revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.close = async () => { p.closed = true; p.exited = true; return { exited: true }; };
+      spawned.push(p);
+      return p;
+    };
+
+    const host = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-ac18'),
+      dataRoot: root,
+      profilesRoot,
+      persistentProfilesEnabled: true,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      onRevokeConnection: () => {},
+      createProcess: () => makeProc(),
+    });
+    const caller = makeCaller('caller-ac18');
+    assert.equal(host.status().capabilities.delegation.engine, 'camoufox');
+
+    // Open initial tab, then simulate user clicking OS × on the last Firefox window
+    // (tab detaches, then Firefox process exits on its own).
+    const first = await host.execute({ action: 'open', url: 'https://ac18.test/1' }, caller);
+    assert.equal(spawned.length, 1);
+    const lockPath = path.join(profilesRoot, 'camoufox-default.lock');
+    assert.equal(existsSync(lockPath), true);
+
+    spawned[0].emit('message', 'Browser.detachedFromTarget', { sessionId: 's-1', targetId: 't-1' });
+    spawned[0].closed = true;
+    spawned[0].exited = true;
+    spawned[0].emit('close');
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(existsSync(lockPath), false, 'default profile lock releases when last Firefox window exits');
+
+    // AC18: Fresh open on the same channel starts a new default Firefox process and reacquires the lock.
+    const second = await host.execute({ action: 'open', url: 'https://ac18.test/2' }, caller);
+    assert.equal(second.disposition, 'executed');
+    assert.notEqual(second.tabId, first.tabId);
+    assert.equal(spawned.length, 2, 'fresh Camoufox process launched on same channel after last-window ×');
+    assert.equal(existsSync(lockPath), true, 'fresh default process reacquired persistent lock');
+
+    // Unexpected crash while a tab is still open still pauses that tab fail-closed (presentation-lost).
+    spawned[1].closed = true;
+    spawned[1].exited = true;
+    spawned[1].emit('close');
+    const tabsAfterCrash = (await host.execute({ action: 'list_tabs' }, caller)).tabs;
+    assert.equal(tabsAfterCrash.find(t => t.tabId === second.tabId).paused, 'presentation-lost');
+
     await host.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

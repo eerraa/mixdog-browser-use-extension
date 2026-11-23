@@ -87,9 +87,9 @@ function sameToken(supplied, expected) {
   return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedNonce = '' }) {
+export function toolbarLabels(locale) {
   const isKo = String(locale).toLowerCase().startsWith('ko');
-  const labels = isKo
+  return isKo
     ? {
       stop: '중지',
       stopTitle: '에이전트 자동화 중지',
@@ -97,8 +97,8 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       elevateTitle: '권한 상승 자동화(elevated)로 전환하고 저장합니다 (비밀번호/OTP 자동 입력 허용, CAPTCHA는 직접 처리)',
       revert: '권한 해제',
       revertTitle: '권한 상승 모드를 기본(standard)으로 즉시 해제합니다',
-      revoke: '종료',
-      revokeTitle: '이 브라우저 연결을 종료합니다',
+      revoke: '연결 종료',
+      revokeTitle: '이 연결의 모든 브라우저 창을 닫습니다. 다시 사용하려면 MCP 호스트에서 새로 연결하세요. 이 창만 닫으려면 창 오른쪽 위의 ×를 누르세요.',
       returnAll: '모두 반환',
       pendingReturn: '반환 대기',
       idle: '대기 중',
@@ -113,8 +113,8 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       elevateTitle: 'Switch to elevated automation and remember preference (CAPTCHA stays manual)',
       revert: 'Revert',
       revertTitle: 'Revert connection to standard mode',
-      revoke: 'Revoke',
-      revokeTitle: 'Close this browser connection',
+      revoke: 'Disconnect',
+      revokeTitle: 'Close every browser window on this connection (reconnect from the MCP host to use again). To close only this window, click × at the top right.',
       returnAll: 'Return all',
       pendingReturn: 'Return needed',
       idle: 'Idle',
@@ -122,6 +122,10 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       ephemeralProfileTitle: 'Temporary profile (cleared on close)',
       saveFailed: 'Failed to save preference',
     };
+}
+
+function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedNonce = '' }) {
+  const labels = toolbarLabels(locale);
   return `(() => {
     const EXPECTED_NONCE = ${JSON.stringify(expectedNonce || '')};
     try {
