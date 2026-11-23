@@ -394,7 +394,7 @@ export class CamoufoxHost {
       }
       runtime.toolbar = new ChromeToolbarClient({
         getRdp: () => runtime.rdp,
-        getExpectedPid: () => runtime.proc?.pid ?? 0,
+        getExpectedNonce: () => runtime.proc?.launchNonce ?? '',
         headless: this.headless || !this.enableRdp,
         locale: this.locale,
         onAction: (action, tabId, mode) => this.#onControlBarAction(action, tabId, mode, runtime),

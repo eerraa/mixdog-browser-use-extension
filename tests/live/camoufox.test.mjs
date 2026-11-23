@@ -669,7 +669,16 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
     ensureConnected: (...a) => rdp.ensureConnected(...a),
     chromeEval: (...a) => { chromeEvalCount++; return origChromeEval(...a); },
   };
-  toolbar = new ChromeToolbarClient({ getRdp: () => countingRdp, headless: false, locale: 'ko-KR' });
+  // Verify wrong launch nonce refuses toolbar mount before testing real matching launchNonce
+  const wrongBar = new ChromeToolbarClient({ getRdp: () => countingRdp, getExpectedNonce: () => 'forged-wrong-nonce', headless: false, locale: 'ko-KR' });
+  wrongBar.sync({ elevated: false, activeId: 't1', visible: true, tabs: [{ id: 't1', label: 't1', status: 'x', primaryText: 'x', primaryAction: 'take-control', stopEnabled: true, needsReturn: false }] });
+  await until(() => chromeEvalCount >= 1, 'wrong-nonce toolbar probe', 3000);
+  await delay(100);
+  assert.equal(await origChromeEval('Boolean(Services.wm.getMostRecentWindow("navigator:browser")?.document?.getElementById("wb-agent-nav-bar"))'), false, 'wrong launch nonce must refuse mount');
+  wrongBar.close();
+  chromeEvalCount = 0;
+
+  toolbar = new ChromeToolbarClient({ getRdp: () => countingRdp, getExpectedNonce: () => proc.launchNonce, headless: false, locale: 'ko-KR' });
   const received = [];
   toolbar.on('action', (action, tabId) => received.push({ action, tabId }));
 

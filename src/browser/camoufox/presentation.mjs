@@ -87,7 +87,7 @@ function sameToken(supplied, expected) {
   return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedPid = 0 }) {
+function buildChromeToolbarBootstrap({ port, token, locale, initialState, expectedNonce = '' }) {
   const isKo = String(locale).toLowerCase().startsWith('ko');
   const labels = isKo
     ? {
@@ -123,11 +123,10 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
       saveFailed: 'Failed to save preference',
     };
   return `(() => {
-    const EXPECTED_PID = ${Number(expectedPid) || 0};
+    const EXPECTED_NONCE = ${JSON.stringify(expectedNonce || '')};
     try {
-      const actualPid = Services.appinfo?.processID || 0;
-      if (EXPECTED_PID > 0 && actualPid > 0 && actualPid !== EXPECTED_PID) return -1;
-    } catch {}
+      if (EXPECTED_NONCE && Services.env?.get('WB_LAUNCH_NONCE') !== EXPECTED_NONCE) return -1;
+    } catch { if (EXPECTED_NONCE) return -1; }
     const PORT = ${Number(port)};
     const TOKEN = ${JSON.stringify(token)};
     const L = ${JSON.stringify(labels)};
@@ -560,7 +559,7 @@ function buildChromeToolbarBootstrap({ port, token, locale, initialState, expect
 
 export class ChromeToolbarClient extends EventEmitter {
   #getRdp;
-  #getExpectedPid;
+  #getExpectedNonce;
   #onAction;
   #server = null;
   #port = 0;
@@ -573,10 +572,10 @@ export class ChromeToolbarClient extends EventEmitter {
   #retryTimer = null;
   #lastState = null;
 
-  constructor({ getRdp, getExpectedPid = null, onAction = null, headless = false, locale = 'ko-KR' } = {}) {
+  constructor({ getRdp, getExpectedNonce = null, onAction = null, headless = false, locale = 'ko-KR' } = {}) {
     super();
     this.#getRdp = getRdp;
-    this.#getExpectedPid = getExpectedPid;
+    this.#getExpectedNonce = getExpectedNonce;
     this.#onAction = onAction;
     this.headless = headless;
     this.locale = locale;
@@ -703,16 +702,16 @@ export class ChromeToolbarClient extends EventEmitter {
       if (!rdp || rdp.closed) return;
       if (!(await rdp.ensureConnected().catch(() => false))) return;
       const port = await this.#ensureServer();
-      const expectedPid = Number(this.#getExpectedPid?.() ?? 0) || 0;
+      const expectedNonce = String(this.#getExpectedNonce?.() ?? '');
       const script = buildChromeToolbarBootstrap({
         port,
         token: this.#token,
         locale: this.locale,
         initialState: this.#lastState,
-        expectedPid,
+        expectedNonce,
       });
       const res = await rdp.chromeEval(script, 6000);
-      if (res === -1) throw new Error('Refused toolbar mount: Firefox RDP process PID mismatch');
+      if (res === -1) throw new Error('Refused toolbar mount: Firefox RDP process launch nonce mismatch');
       this.#installed = true;
       if (this.#lastState) this.#broadcast({ type: 'state', state: this.#lastState });
     })().catch(() => {

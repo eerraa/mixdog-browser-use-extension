@@ -2,6 +2,7 @@
 // Talks directly to `camoufox.exe -juggler-pipe -silent` over stdio fds 3/4
 // using NUL-delimited JSON-RPC, with zero Python or Playwright dependencies.
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import net from 'node:net';
@@ -210,6 +211,7 @@ export class CamoufoxProcess extends EventEmitter {
     this.env = env;
     this.spawnImpl = spawnImpl;
     this.info = null;
+    this.launchNonce = randomBytes(24).toString('base64url');
   }
 
   get transport() { return this.#transport; }
@@ -231,6 +233,9 @@ export class CamoufoxProcess extends EventEmitter {
       MOZ_NO_REMOTE: '1',
       // Prevent Windows Shift key held in another app at launch from opening Safe Mode.
       MOZ_DISABLE_SAFE_MODE_KEY: '1',
+      // Unforgeable per-launch nonce inherited across Windows -wait-for-browser
+      // launcher→browser process handoff so RDP toolbar mount verifies ownership.
+      WB_LAUNCH_NONCE: this.launchNonce,
       ...(Object.keys(config).length ? chunkCamouEnv('CAMOU_CONFIG', config) : {}),
       ...chunkCamouEnv('CAMOU_PREFS', prefs),
     };
