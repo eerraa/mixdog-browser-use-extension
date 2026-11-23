@@ -15,7 +15,7 @@ Read order for a task: this file (Edit table) → the `change-map.md` steps → 
 | Runtime | Default Camoufox 158.0.1-beta.41 (patched Firefox 158, pure-Node Juggler pipe + local Firefox RDP + native Firefox `#nav-bar` Agent Control toolbar); Electron 44.9.1 stays bundled as the Node runtime (`ELECTRON_RUN_AS_NODE=1`) and explicit fallback engine (`WB_ENGINE=electron` or `browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
-| Version | `0.6.7`. Version locations and releases: `build-release.md` |
+| Version | `0.6.8`. Version locations and releases: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
 ## Docs
