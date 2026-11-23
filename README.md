@@ -152,9 +152,8 @@ C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 
   일반 웹·로그인·영구 프로필과 WebHID·WebUSB 장치 작업(`usekb.cc` 등)을 모두 쓰는 MCP 호스트
   (Claude Code·Codex·Antigravity·DSH PTC)에서는 같은 `bin\bridge.exe --mcp`를 두 등록으로 나누어
   고정하는 구성을 권장합니다: `win-browser`(`WB_ENGINE=camoufox`)와 `win-browser-hid`(`WB_ENGINE=electron`,
-  별도 `WB_DATA_DIR`). `win-browser-hid`는 연결 권한 모드에서 첫 실제 동작 전까지 Electron GUI
-  프로세스를 띄우지 않고 지연 시작(`companionState: "not-started"`)하므로 평소 메모리를 차지하지
-  않습니다. Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` → 공유
+  별도 `WB_DATA_DIR`). 두 등록 모두 연결 권한 모드에서 첫 실제 동작 전까지 컴패니언 프로세스를 띄우지 않고
+  지연 시작(`companionState: "not-started"`)하므로 평소 유휴 메모리를 최소화합니다. Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` → 공유
   `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
 - **통일된 에이전트 제어 툴바 및 백그라운드 창 정책 (Camoufox · Electron 공통)**: 두 엔진 모두 새 창을
   포커스를 뺏지 않는 백그라운드 일반 창(최상단 고정 아님)으로 띄우고, 첫 창 열기와 `show` 호출 시 작업
