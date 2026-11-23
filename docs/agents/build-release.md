@@ -29,7 +29,7 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 | deps | `npm ci` | `node_modules/` |
 | runtime | `node node_modules/electron/install.js` (when install scripts were skipped) | `node_modules/electron/dist/` |
 | bundle | `npm run build` | `build/app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
-| native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/control-bar.exe`, `build/licenses/native/*` |
+| native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/licenses/native/*` |
 | package | `npm run package` | a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | clean package | `npm run package:clean -- "<abs licenses dir>"` | native, bundle and package in a temp copy of the working tree (Clean package build); a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | release folder | `npm run package:clean -- "<abs licenses dir>" --release` | the same from the committed `HEAD`: `dist/releases/v<ver>/` (Release) |

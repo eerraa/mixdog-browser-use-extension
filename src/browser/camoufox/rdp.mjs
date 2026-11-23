@@ -185,6 +185,7 @@ export class FirefoxRdpClient extends EventEmitter {
   #chromeConsoleFlight = null;
   #watchers = new Map(); // pageId → { tabActor, watcherActor, browsingContextID, targets: Map<actor, target>, stylesheets: Map, watching: boolean, onResource }
   #evalWaiters = new Map(); // resultID → { consoleActor, resolve, reject, timer }
+  #earlyEvalResults = new Map(); // resultID → { msg, timer } (handles same-TCP-chunk evaluationResult before await resumes)
   #targetWaiters = new Set(); // () => void
   #closed = false;
 
@@ -223,6 +224,8 @@ export class FirefoxRdpClient extends EventEmitter {
               clearTimeout(waiter.timer);
               waiter.reject(err ?? new Error('Firefox RDP closed'));
             }
+            for (const entry of this.#earlyEvalResults.values()) clearTimeout(entry.timer);
+            this.#earlyEvalResults.clear();
             for (const wake of [...this.#targetWaiters]) wake();
           });
           return true;
@@ -242,6 +245,16 @@ export class FirefoxRdpClient extends EventEmitter {
         this.#evalWaiters.delete(msg.resultID);
         clearTimeout(waiter.timer);
         waiter.resolve(msg);
+      } else {
+        if (this.#earlyEvalResults.size >= 64) {
+          const firstKey = this.#earlyEvalResults.keys().next().value;
+          const old = this.#earlyEvalResults.get(firstKey);
+          if (old) clearTimeout(old.timer);
+          this.#earlyEvalResults.delete(firstKey);
+        }
+        const timer = setTimeout(() => this.#earlyEvalResults.delete(msg.resultID), 15000);
+        timer.unref?.();
+        this.#earlyEvalResults.set(msg.resultID, { msg, timer });
       }
       return;
     }
@@ -426,7 +439,15 @@ export class FirefoxRdpClient extends EventEmitter {
   }
 
   async #evalConsole(consoleActor, text, { eager = false, timeoutMs = L.evaluationMs, signal } = {}) {
-    const { resultID } = await this.#transport.request(consoleActor, 'evaluateJSAsync', { text, eager }, { timeoutMs, signal });
+    const started = await this.#transport.request(consoleActor, 'evaluateJSAsync', { text, eager }, { timeoutMs, signal });
+    const { resultID } = started;
+    if (!resultID || started.result !== undefined) return started;
+    const early = this.#earlyEvalResults.get(resultID);
+    if (early) {
+      clearTimeout(early.timer);
+      this.#earlyEvalResults.delete(resultID);
+      return early.msg;
+    }
     return new Promise((resolve, reject) => {
       const onAbort = () => {
         if (!this.#evalWaiters.delete(resultID)) return;
@@ -731,23 +752,12 @@ export class FirefoxRdpClient extends EventEmitter {
   }
 
   // Evaluate a privileged browser-chrome snippet in Firefox's parent process
-  // (used strictly for mounting/updating the trusted #nav-bar Agent Control UI).
+  // (used strictly for mounting/tearing down the trusted #nav-bar Agent Control UI).
   async chromeEval(text, timeoutMs = 4000) {
     const consoleActor = await this.#ensureChromeConsole();
     if (!consoleActor) throw new Error('Firefox parent chrome console unavailable');
-    const started = await this.#transport.request(consoleActor, 'evaluateJSAsync', { text }, { timeoutMs });
-    let msg = started;
-    if (started.resultID && started.result === undefined) {
-      msg = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.#evalWaiters.delete(started.resultID);
-          reject(new Error('Firefox chrome evaluation timed out'));
-        }, timeoutMs);
-        timer.unref?.();
-        this.#evalWaiters.set(started.resultID, { consoleActor, resolve, reject, timer });
-      });
-    }
-    if (msg.exception) {
+    const msg = await this.#evalConsole(consoleActor, text, { eager: false, timeoutMs });
+    if (msg.hasException || msg.exception) {
       throw new Error(msg.exceptionMessage || 'Firefox chrome evaluation failed');
     }
     return msg.result;
@@ -761,6 +771,8 @@ export class FirefoxRdpClient extends EventEmitter {
       waiter.reject?.(new Error('FirefoxRdpClient closed'));
     }
     this.#evalWaiters.clear();
+    for (const entry of this.#earlyEvalResults.values()) clearTimeout(entry.timer);
+    this.#earlyEvalResults.clear();
     for (const wake of [...this.#targetWaiters]) wake();
     this.#targetWaiters.clear();
     this.#watchers.clear();

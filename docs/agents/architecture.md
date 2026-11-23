@@ -14,9 +14,8 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 ├─ MCP (stdio)  bin/bridge.exe --mcp              → runtime/electron.exe app/mcp.cjs                ELECTRON_RUN_AS_NODE=1
 │    ├─ gateway (default Camoufox)
 │    │          bin/bridge.exe --browser          → runtime/electron.exe app/companion-camoufox.cjs ELECTRON_RUN_AS_NODE=1
-│    │             ├─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
-│    │             │    └─ native Firefox #nav-bar Agent Control toolbar (mounted via parent-chrome RDP, token-authenticated 127.0.0.1 callback, 0px height delta)
-│    │             └─ bin/control-bar.exe (Per-Monitor DPI V2 fallback Win32 Control Bar, spawned only when #nav-bar mount is unavailable)
+│    │             └─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
+│    │                  └─ native Firefox #nav-bar Agent Control toolbar (mounted once via parent-chrome RDP; live SSE sync + action callback over token-authenticated 127.0.0.1 HTTP, 0px height delta)
 │    └─ gateway (WB_ENGINE=electron fallback for WebHID/WebUSB)
 │               bin/bridge.exe --browser-electron → runtime/electron.exe app/companion.cjs          Electron main
 │                  ⇅ named pipe, newline JSON (RpcPeer), role "gateway"
@@ -56,10 +55,9 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/camoufox/juggler.mjs` | Pure-Node NUL-delimited Juggler pipe transport & `CamoufoxProcess` lifecycle (`-wait-for-browser`, `CAMOU_CONFIG_*`, `CAMOU_PREFS_*`, ephemeral loopback RDP port) | `CamoufoxProcess`, `JugglerTransport`, `chunkCamouEnv`, `defaultCamouConfig`, `defaultCamouPrefs` |
 | `src/browser/camoufox/rdp.mjs` | Narrow local Firefox DevTools RDP client: `eagerRead` (`console(expression)`), `pageEvaluate` (`world:"page"`), `inspectNode` (matched CSS rules with stylesheet URL/line + DOM event listeners), worker/SW `network-event` + `stylesheet` watching & lazy header/body fetch, `chromeEval` for native `#nav-bar` control toolbar | `FirefoxRdpTransport`, `FirefoxRdpClient` |
 | `src/browser/camoufox/driver.mjs` | Camoufox frame driver over Juggler + RDP: isolated walker/eval/devtools worlds, `__wbTrustedInput`, per-parent iframe owner mapping, parallel per-frame snapshots, `pointFor`, `hitChain`, `armGuard`, `inspectElement`, `performanceSnapshot`, `handleDialog` (`alert`/`confirm`/`prompt`) | `CamoufoxFrameDriver`, `FRAME_CAP`, `INPUT_BINDING` |
-| `src/browser/camoufox/presentation.mjs` | Camoufox handoff/Stop/return state machine, `ChromeToolbarClient` (primary native Firefox `#nav-bar` 1-click toolbar with token-authenticated loopback callback and `win.getAttention()`), and `ControlBarClient` stdin/stdout JSON fallback to `bin/control-bar.exe` | `CamoufoxPresentation`, `ChromeToolbarClient`, `ControlBarClient` |
+| `src/browser/camoufox/presentation.mjs` | Camoufox handoff/Stop/return state machine and `ChromeToolbarClient` (native Firefox `#nav-bar` 1-click toolbar mounted once via parent-chrome RDP with token-authenticated `127.0.0.1` SSE state stream, action POST callback, and `win.getAttention()`) | `CamoufoxPresentation`, `ChromeToolbarClient` |
 | `src/browser/camoufox/runner-sandbox.mjs` | Dedicated hardened headless Camoufox sandbox per `run` (WebRTC off, dead proxy `127.0.0.1:9`, request interception abort-all, CSP `default-src 'none'`, nonce-checked isolated bridge binding) | `createCamoufoxRunnerSandboxFactory`, `CAMOUFOX_BOOTSTRAP_URL` |
 | `src/browser/camoufox/host.mjs` | Camoufox-backed 32-action host matching `BrowserHost` contract (perception, refs, diffs, signals, full Juggler/WS/RDP DevTools with privacy windows, Firefox BrowserContext sessions, elevated mode + one-way toolbar revert, native `prompt` dialogs) | `CamoufoxHost` |
-| `native/control-bar.cpp` | Fallback Per-Monitor DPI V2 slim non-topmost Win32 Control Bar (`bin/control-bar.exe`, owner-docked via `GWLP_HWNDPARENT` + DWM frame bounds), spawned only if Firefox `#nav-bar` mounting is unavailable | `wmain` |
 | `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
 | `src/shared/paths.mjs` | caller authority of the registration, automation mode env parsing (`WB_AUTOMATION_MODE`), data root per authority, connection directory, pipe name | `authorityMode`, `automationMode`, `pluginData`, `connectionPaths`, `validChannel` |
@@ -165,7 +163,7 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 ## Package layout
 
 `npm run package` → `dist/win-browser-XXXXXX/win-browser/`:
-`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `bin/control-bar.exe`, `runtime/` (Electron dist for bundled Node & `WB_ENGINE=electron`), `app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and `provenance.json`), `licenses/camoufox/` (`NOTICE.md`, `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
+`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist for bundled Node & `WB_ENGINE=electron`), `app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and `provenance.json`), `licenses/camoufox/` (`NOTICE.md`, `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
 Shared-runtime local install (`build-release.md` Local install): `<root>\win-browser` is a junction to `<root>\win-browser-versions\v<ver>\win-browser`, and the ~1.3 GB Camoufox 158 runtime is stored once at `<root>\win-browser-runtime\camoufox\` (also resolvable via `camoufox/` inside the package, `WB_CAMOUFOX_PATH`, or local Camoufox cache).
 

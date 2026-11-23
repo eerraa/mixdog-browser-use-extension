@@ -1,14 +1,11 @@
-// Camoufox presentation, native Firefox #nav-bar toolbar controller, and Win32
-// Control Bar fallback.
+// Camoufox presentation and native Firefox #nav-bar Agent Control toolbar.
 // Preserves the exact handoff state machine (`automation | draining |
 // native-handoff | returning`, generation counter, fail-closed transitions,
-// human-only return/resume, one-way elevated downgrade) without injecting any
-// DOM overlay into web content (controls live in Firefox parent chrome #nav-bar
-// with 0px height delta on outerHeight-innerHeight).
-import { spawn } from 'node:child_process';
+// human-only return/resume, one-way elevated downgrade) inside Firefox's
+// trusted parent chrome `#nav-bar` (0px height delta on outerHeight-innerHeight,
+// zero DOM injected into web content, zero external floating window).
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
 import http from 'node:http';
 import { fail } from '../../shared/contract.mjs';
 
@@ -41,78 +38,6 @@ const STRINGS = {
   },
 };
 
-export class ControlBarClient extends EventEmitter {
-  #child = null;
-  #buffer = '';
-  #closed = false;
-
-  constructor({ executablePath, headless = false, locale = 'ko-KR' } = {}) {
-    super();
-    this.executablePath = executablePath;
-    this.headless = headless;
-    this.locale = locale;
-  }
-
-  start() {
-    if (this.headless || this.#closed || this.#child || !this.executablePath || !existsSync(this.executablePath)) return;
-    const child = spawn(this.executablePath, [], {
-      stdio: ['pipe', 'pipe', 'ignore'],
-      windowsHide: false,
-    });
-    this.#child = child;
-    child.stdout.on('data', chunk => {
-      this.#buffer += chunk.toString('utf8');
-      let nl;
-      while ((nl = this.#buffer.indexOf('\n')) !== -1) {
-        const line = this.#buffer.slice(0, nl).trim();
-        this.#buffer = this.#buffer.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (typeof msg?.action === 'string') this.emit('action', msg.action, msg.tabId ?? null);
-        } catch { /* ignore malformed line */ }
-      }
-    });
-    child.once('exit', () => {
-      if (this.#child === child) this.#child = null;
-    });
-    child.on('error', () => {
-      if (this.#child === child) this.#child = null;
-    });
-  }
-
-  #send(object) {
-    if (!this.#child || this.#closed || this.#child.stdin.destroyed) return;
-    try { this.#child.stdin.write(`${JSON.stringify(object)}\n`); } catch { /* ignore */ }
-  }
-
-  sync({ elevated, activeId, tabs, visible = true, browserPid = 0 }) {
-    this.start();
-    this.#send({
-      cmd: 'state',
-      locale: this.locale,
-      elevated: Boolean(elevated),
-      active: activeId ?? '',
-      visible,
-      browserPid: Number.isInteger(browserPid) && browserPid > 0 ? browserPid : 0,
-      tabs,
-    });
-  }
-
-  flash() {
-    this.#send({ cmd: 'flash' });
-  }
-
-  close() {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#send({ cmd: 'quit' });
-    try { this.#child?.stdin.end(); } catch { /* ignore */ }
-    try { this.#child?.kill(); } catch { /* ignore */ }
-    this.#child = null;
-  }
-}
-
 const ALLOWED_BAR_ACTIONS = new Set([
   'take-control',
   'resume',
@@ -127,7 +52,7 @@ function sameToken(supplied, expected) {
   return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-function buildChromeToolbarBootstrap({ port, token, locale }) {
+function buildChromeToolbarBootstrap({ port, token, locale, initialState }) {
   const isKo = String(locale).toLowerCase().startsWith('ko');
   const labels = isKo
     ? {
@@ -156,6 +81,7 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
     const PORT = ${Number(port)};
     const TOKEN = ${JSON.stringify(token)};
     const L = ${JSON.stringify(labels)};
+    const INITIAL_STATE = ${JSON.stringify(initialState ?? { elevated: false, activeId: '', visible: false, tabs: [] })};
     const HTML_NS = 'http://www.w3.org/1999/xhtml';
     const BAR_ID = 'wb-agent-nav-bar';
     const STYLE_ID = 'wb-agent-nav-style';
@@ -166,7 +92,17 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
 
     const browserIdToTabId = new Map();
     const mountedWins = new Set();
-    let lastState = { elevated: false, activeId: '', visible: false, tabs: [] };
+    let lastState = INITIAL_STATE;
+    let destroyed = false;
+    let streamAbort = null;
+    let reconnectTimer = null;
+
+    function getChromeWindow() {
+      for (const win of mountedWins) {
+        if (win && !win.closed) return win;
+      }
+      try { return Services.wm.getMostRecentWindow('navigator:browser'); } catch { return null; }
+    }
 
     function postAction(win, action, tabId) {
       try {
@@ -410,7 +346,7 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
         try {
           const domWin = xulWin.docShell.domWindow;
           domWin.addEventListener('load', () => {
-            if (domWin.document.documentElement.getAttribute('windowtype') === 'navigator:browser') {
+            if (!destroyed && domWin.document.documentElement.getAttribute('windowtype') === 'navigator:browser') {
               mountWindow(domWin);
             }
           }, { once: true });
@@ -422,12 +358,14 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
 
     const api = {
       sync(state) {
+        if (destroyed) return 0;
         lastState = state || lastState;
         mountAll();
         for (const win of [...mountedWins]) renderWindow(win);
         return mountedWins.size;
       },
       flash(tabId) {
+        if (destroyed) return;
         mountAll();
         for (const win of [...mountedWins]) {
           if (!win || win.closed) continue;
@@ -443,6 +381,13 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
         }
       },
       destroy() {
+        destroyed = true;
+        try { streamAbort?.abort(); } catch {}
+        streamAbort = null;
+        if (reconnectTimer) {
+          try { getChromeWindow()?.clearTimeout(reconnectTimer); } catch {}
+          reconnectTimer = null;
+        }
         try { Services.wm.removeListener(wmListener); } catch {}
         for (const win of [...mountedWins]) {
           try {
@@ -456,8 +401,64 @@ function buildChromeToolbarBootstrap({ port, token, locale }) {
         delete globalThis.__wbNavToolbar;
       },
     };
+
+    function scheduleReconnect() {
+      if (destroyed) return;
+      const win = getChromeWindow();
+      const setT = win?.setTimeout?.bind(win) ?? globalThis.setTimeout;
+      if (typeof setT !== 'function') return;
+      reconnectTimer = setT(() => { reconnectTimer = null; connectStream(); }, 500);
+    }
+
+    async function connectStream() {
+      if (destroyed) return;
+      const win = getChromeWindow();
+      const fetchFn = win?.fetch?.bind(win) ?? globalThis.fetch;
+      const AC = win?.AbortController ?? globalThis.AbortController;
+      const TD = win?.TextDecoder ?? globalThis.TextDecoder;
+      if (typeof fetchFn !== 'function' || typeof AC !== 'function' || typeof TD !== 'function') {
+        scheduleReconnect();
+        return;
+      }
+      const ctrl = new AC();
+      streamAbort = ctrl;
+      try {
+        const res = await fetchFn('http://127.0.0.1:' + PORT + '/events', {
+          method: 'GET',
+          headers: { 'X-WB-Token': TOKEN },
+          signal: ctrl.signal,
+        });
+        if (!res.ok || !res.body) { scheduleReconnect(); return; }
+        const reader = res.body.getReader();
+        const decoder = new TD();
+        let buf = '';
+        while (!destroyed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let sep;
+          while ((sep = buf.indexOf('\\n\\n')) !== -1) {
+            const block = buf.slice(0, sep);
+            buf = buf.slice(sep + 2);
+            for (const line of block.split('\\n')) {
+              if (!line.startsWith('data:')) continue;
+              try {
+                const msg = JSON.parse(line.slice(5).trim());
+                if (msg?.type === 'state') api.sync(msg.state);
+                else if (msg?.type === 'flash') api.flash(msg.tabId || '');
+                else if (msg?.type === 'destroy') { api.destroy(); return; }
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+      if (!destroyed) scheduleReconnect();
+    }
+
     globalThis.__wbNavToolbar = api;
-    return mountAll();
+    const count = mountAll();
+    connectStream();
+    return count;
   })()`;
 }
 
@@ -466,12 +467,12 @@ export class ChromeToolbarClient extends EventEmitter {
   #server = null;
   #port = 0;
   #token = randomBytes(32).toString('base64url');
+  #eventClients = new Set();
+  #pingTimer = null;
   #installed = false;
-  #failed = false;
   #closed = false;
-  #inFlight = null;
-  #pendingState = null;
-  #pendingFlash = null;
+  #mountFlight = null;
+  #retryTimer = null;
   #lastState = null;
 
   constructor({ getRdp, headless = false, locale = 'ko-KR' } = {}) {
@@ -481,12 +482,49 @@ export class ChromeToolbarClient extends EventEmitter {
     this.locale = locale;
   }
 
-  get active() { return !this.headless && !this.#failed && !this.#closed; }
+  get active() { return !this.headless && !this.#closed; }
+
+  #broadcast(payload) {
+    if (!this.#eventClients.size) return;
+    const frame = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const res of [...this.#eventClients]) {
+      try {
+        if (res.destroyed || res.writableEnded) { this.#eventClients.delete(res); continue; }
+        res.write(frame);
+      } catch {
+        this.#eventClients.delete(res);
+      }
+    }
+  }
 
   async #ensureServer() {
     if (this.#server) return this.#port;
     const server = http.createServer((req, res) => {
-      if (req.method !== 'POST' || req.url !== '/action' || !sameToken(req.headers['x-wb-token'], this.#token)) {
+      if (!sameToken(req.headers['x-wb-token'], this.#token)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('forbidden');
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/events') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.flushHeaders?.();
+        if (this.#eventClients.size >= 4) {
+          const oldest = this.#eventClients.values().next().value;
+          this.#eventClients.delete(oldest);
+          try { oldest.end(); } catch { /* ignore */ }
+        }
+        this.#eventClients.add(res);
+        req.on('close', () => this.#eventClients.delete(res));
+        if (this.#lastState) {
+          try { res.write(`data: ${JSON.stringify({ type: 'state', state: this.#lastState })}\n\n`); } catch { /* ignore */ }
+        }
+        return;
+      }
+      if (req.method !== 'POST' || req.url !== '/action') {
         res.writeHead(403, { 'Content-Type': 'text/plain' });
         res.end('forbidden');
         return;
@@ -524,77 +562,77 @@ export class ChromeToolbarClient extends EventEmitter {
     });
     this.#server = server;
     this.#port = server.address().port;
+    this.#pingTimer = setInterval(() => {
+      for (const res of [...this.#eventClients]) {
+        try {
+          if (res.destroyed || res.writableEnded) { this.#eventClients.delete(res); continue; }
+          res.write(': ping\n\n');
+        } catch {
+          this.#eventClients.delete(res);
+        }
+      }
+    }, 25000);
+    this.#pingTimer.unref?.();
     return this.#port;
   }
 
-  #schedule() {
-    if (this.#inFlight || this.#closed || this.#failed || this.headless) return;
-    this.#inFlight = this.#drain().finally(() => {
-      this.#inFlight = null;
-      if ((this.#pendingState || this.#pendingFlash !== null) && !this.#closed && !this.#failed) {
-        this.#schedule();
+  #ensureMounted() {
+    if (this.headless || this.#closed || this.#installed || this.#mountFlight) return;
+    this.#mountFlight = (async () => {
+      const rdp = this.#getRdp?.();
+      if (!rdp || rdp.closed) return;
+      if (!(await rdp.ensureConnected().catch(() => false))) return;
+      const port = await this.#ensureServer();
+      const script = buildChromeToolbarBootstrap({
+        port,
+        token: this.#token,
+        locale: this.locale,
+        initialState: this.#lastState,
+      });
+      await rdp.chromeEval(script, 6000);
+      this.#installed = true;
+      if (this.#lastState) this.#broadcast({ type: 'state', state: this.#lastState });
+    })().catch(() => {
+      if (!this.#closed && !this.#installed && !this.#retryTimer) {
+        this.#retryTimer = setTimeout(() => {
+          this.#retryTimer = null;
+          this.#ensureMounted();
+        }, 750);
+        this.#retryTimer.unref?.();
       }
+    }).finally(() => {
+      this.#mountFlight = null;
     });
-  }
-
-  async #drain() {
-    const rdp = this.#getRdp?.();
-    if (!rdp || rdp.closed) return;
-    if (!(await rdp.ensureConnected().catch(() => false))) return;
-    if (!this.#installed) {
-      try {
-        const port = await this.#ensureServer();
-        const script = buildChromeToolbarBootstrap({ port, token: this.#token, locale: this.locale });
-        await rdp.chromeEval(script, 4000);
-        this.#installed = true;
-      } catch (error) {
-        this.#failed = true;
-        this.emit('fallback', error, this.#lastState);
-        return;
-      }
-    }
-    while (!this.#closed && !this.#failed) {
-      const nextState = this.#pendingState;
-      const nextFlash = this.#pendingFlash;
-      this.#pendingState = null;
-      this.#pendingFlash = null;
-      if (!nextState && nextFlash === null) break;
-      try {
-        if (nextState) {
-          await rdp.chromeEval(`globalThis.__wbNavToolbar?.sync(${JSON.stringify(nextState)})`, 3000);
-        }
-        if (nextFlash !== null) {
-          await rdp.chromeEval(`globalThis.__wbNavToolbar?.flash(${JSON.stringify(nextFlash)})`, 3000);
-        }
-      } catch {
-        // If chrome reloaded or disconnected mid-sync, allow re-mount on next sync unless closed.
-        this.#installed = false;
-        break;
-      }
-    }
   }
 
   sync(state) {
     this.#lastState = state;
-    if (this.headless || this.#closed || this.#failed) return;
-    this.#pendingState = state;
-    this.#schedule();
+    if (this.headless || this.#closed) return;
+    if (!this.#installed) this.#ensureMounted();
+    this.#broadcast({ type: 'state', state });
   }
 
   flash(tabId = '') {
-    if (this.headless || this.#closed || this.#failed) return;
-    this.#pendingFlash = tabId ?? '';
-    this.#schedule();
+    if (this.headless || this.#closed) return;
+    if (!this.#installed) this.#ensureMounted();
+    this.#broadcast({ type: 'flash', tabId: tabId ?? '' });
   }
 
   close() {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#retryTimer) { clearTimeout(this.#retryTimer); this.#retryTimer = null; }
+    if (this.#pingTimer) { clearInterval(this.#pingTimer); this.#pingTimer = null; }
+    this.#broadcast({ type: 'destroy' });
+    for (const res of [...this.#eventClients]) {
+      try { res.end(); } catch { /* ignore */ }
+    }
+    this.#eventClients.clear();
     const rdp = this.#getRdp?.();
     if (this.#installed && rdp?.connected) {
       rdp.chromeEval('globalThis.__wbNavToolbar?.destroy()', 1000).catch(() => {});
     }
-    try { this.#server?.close(); } catch { /* ignore */ }
+    try { this.#server?.close(); this.#server?.closeAllConnections?.(); } catch { /* ignore */ }
     this.#server = null;
   }
 }

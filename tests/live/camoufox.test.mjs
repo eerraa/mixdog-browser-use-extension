@@ -660,10 +660,59 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
   assert.equal(await rdp.ensureConnected(), true);
 
   const heightBefore = await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); return w.outerHeight - w.innerHeight; })()');
-  toolbar = new ChromeToolbarClient({ getRdp: () => rdp, headless: false, locale: 'ko-KR' });
+  let chromeEvalCount = 0;
+  const origChromeEval = rdp.chromeEval.bind(rdp);
+  const countingRdp = {
+    get connected() { return rdp.connected; },
+    get closed() { return rdp.closed; },
+    ensureConnected: (...a) => rdp.ensureConnected(...a),
+    chromeEval: (...a) => { chromeEvalCount++; return origChromeEval(...a); },
+  };
+  toolbar = new ChromeToolbarClient({ getRdp: () => countingRdp, headless: false, locale: 'ko-KR' });
   const received = [];
   toolbar.on('action', (action, tabId) => received.push({ action, tabId }));
 
+  toolbar.sync({
+    elevated: false,
+    activeId: 't1',
+    visible: true,
+    tabs: [{
+      id: 't1',
+      label: 't1 · ChatGPT',
+      url: 'about:blank',
+      browsingContextId: null,
+      mode: 'automation',
+      paused: false,
+      status: '에이전트 자동화 중',
+      primaryText: '직접 조작',
+      primaryAction: 'take-control',
+      stopEnabled: true,
+      needsReturn: false,
+    }],
+  });
+
+  const mounted = await until(async () => {
+    const raw = await origChromeEval(`JSON.stringify((() => {
+      const w = Services.wm.getMostRecentWindow("navigator:browser");
+      const bar = w?.document?.getElementById("wb-agent-nav-bar");
+      if (!bar || bar.style.display === "none") return null;
+      return {
+        heightDelta: (w.outerHeight - w.innerHeight) - ${Number(heightBefore)},
+        primaryText: bar._wbPrimary?.textContent || "",
+        statusText: bar._wbStatus?.textContent || "",
+        parentId: bar.parentElement?.id || "",
+      };
+    })())`).catch(() => null);
+    return raw && raw !== 'null' ? JSON.parse(raw) : null;
+  }, '#nav-bar ChromeToolbarClient mount', 8000);
+
+  assert.equal(mounted.parentId, 'nav-bar');
+  assert.equal(mounted.heightDelta, 0, 'mounting inside #nav-bar must not change outerHeight - innerHeight');
+  assert.equal(mounted.statusText, '에이전트 자동화 중');
+  assert.equal(mounted.primaryText, '직접 조작');
+  assert.equal(chromeEvalCount, 1, 'initial mount uses exactly one chromeEval');
+
+  // Push handoff state update over SSE stream (must update #nav-bar WITHOUT another chromeEval!)
   toolbar.sync({
     elevated: false,
     activeId: 't1',
@@ -683,34 +732,27 @@ test('live Camoufox 158: native #nav-bar ChromeToolbarClient mounts with 0px hei
     }],
   });
 
-  const mounted = await until(async () => {
-    const raw = await rdp.chromeEval(`JSON.stringify((() => {
+  const updated = await until(async () => {
+    const raw = await origChromeEval(`JSON.stringify((() => {
       const w = Services.wm.getMostRecentWindow("navigator:browser");
       const bar = w?.document?.getElementById("wb-agent-nav-bar");
-      if (!bar || bar.style.display === "none") return null;
-      return {
-        heightDelta: (w.outerHeight - w.innerHeight) - ${Number(heightBefore)},
-        primaryText: bar._wbPrimary?.textContent || "",
-        statusText: bar._wbStatus?.textContent || "",
-        parentId: bar.parentElement?.id || "",
-      };
+      if (!bar) return null;
+      return { primaryText: bar._wbPrimary?.textContent || "", statusText: bar._wbStatus?.textContent || "" };
     })())`).catch(() => null);
-    return raw && raw !== 'null' ? JSON.parse(raw) : null;
-  }, '#nav-bar ChromeToolbarClient mount', 8000);
-
-  assert.equal(mounted.parentId, 'nav-bar');
-  assert.equal(mounted.heightDelta, 0, 'mounting inside #nav-bar must not change outerHeight - innerHeight');
-  assert.equal(mounted.statusText, '직접 조작 중');
-  assert.equal(mounted.primaryText, '에이전트에게 돌려주기');
+    const parsed = raw && raw !== 'null' ? JSON.parse(raw) : null;
+    return parsed?.primaryText === '에이전트에게 돌려주기' ? parsed : null;
+  }, '#nav-bar SSE live state update', 6000);
+  assert.equal(updated.statusText, '직접 조작 중');
+  assert.equal(chromeEvalCount, 1, 'SSE state sync must require zero additional chromeEval calls');
 
   // Click the actual button inside Firefox #nav-bar and verify authenticated loopback callback arrives
-  await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); w.document.getElementById("wb-agent-nav-bar")._wbPrimary.click(); return true; })()');
+  await origChromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); w.document.getElementById("wb-agent-nav-bar")._wbPrimary.click(); return true; })()');
   await until(() => received.length === 1, 'authenticated loopback action from #nav-bar button click', 5000);
   assert.deepEqual(received, [{ action: 'resume', tabId: 't1' }]);
 
   toolbar.close();
   const removed = await until(async () => {
-    return await rdp.chromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); return !w?.document?.getElementById("wb-agent-nav-bar"); })()').catch(() => false);
+    return await origChromeEval('(() => { const w = Services.wm.getMostRecentWindow("navigator:browser"); return !w?.document?.getElementById("wb-agent-nav-bar"); })()').catch(() => false);
   }, '#nav-bar cleanup on close', 4000);
   assert.equal(removed, true);
 });

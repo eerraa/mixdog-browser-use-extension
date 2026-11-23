@@ -21,11 +21,10 @@ await cp(path.join(root, 'build/app'), path.join(destination, 'app'), { recursiv
 await cp(path.join(root, 'build/licenses'), path.join(destination, 'licenses'), { recursive: true });
 await put('build/bridge.exe', 'bin/bridge.exe');
 await put('build/native-consent.exe', 'bin/native-consent.exe');
-await put('build/control-bar.exe', 'bin/control-bar.exe');
 // Mixdog's license and NOTICE and the fork record for the derived code.
 for (const name of ['LICENSE', 'NOTICE.md', 'provenance.json']) await put(`third_party/mixdog/${name}`, `licenses/mixdog/${name}`);
 for (const name of ['NOTICE.md', 'provenance.json']) await put(`third_party/camoufox/${name}`, `licenses/camoufox/${name}`);
-for (const name of ['consent.cpp', 'bridge.cpp', 'control-bar.cpp']) await put(`native/${name}`, `sources/native/${name}`);
+for (const name of ['consent.cpp', 'bridge.cpp']) await put(`native/${name}`, `sources/native/${name}`);
 
 // The compiler's actual import graph, not package.json's entire dependency
 // tree, determines which npm license texts accompany the bundled runtime.

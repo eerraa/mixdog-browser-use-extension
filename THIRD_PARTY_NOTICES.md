@@ -73,13 +73,8 @@ actual JavaScript inputs, including the adapted protocol implementation.
 
 ## Native helpers
 
-The independent native sources (`bridge.cpp`, `consent.cpp`, `control-bar.cpp`)
-are included under `sources/native/`.
-`control-bar.exe` is an optional Per-Monitor DPI V2 fallback Win32 Control Bar
-owner-docked to the Camoufox window (`GWLP_HWNDPARENT`, DWM extended frame
-bounds) for Camoufox tabs when native Firefox `#nav-bar` toolbar mounting is
-unavailable, using documented Win32 User32/GDI32/Toolhelp/DWM APIs over
-stdin/stdout JSON.
+The independent native sources (`bridge.cpp`, `consent.cpp`) are included under
+`sources/native/`.
 Windows UserConsentVerifier is used through its documented desktop ABI;
 no credential or biometric data is returned to this plugin.
 Its separate no-prompt input-idle mode uses documented Win32 input, desktop,

@@ -68,7 +68,6 @@ async function main() {
     persistentProfileDir,
     executablePath: camoufox.executablePath,
     camoufoxVersion: camoufox.version,
-    controlBarPath: path.join(root, 'bin', 'control-bar.exe'),
     policy,
     automationMode: configuredAutomationMode,
     automationModeSource,

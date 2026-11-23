@@ -100,6 +100,32 @@ test('FirefoxRdpTransport frames length-prefixed UTF-8 packets, matches replies,
   assert.equal(events.length, 1);
   assert.equal(events[0].type, 'resources-available-array');
   transport.close();
+
+  // FirefoxRdpClient must resolve evaluationResult delivered in the exact same TCP chunk as evaluateJSAsync resultID
+  const sock2 = new PassThrough();
+  const origWrite2 = sock2.write.bind(sock2);
+  sock2.write = chunk => {
+    const text = chunk.toString('utf8');
+    const json = JSON.parse(text.slice(text.indexOf(':') + 1));
+    if (json.type === 'getProcess') {
+      origWrite2(frame({ from: 'root', processDescriptor: { actor: 'proc0' } }));
+    } else if (json.type === 'getTarget') {
+      origWrite2(frame({ from: 'proc0', process: { consoleActor: 'con0' } }));
+    } else if (json.type === 'evaluateJSAsync') {
+      // Deliver both resultID reply and evaluationResult in ONE single chunk!
+      origWrite2(
+        frame({ from: 'con0', resultID: 'fast-1' })
+        + frame({ from: 'con0', type: 'evaluationResult', resultID: 'fast-1', result: 42 }),
+      );
+    }
+    return true;
+  };
+  const client = new FirefoxRdpClient(12345, { connectImpl: () => sock2 });
+  const connectP = client.ensureConnected(1000);
+  origWrite2(frame({ from: 'root', applicationType: 'browser', traits: {} }));
+  assert.equal(await connectP, true);
+  assert.equal(await client.chromeEval('42', 1000), 42);
+  client.close();
 });
 
 test('DevToolsRecorder Juggler HTTP, redirects, timing, TLS, WebSockets, RDP dedup, enrichment and handoff privacy', async () => {
@@ -534,16 +560,18 @@ test('CamoufoxHost persistentProfileDir acquires atomic lock, falls back to ephe
   }
 });
 
-test('ChromeToolbarClient mounts into Firefox #nav-bar via chromeEval, authenticates loopback actions, and emits fallback on chromeEval failure', async () => {
+test('ChromeToolbarClient mounts once via chromeEval, streams state/flash over authenticated SSE without extra chromeEval calls, and retries transient mount failure', async () => {
   const evals = [];
   let port = 0;
   let token = '';
+  let failOnce = true;
   const mockRdp = {
     connected: true,
     closed: false,
     async ensureConnected() { return true; },
     async chromeEval(script) {
       evals.push(script);
+      if (failOnce) { failOnce = false; throw new Error('transient startup'); }
       const pm = script.match(/const PORT = (\d+);/);
       const tm = script.match(/const TOKEN = ("[^"]+");/);
       if (pm) port = Number(pm[1]);
@@ -555,31 +583,57 @@ test('ChromeToolbarClient mounts into Firefox #nav-bar via chromeEval, authentic
   const actions = [];
   bar.on('action', (action, tabId) => actions.push({ action, tabId }));
 
-  bar.sync({ elevated: false, activeId: 't1', visible: true, tabs: [{ id: 't1', status: '직접 조작 중', primaryText: '에이전트에게 돌려주기', primaryAction: 'resume', stopEnabled: true, needsReturn: true }] });
-  bar.flash('t1');
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && evals.length < 3) await new Promise(r => setTimeout(r, 15));
-  assert.ok(port > 0 && token.length >= 32, 'bootstrap script must embed loopback port and 32-byte token');
-  assert.ok(evals[0].includes('wb-agent-nav-bar') && evals[0].includes('nav-bar'));
-  assert.ok(evals.some(s => s.includes('__wbNavToolbar?.sync(')));
-  assert.ok(evals.some(s => s.includes('__wbNavToolbar?.flash("t1")')));
+  const s1 = { elevated: false, activeId: 't1', visible: true, tabs: [{ id: 't1', status: '에이전트 자동화 중', primaryText: '직접 조작', primaryAction: 'take-control', stopEnabled: true, needsReturn: false }] };
+  bar.sync(s1);
+  const deadline = Date.now() + 2500;
+  while (Date.now() < deadline && !port) await new Promise(r => setTimeout(r, 25));
+  assert.ok(port > 0 && token.length >= 32, 'bootstrap retries transient failure and embeds loopback port + 32-byte token');
+  assert.equal(evals.length, 2, 'only 1 failed attempt + 1 successful bootstrap chromeEval');
+  assert.ok(evals[1].includes('wb-agent-nav-bar') && evals[1].includes('/events'));
 
-  // Missing or wrong token MUST be refused with 403
+  // SSE /events MUST refuse missing/wrong token with 403
+  const badSse = await fetch(`http://127.0.0.1:${port}/events`, { headers: { 'X-WB-Token': 'wrong-token' } });
+  assert.equal(badSse.status, 403);
+  assert.equal(badSse.headers.get('access-control-allow-origin'), null);
+
+  // Valid SSE stream receives initial state + live sync + flash with ZERO extra chromeEval calls
+  const sseAbort = new AbortController();
+  const sseRes = await fetch(`http://127.0.0.1:${port}/events`, { headers: { 'X-WB-Token': token }, signal: sseAbort.signal });
+  assert.equal(sseRes.status, 200);
+  const reader = sseRes.body.getReader();
+  const dec = new TextDecoder();
+  const events = [];
+  const readChunk = async () => {
+    const { value } = await reader.read();
+    for (const block of dec.decode(value, { stream: true }).split('\n\n')) {
+      const line = block.split('\n').find(l => l.startsWith('data:'));
+      if (line) events.push(JSON.parse(line.slice(5).trim()));
+    }
+  };
+  await readChunk(); // initial state
+  const s2 = { ...s1, tabs: [{ id: 't1', status: '직접 조작 중', primaryText: '에이전트에게 돌려주기', primaryAction: 'resume', stopEnabled: true, needsReturn: true }] };
+  bar.sync(s2);
+  bar.flash('t1');
+  while (events.length < 3) await readChunk();
+  assert.equal(events[0].type, 'state');
+  assert.equal(events[0].state.tabs[0].primaryAction, 'take-control');
+  assert.equal(events[1].type, 'state');
+  assert.equal(events[1].state.tabs[0].primaryAction, 'resume');
+  assert.deepEqual(events[2], { type: 'flash', tabId: 't1' });
+  assert.equal(evals.length, 2, 'subsequent sync/flash must push over SSE with zero extra chromeEval calls');
+  sseAbort.abort();
+
+  // POST /action auth & validation
   const badTok = await fetch(`http://127.0.0.1:${port}/action`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': 'wrong-token' },
     body: JSON.stringify({ action: 'resume', tabId: 't1' }),
   });
   assert.equal(badTok.status, 403);
-  assert.equal(badTok.headers.get('access-control-allow-origin'), null);
-
-  // Unknown action MUST be refused with 400
   const badAct = await fetch(`http://127.0.0.1:${port}/action`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': token },
     body: JSON.stringify({ action: 'eval-js', tabId: 't1' }),
   });
   assert.equal(badAct.status, 400);
-
-  // Valid token + allowed action MUST succeed and emit action event
   const okRes = await fetch(`http://127.0.0.1:${port}/action`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WB-Token': token },
     body: JSON.stringify({ action: 'resume', tabId: 't1' }),
@@ -589,15 +643,4 @@ test('ChromeToolbarClient mounts into Firefox #nav-bar via chromeEval, authentic
 
   bar.close();
   assert.ok(evals.some(s => s.includes('__wbNavToolbar?.destroy()')));
-
-  // Fallback path when chromeEval fails
-  const failRdp = { connected: true, closed: false, async ensureConnected() { return true; }, async chromeEval() { throw new Error('no chrome'); } };
-  const failBar = new ChromeToolbarClient({ getRdp: () => failRdp, headless: false, locale: 'en-US' });
-  const fellBack = new Promise(resolve => failBar.once('fallback', (err, st) => resolve({ err, st })));
-  const stPayload = { elevated: false, activeId: 't1', visible: true, tabs: [] };
-  failBar.sync(stPayload);
-  const fb = await fellBack;
-  assert.equal(fb.st, stPayload);
-  assert.equal(failBar.active, false);
-  failBar.close();
 });

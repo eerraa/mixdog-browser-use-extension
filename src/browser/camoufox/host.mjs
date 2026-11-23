@@ -27,7 +27,7 @@ import {
 import { CamoufoxProcess } from './juggler.mjs';
 import { FirefoxRdpClient } from './rdp.mjs';
 import { CamoufoxFrameDriver } from './driver.mjs';
-import { CamoufoxPresentation, ChromeToolbarClient, ControlBarClient } from './presentation.mjs';
+import { CamoufoxPresentation, ChromeToolbarClient } from './presentation.mjs';
 import { createCamoufoxRunnerSandboxFactory } from './runner-sandbox.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -145,8 +145,6 @@ export class CamoufoxHost {
   #rdp = null;
   #startFlight = null;
   #chromeToolbar = null;
-  #controlBar = null;
-  #useFallbackBar = false;
   #downloadsByUuid = new Map();
   #permissionGrants = new Map(); // `${origin}\0${kind}` → 'allow' | 'deny'
   #activeTabId = null;
@@ -156,7 +154,7 @@ export class CamoufoxHost {
   #profilePersistence = 'ephemeral';
 
   constructor({
-    dataDir, persistentProfileDir = null, executablePath, camoufoxVersion = '158.0.1-beta.41', controlBarPath = null,
+    dataDir, persistentProfileDir = null, executablePath, camoufoxVersion = '158.0.1-beta.41',
     onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
     automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
@@ -194,13 +192,6 @@ export class CamoufoxHost {
       locale,
     });
     this.#chromeToolbar.on('action', (action, tabId) => this.#onControlBarAction(action, tabId));
-    this.#chromeToolbar.on('fallback', (_err, lastState) => {
-      this.#useFallbackBar = true;
-      if (lastState) this.#controlBar.sync(lastState);
-    });
-    this.#controlBar = new ControlBarClient({ executablePath: controlBarPath, headless, locale });
-    this.#controlBar.on('action', (action, tabId) => this.#onControlBarAction(action, tabId));
-    this.#useFallbackBar = !enableRdp;
   }
 
   status() {
@@ -380,19 +371,11 @@ export class CamoufoxHost {
           browserPid,
         };
       })();
-    if (!this.#useFallbackBar && this.#chromeToolbar.active) {
-      this.#chromeToolbar.sync(payload);
-    } else {
-      this.#controlBar.sync(payload);
-    }
+    this.#chromeToolbar.sync(payload);
   }
 
   #flashControlBar(tabId = '') {
-    if (!this.#useFallbackBar && this.#chromeToolbar.active) {
-      this.#chromeToolbar.flash(tabId);
-    } else {
-      this.#controlBar.flash();
-    }
+    this.#chromeToolbar.flash(tabId);
   }
 
   // Exposed for live/unit tests that simulate a person clicking a Control Bar button.
@@ -1991,7 +1974,6 @@ export class CamoufoxHost {
     if (this.#closed) return;
     this.#closed = true;
     this.#chromeToolbar.close();
-    this.#controlBar.close();
     this.#rdp?.close();
     this.nativeRequests.close();
     for (const p of this.#pages.values()) {

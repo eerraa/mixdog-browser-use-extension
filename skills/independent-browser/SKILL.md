@@ -353,11 +353,11 @@ closes when control returns.
 - On Camoufox, human takeover, return, Return all (`resume-all`), Stop, one-way
   Elevated revert and Revoke live directly inside Firefox's native `#nav-bar`
   toolbar (`ChromeToolbarClient`, parent chrome only — zero web-content DOM
-  injection, 0px `outerHeight - innerHeight` change, 0ms drag/DPI lag; falling
-  back automatically to DPI-aware `bin/control-bar.exe` only if `#nav-bar` is
-  unavailable), while the isolated-world `__wbTrustedInput` guard still pauses
-  automation on out-of-band trusted input. Under connection authority, the default
-  Camoufox profile persists inside `WB_DATA_DIR/profiles/camoufox-default`
+  injection, 0px `outerHeight - innerHeight` change, 0ms drag/DPI lag, live
+  token-authenticated `127.0.0.1` SSE sync and action callback, no external
+  floating window), while the isolated-world `__wbTrustedInput` guard still
+  pauses automation on out-of-band trusted input. Under connection authority, the
+  default Camoufox profile persists inside `WB_DATA_DIR/profiles/camoufox-default`
   (protected by a PID lock, falling back to `ephemeral-busy` when another live
   connection holds it; `status.profilePersistence` reports the live state).
 
