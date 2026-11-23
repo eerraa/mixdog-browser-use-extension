@@ -74,16 +74,17 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
 
   const helloBase = { channel, key, role: 'gateway' };
   const issuerHello = { channel, key, role: 'hook' };
+  const ended = () => Boolean(terminated || closing || terminationReason || startFailed);
+  const connectionClosedError = () => Object.assign(
+    new Error('Browser connection ended; reconnect the plugin explicitly'),
+    { code: 'CONNECTION_CLOSED', requestedInputDispatched: false },
+  );
   const watch = current => current.on('event', (event, params) => {
     if (event === 'terminating') terminationReason = params?.reason;
   });
 
   async function startCompanion() {
-    if (closing || terminated || terminationReason || startFailed) {
-      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
-        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
-      });
-    }
+    if (ended()) throw connectionClosedError();
     await mkdir(path.dirname(paths.directory), { recursive: true });
     await mkdir(paths.directory); // Fresh allocation; never reuse a previous connection.
     let startup = '', errors = '';
@@ -145,11 +146,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
 
   async function ensureStarted(signal) {
     if (signal?.aborted) throw abortError(signal);
-    if (terminated || closing || terminationReason || startFailed) {
-      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
-        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
-      });
-    }
+    if (ended()) throw connectionClosedError();
     if (started) return;
     if (!startFlight) {
       startFlight = startCompanion().catch(error => {
@@ -161,11 +158,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     }
     await awaitWithSignal(startFlight, signal);
     if (signal?.aborted) throw abortError(signal);
-    if (terminated || closing || terminationReason || startFailed) {
-      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
-        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
-      });
-    }
+    if (ended()) throw connectionClosedError();
   }
 
   // Hook authority needs endpoint.json before PreToolUse arrives; connection
@@ -183,9 +176,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
   };
 
   const livePeer = async () => {
-    if (terminated || closing || terminationReason || startFailed) {
-      throw new Error('Browser connection ended; reconnect the plugin explicitly');
-    }
+    if (ended()) throw new Error('Browser connection ended; reconnect the plugin explicitly');
     if (!peer || peer.closed) {
       // Reconnect the transport for NEW calls only; never replay the lost call.
       peer = await connect(paths.pipe, helloBase);
@@ -269,11 +260,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
           { requestedInputDispatched: false });
       }
-      if (terminated || closing || terminationReason || startFailed) {
-        throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
-          code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
-        });
-      }
+      if (ended()) throw connectionClosedError();
       // Narrow connection-authority metadata exception alongside `status`:
       // cold `list_profiles` is strictly read-only (no companion spawn, lock,
       // or connection directory creation) on both Electron and Camoufox.

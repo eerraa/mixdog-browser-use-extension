@@ -9,10 +9,11 @@ import { bounded } from '../../src/shared/async.mjs';
 import { app, state } from './fixture.mjs';
 
 const companion = new URL('../../src/companion/main.mjs', import.meta.url);
+const companionServer = new URL('../../src/companion/server.mjs', import.meta.url);
 const fixture = new URL('./fixture.mjs', import.meta.url).href;
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (context.parentURL === companion.href
+    if ((context.parentURL === companion.href || context.parentURL === companionServer.href)
       && ['electron', 'node:net', '../browser/host.mjs', '../shared/rpc.mjs'].includes(specifier)) {
       return { url: fixture, shortCircuit: true };
     }
