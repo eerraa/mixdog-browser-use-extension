@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createGateway } from './gateway.mjs';
-import { authorityMode, automationMode, pluginData } from '../shared/paths.mjs';
+import { authorityMode, automationMode, engineMode, pluginData } from '../shared/paths.mjs';
 import { CONNECTION_INSTRUCTIONS, browserTool, errorResult, toolResult } from './tool.mjs';
 
 // The package version: the MCP handshake and `status` report it, so a host that
@@ -13,8 +13,9 @@ const VERSION = '0.5.3';
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
   const authority = authorityMode();
-  // Validate optional WB_AUTOMATION_MODE fail-closed before spawning companion.
+  // Validate optional WB_AUTOMATION_MODE and WB_ENGINE fail-closed before spawning companion.
   automationMode();
+  engineMode();
   const gateway = await createGateway(root, pluginData(), { authority });
   // A plain MCP registration loads no skill; the server instructions carry
   // its guidance instead. Under host hooks the shipped skill does.

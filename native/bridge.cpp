@@ -42,8 +42,10 @@ static bool packageRoot(std::wstring& root) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2) return 64;
-  const bool browser = !std::wcscmp(argv[1], L"--browser");
-  const wchar_t* script = browser ? L"companion.cjs"
+  const bool browserElectron = !std::wcscmp(argv[1], L"--browser-electron");
+  const bool browserCamoufox = !std::wcscmp(argv[1], L"--browser");
+  const wchar_t* script = browserElectron ? L"companion.cjs"
+    : browserCamoufox ? L"companion-camoufox.cjs"
     : !std::wcscmp(argv[1], L"--mcp") ? L"mcp.cjs"
     : !std::wcscmp(argv[1], L"--hook") ? L"hook.cjs" : nullptr;
   if (!script) return 64;
@@ -52,8 +54,10 @@ int wmain(int argc, wchar_t** argv) {
   const std::wstring runtime = root + L"\\runtime\\electron.exe";
   const std::wstring entry = root + L"\\app\\" + script;
   std::wstring command = L"\"" + runtime + L"\" \"" + entry + L"\"";
+  // Only --browser-electron runs Electron's Chromium GUI process; --browser
+  // (Camoufox), --mcp and --hook run as pure Node via ELECTRON_RUN_AS_NODE=1.
   // These changes are private to this launcher/child, never persisted settings.
-  if (!SetEnvironmentVariableW(L"ELECTRON_RUN_AS_NODE", browser ? nullptr : L"1")
+  if (!SetEnvironmentVariableW(L"ELECTRON_RUN_AS_NODE", browserElectron ? nullptr : L"1")
     || !SetEnvironmentVariableW(L"NODE_OPTIONS", nullptr)
     || !SetEnvironmentVariableW(L"NODE_PATH", nullptr)) return failed(L"child environment");
 

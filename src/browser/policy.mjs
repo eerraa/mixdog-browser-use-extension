@@ -3,9 +3,10 @@ import path from 'node:path';
 
 const supported = Object.freeze(['hid', 'usb', 'notifications', 'geolocation']);
 const delegatedFields = ['version', 'mode', 'permissions', 'origins', 'selection', 'lifetime', 'newGrants'];
-const delegatedAllowed = new Set([...delegatedFields, 'automationMode']);
-const simpleAllowed = new Set(['version', 'mode', 'automationMode']);
+const delegatedAllowed = new Set([...delegatedFields, 'automationMode', 'engine']);
+const simpleAllowed = new Set(['version', 'mode', 'automationMode', 'engine']);
 const automationModes = new Set(['standard', 'elevated']);
+const engines = new Set(['camoufox', 'electron']);
 
 // A trusted package/host configuration, never an MCP argument or chat receipt.
 // The companion loads one immutable snapshot before it admits tool calls.
@@ -15,18 +16,24 @@ export class BrowserPolicy {
     this.permissions = Object.freeze([]);
     this.automationMode = 'standard';
     this.explicitAutomationMode = false;
+    this.engine = 'camoufox';
+    this.explicitEngine = false;
     this.reason = problem ?? 'No browser delegation policy was supplied';
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const fields = Object.keys(value);
       const hasAutomationMode = Object.hasOwn(value, 'automationMode');
       const validAutomationMode = !hasAutomationMode || automationModes.has(value.automationMode);
-      if (validAutomationMode && value.version === 1 && ['manual', 'disabled'].includes(value.mode)
+      const hasEngine = Object.hasOwn(value, 'engine');
+      const validEngine = !hasEngine || engines.has(value.engine);
+      if (validAutomationMode && validEngine && value.version === 1 && ['manual', 'disabled'].includes(value.mode)
         && fields.every(key => simpleAllowed.has(key))) {
         this.mode = value.mode;
         this.automationMode = hasAutomationMode ? value.automationMode : 'standard';
         this.explicitAutomationMode = hasAutomationMode;
+        this.engine = hasEngine ? value.engine : 'camoufox';
+        this.explicitEngine = hasEngine;
         this.reason = value.mode === 'manual' ? 'Protected requests require native human selection' : 'Delegated protected requests are disabled';
-      } else if (validAutomationMode && value.version === 1 && value.mode === 'delegated'
+      } else if (validAutomationMode && validEngine && value.version === 1 && value.mode === 'delegated'
         && delegatedFields.every(key => Object.hasOwn(value, key))
         && fields.every(key => delegatedAllowed.has(key))
         && Array.isArray(value.permissions) && value.permissions.length > 0
@@ -38,6 +45,8 @@ export class BrowserPolicy {
         this.permissions = Object.freeze([...value.permissions]);
         this.automationMode = hasAutomationMode ? value.automationMode : 'standard';
         this.explicitAutomationMode = hasAutomationMode;
+        this.engine = hasEngine ? value.engine : 'camoufox';
+        this.explicitEngine = hasEngine;
         this.reason = 'Origin and offered-option choice delegated to live authenticated owners of their pages';
       } else this.reason = 'Malformed or unsupported browser delegation policy';
     }
@@ -57,7 +66,7 @@ export class BrowserPolicy {
   describe() {
     return {
       mode: this.mode, permissions: [...this.permissions], reason: this.reason,
-      automationMode: this.automationMode,
+      automationMode: this.automationMode, engine: this.engine,
       origins: 'agent-owned pages', selection: 'explicit offered option',
       lifetime: 'current authenticated caller generation and connection',
       newGrants: this.mode === 'delegated',

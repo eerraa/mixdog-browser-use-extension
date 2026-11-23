@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { bounded } from '../shared/async.mjs';
 import { BROWSER_TOOL } from '../shared/authority.mjs';
 import { fail } from '../shared/contract.mjs';
-import { connectionPaths } from '../shared/paths.mjs';
+import { connectionPaths, engineMode } from '../shared/paths.mjs';
 
 // Under connection authority the MCP connection is the only caller.
 export const CONNECTION_CALLER = 'mcp-connection';
@@ -23,14 +23,26 @@ async function connect(pipe, hello) {
   catch (error) { peer.close(); throw error; }
 }
 
+async function resolveEngine(root) {
+  const fromEnv = engineMode();
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = JSON.parse(await readFile(path.join(root, 'browser-policy.json'), 'utf8'));
+    if (raw?.engine === 'electron' || raw?.engine === 'camoufox') return raw.engine;
+  } catch { /* fall through to default */ }
+  return 'camoufox';
+}
+
 export async function createGateway(root, data, { authority = 'hook' } = {}) {
   if (authority !== 'hook' && authority !== 'connection') throw new Error('Unknown caller authority');
+  const engine = await resolveEngine(root);
   const channel = randomUUID();
   const paths = connectionPaths(data, channel);
   await mkdir(path.dirname(paths.directory), { recursive: true });
   await mkdir(paths.directory); // Fresh allocation; never reuse a previous connection.
   const key = randomBytes(32).toString('base64url');
-  const child = spawn(path.join(root, 'bin', 'bridge.exe'), ['--browser'], {
+  const flag = engine === 'electron' ? '--browser-electron' : '--browser';
+  const child = spawn(path.join(root, 'bin', 'bridge.exe'), [flag], {
     cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, WB_CHANNEL: channel, WB_IPC_KEY: key },
   });

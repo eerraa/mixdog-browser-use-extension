@@ -10,6 +10,7 @@ import { fail } from '../shared/contract.mjs';
 export const DEVTOOLS_LIMITS = Object.freeze({
   console: 500, network: 1000, rows: 30, maxRows: 100, chars: 8192, maxChars: 65536,
   message: 300, url: 200, storedURL: 2000, header: 256, headerBytes: 2048, requestBody: 2048,
+  wsFrames: 50, wsFrameChars: 512,
   stack: 3, privateWindows: 32, frozenKeys: 5000, styleSheets: 2000, rules: 8, declarations: 200, listeners: 20,
   // Network.enable buffers per page: the main session first, then each
   // iframe or worker session, until the page total is spent.
@@ -305,6 +306,9 @@ export class DevToolsRecorder {
   #console = [];
   #network = [];
   #requests = new Map();
+  #websockets = new Map();
+  #rdpActors = new Map();
+  #rdpByResourceId = new Map();
   #ids = new Map();
   #running = new Set();
   #frozen = new Set();
@@ -385,6 +389,7 @@ export class DevToolsRecorder {
     entry.rev = ++this.#rev;
     this.#running.delete(entry);
     this.#remember(entry.key);
+    if (entry.wsid) this.#websockets.delete(entry.wsid);
   }
   // Keys whose request was withheld or frozen: later hops stay private.
   #remember(key) {
@@ -615,13 +620,398 @@ export class DevToolsRecorder {
     if (!entry) fail('UNKNOWN_ENTRY', 'Unknown or evicted network id; list network rows again');
     return entry;
   }
+  #pushNetwork(entry) {
+    entry.rev = ++this.#rev;
+    this.#network.push(entry);
+    this.#requests.set(entry.key, entry);
+    this.#ids.set(entry.id, entry);
+    if (entry.st === 'run') this.#running.add(entry);
+    if (this.#network.length > L.network) {
+      const evicted = this.#network.shift();
+      this.#ids.delete(evicted.id);
+      this.#running.delete(evicted);
+      if (this.#requests.get(evicted.key) === evicted) this.#requests.delete(evicted.key);
+      if (evicted.wsid && this.#websockets.get(evicted.wsid) === evicted) this.#websockets.delete(evicted.wsid);
+      if (evicted.rdpActor && this.#rdpActors.get(evicted.rdpActor) === evicted) this.#rdpActors.delete(evicted.rdpActor);
+      if (evicted.rdpResourceId !== undefined && this.#rdpByResourceId.get(evicted.rdpResourceId) === evicted) {
+        this.#rdpByResourceId.delete(evicted.rdpResourceId);
+      }
+      this.#dropped.network++;
+    }
+  }
+
+  /**
+   * Record Camoufox/Firefox Juggler protocol events into the exact same bounded
+   * console/network rings, privacy windows, and linear redaction pipeline.
+   */
+  recordJuggler(method, params = {}, sessionId) {
+    if (method === 'Runtime.executionContextCreated') {
+      if (!params.auxData?.name) {
+        this.#contexts.set(`${sessionKey(sessionId)}:${params.executionContextId}`, params.auxData?.frameId);
+      }
+      return;
+    }
+    if (method === 'Runtime.executionContextDestroyed') {
+      this.#contexts.delete(`${sessionKey(sessionId)}:${params.executionContextId}`);
+      return;
+    }
+    if (method === 'Runtime.executionContextsCleared') {
+      for (const context of this.#contexts.keys()) if (context.startsWith(`${sessionKey(sessionId)}:`)) this.#contexts.delete(context);
+      return;
+    }
+    if (method === 'Page.frameAttached' || method === 'Page.frameDetached') {
+      if (method === 'Page.frameAttached' && params.parentFrameId) this.#childFrames.add(params.frameId);
+      else this.#childFrames.delete(params.frameId);
+      return;
+    }
+    if (method === 'Runtime.console') {
+      if (params.type === 'endGroup') return;
+      if (!this.#pageWorld(sessionId, params.executionContextId) || !this.#admit('console', Date.now(), sessionId)) return;
+      const loc = params.location;
+      this.#log({
+        lv: CONSOLE_LEVELS[params.type] ?? 'log',
+        msg: consoleText(params.args),
+        at: loc?.url ? location(loc) : undefined,
+        in: this.#target(sessionId, this.#contextFrame(sessionId, params.executionContextId)),
+      });
+      return;
+    }
+    if (method === 'Page.uncaughtError') {
+      if (!this.#admit('console', Date.now(), sessionId)) return;
+      const loc = params.location;
+      const stackLines = String(params.stack ?? '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      this.#log({
+        lv: 'error', k: 'exception',
+        msg: firstLine(String(params.message ?? 'Uncaught error').slice(0, L.message * 2)),
+        at: loc?.url ? location(loc) : undefined,
+        stack: stackLines.length ? stackLines.slice(0, L.stack).map(line => clip(redactText(line), 160)) : undefined,
+        in: this.#target(sessionId, params.frameId),
+      });
+      return;
+    }
+    if (method === 'Page.dispatchMessageFromWorker') {
+      let parsed;
+      try { parsed = JSON.parse(params.message); } catch { return; }
+      if (parsed?.method === 'Runtime.console' || parsed?.method === 'runtime.runtimeConsole' || parsed?.method === 'runtimeConsole') {
+        const msg = parsed.params ?? {};
+        if (msg.type === 'endGroup') return;
+        if (!this.#admit('console', Date.now(), `worker:${params.workerId}`)) return;
+        const loc = msg.location;
+        this.#log({
+          lv: CONSOLE_LEVELS[msg.type] ?? 'log',
+          msg: consoleText(msg.args),
+          at: loc?.url ? location(loc) : undefined,
+          in: 'worker',
+        });
+      }
+      return;
+    }
+    if (method === 'Network.requestWillBeSent') {
+      const key = params.requestId;
+      const redirectedFrom = params.redirectedFrom ? this.#requests.get(params.redirectedFrom) : null;
+      if (this.#frozen.has(key) || (params.redirectedFrom && this.#frozen.has(params.redirectedFrom))) {
+        this.boundary();
+        this.#remember(key);
+        this.#withheld.network++;
+        return;
+      }
+      const now = Date.now();
+      if (!this.#admit('network', now, sessionId)) {
+        this.#remember(key);
+        return;
+      }
+      if (redirectedFrom && redirectedFrom.st === 'run') {
+        redirectedFrom.st = 'redirected';
+        this.#running.delete(redirectedFrom);
+        redirectedFrom.rev = ++this.#rev;
+      }
+      const headers = Object.fromEntries((params.headers ?? []).map(h => [h.name, h.value]));
+      const rawPost = params.postData === undefined ? undefined : Buffer.from(params.postData, 'base64').toString('utf8');
+      const entry = {
+        id: `n${++this.#nextId}`, key, source: 'juggler', session: sessionId, requestId: key,
+        url: clip(redactURL(params.url), L.storedURL),
+        m: clip(params.method || 'GET', 20),
+        ty: mapJugglerCause(params.cause, params.internalCause),
+        st: 'run', t0: now / 1000, wall: now,
+        reqHeaders: redactHeaders(headers),
+        body: rawPost === undefined ? undefined : redactBody(rawPost, L.requestBody),
+        hasBody: rawPost !== undefined,
+        in: this.#target(sessionId, params.frameId),
+        redirectFrom: redirectedFrom?.id,
+      };
+      if (redirectedFrom) redirectedFrom.redirectTo = entry.id;
+      this.#pushNetwork(entry);
+      return;
+    }
+    if (method === 'Network.responseReceived') {
+      const entry = this.#live(sessionId, params.requestId);
+      if (!entry) return;
+      const headers = Object.fromEntries((params.headers ?? []).map(h => [h.name, h.value]));
+      const ct = Object.entries(headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '';
+      const mt = ct.split(';')[0].trim();
+      const t = params.timing;
+      const timing = t ? compact({
+        dnsMs: t.domainLookupStart >= 0 && t.domainLookupEnd >= t.domainLookupStart ? Math.round((t.domainLookupEnd - t.domainLookupStart) / 1000) : undefined,
+        tcpMs: t.connectStart >= 0 && t.connectEnd >= t.connectStart ? Math.round((t.connectEnd - t.connectStart) / 1000) : undefined,
+        tlsMs: t.secureConnectionStart >= 0 && t.connectEnd >= t.secureConnectionStart ? Math.round((t.connectEnd - t.secureConnectionStart) / 1000) : undefined,
+        ttfbMs: t.requestStart >= 0 && t.responseStart >= t.requestStart ? Math.round((t.responseStart - t.requestStart) / 1000) : undefined,
+      }) : undefined;
+      const tls = params.securityDetails ? compact({
+        protocol: params.securityDetails.protocol,
+        subject: clip(params.securityDetails.subjectName, 120),
+        issuer: clip(params.securityDetails.issuer, 120),
+      }) : undefined;
+      Object.assign(entry, {
+        s: params.status,
+        statusText: clip(params.statusText, 100),
+        mt: mt || entry.mt,
+        resHeaders: redactHeaders(headers),
+        c: params.fromServiceWorker ? 'sw' : params.fromCache ? 'cache' : entry.c,
+        ip: params.remoteIPAddress ? (params.remotePort ? `${params.remoteIPAddress}:${params.remotePort}` : params.remoteIPAddress) : entry.ip,
+        timing: timing && Object.keys(timing).length ? timing : entry.timing,
+        tls: tls && Object.keys(tls).length ? tls : entry.tls,
+        jugglerStartUs: t?.startTime,
+      });
+      entry.rev = ++this.#rev;
+      return;
+    }
+    if (method === 'Network.requestFinished') {
+      const entry = this.#requests.get(params.requestId);
+      if (!entry || !this.boundary() || (entry.st !== 'run' && entry.st !== 'redirected')) return;
+      if (entry.st !== 'redirected') entry.st = entry.redirectTo ? 'redirected' : 'done';
+      entry.sz = params.encodedBodySize ?? params.transferSize ?? entry.sz;
+      entry.transferSize = params.transferSize;
+      if (params.protocolVersion) entry.proto = params.protocolVersion;
+      this.#running.delete(entry);
+      if (typeof params.responseEndTime === 'number' && typeof entry.jugglerStartUs === 'number' && params.responseEndTime >= entry.jugglerStartUs) {
+        entry.ms = Math.round((params.responseEndTime - entry.jugglerStartUs) / 1000);
+      } else {
+        this.#finish(entry, Date.now() / 1000);
+        return;
+      }
+      entry.rev = ++this.#rev;
+      return;
+    }
+    if (method === 'Network.requestFailed') {
+      const entry = this.#live(sessionId, params.requestId);
+      if (!entry) return;
+      entry.st = 'fail';
+      entry.err = clip(params.errorCode || 'failed', 100);
+      this.#running.delete(entry);
+      this.#finish(entry, Date.now() / 1000);
+      return;
+    }
+    if (method === 'Page.webSocketCreated' || method === 'Page.webSocketOpened' || method === 'Page.webSocketClosed'
+      || method === 'Page.webSocketFrameSent' || method === 'Page.webSocketFrameReceived') {
+      this.recordWebSocket(method.slice('Page.webSocket'.length).toLowerCase(), params, sessionId);
+    }
+  }
+
+  recordWebSocket(event, params = {}, sessionId) {
+    const wsid = params.wsid;
+    if (!wsid) return;
+    const key = `ws:${wsid}`;
+    const wall = typeof params.timestamp === 'number' && params.timestamp > 1e11 ? params.timestamp
+      : typeof params.timestamp === 'number' ? params.timestamp * 1000 : Date.now();
+    if (event === 'created') {
+      if (this.#frozen.has(key)) { this.boundary(); this.#withheld.network++; return; }
+      if (!this.#admit('network', wall, sessionId)) { this.#remember(key); return; }
+      const entry = {
+        id: `n${++this.#nextId}`, key, source: 'websocket', session: sessionId, wsid,
+        url: clip(redactURL(params.requestURL), L.storedURL),
+        m: 'WS', ty: 'websocket', st: 'run', t0: wall / 1000, wall,
+        in: this.#target(sessionId, params.frameId),
+        ws: { sent: 0, recv: 0, sentBytes: 0, recvBytes: 0, dropped: 0, frames: [] },
+      };
+      this.#websockets.set(wsid, entry);
+      this.#pushNetwork(entry);
+      return;
+    }
+    const entry = this.#websockets.get(wsid);
+    if (!entry) {
+      if (this.#frozen.has(key)) { this.boundary(); this.#withheld.network++; }
+      return;
+    }
+    if (!this.#admit('network', wall, sessionId)) {
+      this.#freeze(entry);
+      return;
+    }
+    if (event === 'opened') {
+      if (params.effectiveURL) entry.url = clip(redactURL(params.effectiveURL), L.storedURL);
+      entry.s = 101;
+      entry.statusText = 'Switching Protocols';
+      if (params.requestId) {
+        const hs = this.#requests.get(params.requestId);
+        if (hs) {
+          entry.handshakeRequestId = hs.id;
+          if (!entry.reqHeaders && hs.reqHeaders) entry.reqHeaders = hs.reqHeaders;
+          if (!entry.resHeaders && hs.resHeaders) entry.resHeaders = hs.resHeaders;
+          if (!entry.timing && hs.timing) entry.timing = hs.timing;
+          if (!entry.tls && hs.tls) entry.tls = hs.tls;
+          if (!entry.ip && hs.ip) entry.ip = hs.ip;
+        }
+      }
+      entry.rev = ++this.#rev;
+      return;
+    }
+    if (event === 'framesent' || event === 'framereceived') {
+      const dir = event === 'framesent' ? 'out' : 'in';
+      const raw = String(params.data ?? '');
+      const bytes = Buffer.byteLength(raw, 'utf8');
+      if (dir === 'out') { entry.ws.sent++; entry.ws.sentBytes += bytes; }
+      else { entry.ws.recv++; entry.ws.recvBytes += bytes; }
+      const binary = params.opcode !== undefined && params.opcode !== 1;
+      const frame = compact({
+        dir, op: params.opcode, sz: bytes,
+        data: binary ? `[binary ${bytes} bytes]` : redactBody(raw, L.wsFrameChars),
+      });
+      entry.ws.frames.push(frame);
+      if (entry.ws.frames.length > L.wsFrames) {
+        entry.ws.frames.shift();
+        entry.ws.dropped++;
+      }
+      entry.sz = entry.ws.sentBytes + entry.ws.recvBytes;
+      entry.rev = ++this.#rev;
+      return;
+    }
+    if (event === 'closed') {
+      entry.st = params.error ? 'fail' : 'done';
+      if (params.error) entry.err = clip(params.error, 100);
+      this.#running.delete(entry);
+      this.#websockets.delete(wsid);
+      this.#finish(entry, wall / 1000);
+    }
+  }
+
+  /**
+   * Record Firefox RDP worker/service-worker network & console resources under
+   * the same privacy-window gate, deduplicated against Juggler main/iframe entries.
+   */
+  recordRdp(phase, resourceType, item, targetType = null) {
+    if (!item) return;
+    const isShared = targetType === 'service_worker' || targetType === 'shared_worker';
+    const wall = typeof item.timeStamp === 'number' ? item.timeStamp
+      : typeof item.startedDateTime === 'string' ? Date.parse(item.startedDateTime) || Date.now() : Date.now();
+    if (resourceType === 'console-message' && phase === 'available') {
+      // Main, iframe, and dedicated-worker console are already captured via Juggler.
+      if (!isShared) return;
+      const rdpSession = `rdp:${targetType}`;
+      if (!this.#admit('console', wall, rdpSession)) return;
+      const args = (item.arguments ?? []).map(a => (typeof a === 'string' ? a : a?.initial ?? a?.class ?? String(a ?? '')));
+      this.#log({
+        lv: CONSOLE_LEVELS[item.level] ?? 'log',
+        msg: args.join(' '),
+        at: item.filename ? location({ url: item.filename, lineNumber: Math.max(0, (item.lineNumber ?? 1) - 1), columnNumber: Math.max(0, (item.columnNumber ?? 1) - 1) }) : undefined,
+        in: targetType,
+      });
+      return;
+    }
+    if (resourceType !== 'network-event') return;
+    if (phase === 'available') {
+      const actor = item.actor;
+      if (!actor) return;
+      const resId = item.resourceId;
+      const fromWorker = item.innerWindowId === null || targetType === 'worker' || isShared;
+      // Frame/iframe requests (non-null innerWindowId) are already captured with
+      // full headers, bodies, and timing by Juggler (whose requestId equals String(resourceId)).
+      if (!fromWorker) return;
+      if (resId !== undefined && this.#requests.has(String(resId))) {
+        const existing = this.#requests.get(String(resId));
+        if (existing && !existing.rdpActor) existing.rdpActor = actor;
+        return;
+      }
+      const redactedUrl = clip(redactURL(item.url), L.storedURL);
+      const method = clip(item.method || 'GET', 20);
+      const dup = this.#network.findLast(e => e.source === 'juggler' && e.url === redactedUrl && e.m === method && Math.abs(e.wall - wall) < 2500);
+      if (dup) {
+        if (!dup.rdpActor) dup.rdpActor = actor;
+        return;
+      }
+      const rdpSession = isShared ? `rdp:${targetType}` : 'rdp:worker:dedicated';
+      const key = `rdp:${actor}`;
+      if (this.#frozen.has(key)) { this.boundary(); this.#withheld.network++; return; }
+      if (!this.#admit('network', wall, rdpSession)) { this.#remember(key); return; }
+      const entry = {
+        id: `n${++this.#nextId}`, key, source: 'rdp', rdpActor: actor, rdpResourceId: resId, session: rdpSession,
+        url: redactedUrl, m: method, ty: String(item.cause?.type || 'other').toLowerCase(),
+        st: 'run', t0: wall / 1000, wall,
+        in: isShared ? targetType : 'worker',
+        shared: isShared || undefined,
+      };
+      this.#rdpActors.set(actor, entry);
+      if (resId !== undefined) this.#rdpByResourceId.set(resId, entry);
+      this.#pushNetwork(entry);
+      return;
+    }
+    if (phase === 'updated') {
+      const entry = (item.actor ? this.#rdpActors.get(item.actor) : null)
+        ?? (item.resourceId !== undefined ? this.#rdpByResourceId.get(item.resourceId) : null);
+      if (!entry) return;
+      if (!this.#admit('network', Date.now(), entry.session)) { this.#freeze(entry); return; }
+      const u = item.resourceUpdates ?? item;
+      if (u.status !== undefined) entry.s = Number(u.status);
+      if (u.statusText !== undefined) entry.statusText = clip(u.statusText, 100);
+      if (u.mimeType !== undefined) entry.mt = String(u.mimeType).split(';')[0].trim();
+      if (u.httpVersion) entry.proto = u.httpVersion;
+      if (u.remoteAddress) entry.ip = u.remotePort ? `${u.remoteAddress}:${u.remotePort}` : u.remoteAddress;
+      if (u.contentSize !== undefined) entry.sz = u.contentSize;
+      if (u.transferredSize !== undefined) entry.transferSize = u.transferredSize;
+      if (u.totalTime !== undefined) entry.ms = Math.round(u.totalTime);
+      if (u.blockedReason) { entry.st = 'fail'; entry.err = clip(String(u.blockedReason), 100); this.#running.delete(entry); }
+      else if (u.eventTimingsAvailable || u.responseContentAvailable || u.responseEndAvailable) {
+        entry.st = entry.s >= 300 && entry.s < 400 ? 'redirected' : 'done';
+        this.#running.delete(entry);
+      }
+      entry.rev = ++this.#rev;
+    }
+  }
+
+  rdpActorForEnrichment(id) {
+    const e = this.#entry(id);
+    if (e.source === 'rdp' && e.rdpActor && !e.rdpEnriched && e.st !== 'incomplete') return e.rdpActor;
+    return null;
+  }
+  enrichRdp(id, { reqHeaders, resHeaders, reqBody } = {}) {
+    const e = this.#ids.get(id);
+    if (!e || e.st === 'incomplete') return;
+    if (reqHeaders && !e.reqHeaders) e.reqHeaders = redactHeaders(reqHeaders);
+    if (resHeaders && !e.resHeaders) e.resHeaders = redactHeaders(resHeaders);
+    if (reqBody !== undefined && e.body === undefined) {
+      e.body = redactBody(reqBody, L.requestBody);
+      e.hasBody = true;
+    }
+    e.rdpEnriched = true;
+  }
   detail(id) {
     const e = this.#entry(id);
     return compact({
       id, url: e.url, m: e.m, ty: e.ty, s: e.s, statusText: e.statusText, mt: e.mt,
-      st: e.st === 'done' ? undefined : e.st, err: e.err, c: e.c, sz: e.sz, ms: e.ms, proto: e.proto, ip: e.ip,
+      st: e.st === 'done' ? undefined : e.st, err: e.err, c: e.c, sz: e.sz, transferSize: e.transferSize,
+      ms: e.ms, timing: e.timing, proto: e.proto, ip: e.ip, tls: e.tls,
+      redirectFrom: e.redirectFrom, redirectTo: e.redirectTo, handshake: e.handshakeRequestId,
       init: e.init, in: e.in, reqHeaders: e.reqHeaders, resHeaders: e.resHeaders, reqBody: e.body,
       reqBodyOmitted: e.hasBody && e.body === undefined ? `over ${L.postData} bytes; not captured` : undefined,
+      ws: e.ws ? compact({
+        sent: e.ws.sent, recv: e.ws.recv, sentBytes: e.ws.sentBytes, recvBytes: e.ws.recvBytes,
+        dropped: e.ws.dropped || undefined, frames: e.ws.frames.slice(-10),
+      }) : undefined,
+    });
+  }
+  wsFrames(id, limit = L.chars) {
+    const e = this.#entry(id);
+    if (!e.ws) fail('BODY_UNAVAILABLE', 'Entry is not a WebSocket');
+    let used = 0;
+    const frames = [];
+    for (const frame of e.ws.frames) {
+      const size = JSON.stringify(frame).length + 2;
+      if (used + size > limit && frames.length) break;
+      frames.push(frame);
+      used += size;
+    }
+    return compact({
+      id: e.id, ty: 'websocket', sent: e.ws.sent, recv: e.ws.recv,
+      dropped: e.ws.dropped || undefined, omitted: Math.max(0, e.ws.frames.length - frames.length) || undefined,
+      frames,
     });
   }
   bodyTarget(id) {
@@ -640,6 +1030,29 @@ export class DevToolsRecorder {
 const command = (driver, signal) => (method, params = {}, sessionId) => driver.devtoolsCommand(method, params, sessionId, signal);
 
 export async function responseBody(driver, entry, limit, signal) {
+  if (entry.source === 'websocket') return entry;
+  if (entry.source === 'juggler') {
+    let reply;
+    try { reply = await driver.jugglerResponseBody(entry.requestId, signal); }
+    catch (error) {
+      signal?.throwIfAborted();
+      fail('BODY_UNAVAILABLE', `The browser no longer holds this response body (bounded buffer, redirect or empty body): ${error.message}`);
+    }
+    if (reply.evicted) fail('BODY_UNAVAILABLE', 'The response body was evicted from the browser buffer');
+    const bytes = Buffer.from(reply.base64body ?? '', 'base64');
+    if (bytes.length && !TEXT_MIME.test(String(entry.mt ?? '').slice(0, 200))) {
+      return compact({ id: entry.id, mt: entry.mt, size: bytes.length, binary: true });
+    }
+    return compact({ id: entry.id, mt: entry.mt, size: bytes.length, body: redactBody(bytes.toString('utf8'), limit) });
+  }
+  if (entry.source === 'rdp' && entry.rdpActor) {
+    const reply = await driver.rdpResponseBody(entry.rdpActor, limit, signal);
+    const bytes = reply.base64Encoded ? Buffer.from(reply.text ?? '', 'base64') : null;
+    const size = reply.size ?? (bytes ? bytes.length : Buffer.byteLength(reply.text ?? ''));
+    const mt = entry.mt ?? reply.mimeType;
+    if (bytes && !TEXT_MIME.test(String(mt ?? '').slice(0, 200))) return compact({ id: entry.id, mt, size, binary: true });
+    return compact({ id: entry.id, mt, size, body: redactBody(bytes ? bytes.toString('utf8') : reply.text, limit) });
+  }
   let reply;
   try { reply = await driver.devtoolsCommand('Network.getResponseBody', { requestId: entry.requestId }, entry.session, signal); }
   catch (error) {
@@ -651,6 +1064,22 @@ export async function responseBody(driver, entry, limit, signal) {
   if (bytes && !TEXT_MIME.test(String(entry.mt ?? '').slice(0, 200))) return compact({ id: entry.id, mt: entry.mt, size, binary: true });
   // The same bounded redaction as request bodies (JSON, form, free text).
   return compact({ id: entry.id, mt: entry.mt, size, body: redactBody(bytes ? bytes.toString('utf8') : reply.body, limit) });
+}
+
+function mapJugglerCause(cause, internalCause) {
+  const c = String(cause || internalCause || '').toUpperCase();
+  if (c.includes('SUBDOCUMENT')) return 'iframe';
+  if (c.includes('DOCUMENT')) return 'document';
+  if (c.includes('FETCH')) return 'fetch';
+  if (c.includes('XMLHTTPREQUEST') || c.includes('XHR')) return 'xhr';
+  if (c.includes('SCRIPT')) return 'script';
+  if (c.includes('STYLESHEET')) return 'stylesheet';
+  if (c.includes('IMAGE') || c.includes('IMAGESET')) return 'image';
+  if (c.includes('FONT')) return 'font';
+  if (c.includes('MEDIA')) return 'media';
+  if (c.includes('WEBSOCKET')) return 'ws-handshake';
+  if (c.includes('BEACON')) return 'beacon';
+  return c.replace(/^TYPE_/, '').toLowerCase() || 'other';
 }
 
 function remoteValue(object, limit) {
