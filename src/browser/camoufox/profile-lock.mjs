@@ -201,7 +201,7 @@ export async function releaseProfileLock(handle) {
   try {
     const current = await readLockMeta(handle.lockPath);
     if (current.missing) return false;
-    if (current.token && current.token !== handle.token) return false;
+    if (!current.token || current.token !== handle.token) return false;
     await unlink(handle.lockPath);
     return true;
   } catch {
@@ -273,6 +273,7 @@ export async function inspectProfiles(profilesRoot, { activeBySlug = new Map(), 
       state,
       sessionId: active?.sessionId ?? null,
       sessionName: active?.sessionName ?? null,
+      ...(active?.runtimeState ? { runtimeState: active.runtimeState } : {}),
       tabCount: active?.tabCount ?? 0,
     });
   }

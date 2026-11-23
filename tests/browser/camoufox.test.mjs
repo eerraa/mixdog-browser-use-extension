@@ -1277,3 +1277,179 @@ test('createCamoufoxRunnerSandboxFactory pre-warms at most one unused spare, lea
   await factory.close();
   assert.ok(CAMOUFOX_BOOTSTRAP_URL.startsWith('data:text/html;charset=utf-8,'));
 });
+
+test('CamoufoxHost reclaims idle non-default persistent profiles into dormant state while retaining .lock, wakes transparently on open/grant, prevents cross-caller bind races, and requires exact token + affirmative exit on release', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-idle-'));
+  try {
+    const profilesRoot = path.join(root, 'profiles');
+    const spawned = [];
+    let failExitForSlug = null;
+
+    const makeIdleProc = slug => {
+      const idx = spawned.length + 1;
+      const p = new EventEmitter();
+      p.idx = idx;
+      p.slug = slug;
+      p.closed = false;
+      p.exited = false;
+      p.rdpPort = 0;
+      p.pid = 70000 + idx;
+      p.grants = [];
+      p.start = async () => {
+        // Introduce async delay to expose any cross-caller bind race
+        await new Promise(r => setTimeout(r, 15));
+        return p;
+      };
+      p.send = async (method, params = {}, sessionId) => {
+        if (method === 'Browser.grantPermissions') { p.grants.push(params); return {}; }
+        if (method === 'Browser.newPage') {
+          const sid = `s-${idx}-${Math.random().toString(36).slice(2, 6)}`;
+          const tid = `t-${idx}-${Math.random().toString(36).slice(2, 6)}`;
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: `https://${slug}.test/`, title: `Title ${slug} #${idx}`, scrollHeight: 800,
+                  checkpoint: { documentId: `doc-${idx}`, revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.close = async () => {
+        p.closed = true;
+        if (failExitForSlug === slug) {
+          p.exited = false;
+          return { exited: false };
+        }
+        p.exited = true;
+        return { exited: true };
+      };
+      spawned.push(p);
+      return p;
+    };
+
+    const host = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-a'),
+      dataRoot: root,
+      profilesRoot,
+      persistentProfilesEnabled: true,
+      idleProfileTimeoutMs: 70,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      onRevokeConnection: () => {},
+      createProcess: ({ profileSlug }) => makeIdleProc(profileSlug || 'ephemeral'),
+    });
+    const callerA = makeCaller('caller-a');
+    const callerB = makeCaller('caller-b');
+
+    // 1. Default profile stays awake even when idle (0 tabs)
+    const defOpen = await host.execute({ action: 'open', url: 'https://default.test/' }, callerA);
+    await host.execute({ action: 'close_tab', tabId: defOpen.tabId }, callerA);
+
+    // 2. Named profile `work` stays awake while a tab is open, then retires after close_tab
+    const work = await host.execute({ action: 'create_session', profile: 'work', name: 'Work' }, callerA);
+    const workTab = await host.execute({ action: 'open', url: 'https://work.test/', sessionId: work.sessionId }, callerA);
+    await new Promise(r => setTimeout(r, 120));
+    const workProc1 = spawned.find(p => p.slug === 'work');
+    assert.equal(workProc1.closed, false, 'profile with open tab must NOT retire');
+    const defProc = spawned.find(p => p.slug === 'default');
+    assert.equal(defProc.closed, false, 'default profile is excluded from idle reclamation');
+
+    // Close tab → work becomes idle and retires into dormant while retaining .lock
+    await host.execute({ action: 'close_tab', tabId: workTab.tabId }, callerA);
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(workProc1.closed, true, 'idle zero-tab named profile process is reclaimed');
+    const workLock = path.join(profilesRoot, 'camoufox-work.lock');
+    assert.equal(existsSync(workLock), true, 'dormant session retains its exclusive .lock on disk');
+
+    const sessDormant = (await host.execute({ action: 'list_sessions' }, callerA)).sessions.find(s => s.sessionId === work.sessionId);
+    assert.equal(sessDormant.state, 'open');
+    assert.equal(sessDormant.runtimeState, 'dormant');
+    const profDormant = (await host.execute({ action: 'list_profiles' }, callerA)).profiles.find(p => p.profile === 'work');
+    assert.equal(profDormant.state, 'in-use-here');
+    assert.equal(profDormant.runtimeState, 'dormant');
+
+    // Same-owner create_session returns existing dormant session without spawning Firefox
+    const countBeforeRebind = spawned.length;
+    const rebind = await host.execute({ action: 'create_session', profile: 'work' }, callerA);
+    assert.equal(rebind.sessionId, work.sessionId);
+    assert.equal(rebind.runtimeState, 'dormant');
+    assert.equal(spawned.length, countBeforeRebind, 're-binding dormant own profile does not spawn Firefox');
+
+    // 3. Transparent wake on open { sessionId } spawns a fresh process under the SAME sessionId + lock
+    const wokenTab = await host.execute({ action: 'open', url: 'https://work.test/woken', sessionId: work.sessionId }, callerA);
+    assert.equal(wokenTab.sessionId, work.sessionId);
+    assert.equal(spawned.length, countBeforeRebind + 1);
+    const workProc2 = spawned.at(-1);
+    assert.equal(workProc2.slug, 'work');
+    assert.equal(workProc2.closed, false);
+
+    // Let work go dormant again, then close_session while dormant → releases lock WITHOUT starting Firefox
+    await host.execute({ action: 'close_tab', tabId: wokenTab.tabId }, callerA);
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(workProc2.closed, true);
+    const countBeforeDormantClose = spawned.length;
+    const closedDormant = await host.execute({ action: 'close_session', sessionId: work.sessionId }, callerA);
+    assert.equal(closedDormant.cleanupComplete, true);
+    assert.equal(closedDormant.storagePreserved, true);
+    assert.equal(spawned.length, countBeforeDormantClose, 'closing dormant profile never spawns Firefox');
+    assert.equal(existsSync(workLock), false, 'closing dormant profile releases its .lock');
+
+    // 4. Synchronous cross-caller race on same slug: exactly one wins, other gets PROFILE_IN_USE
+    const [rA, rB] = await Promise.allSettled([
+      host.execute({ action: 'create_session', profile: 'shared-race' }, callerA),
+      host.execute({ action: 'create_session', profile: 'shared-race' }, callerB),
+    ]);
+    const fulfilled = [rA, rB].filter(r => r.status === 'fulfilled');
+    const rejected = [rA, rB].filter(r => r.status === 'rejected');
+    assert.equal(fulfilled.length, 1, 'exactly one caller wins concurrent cross-caller bind');
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.code, 'PROFILE_IN_USE');
+
+    // 5. Strict token verification: lock file missing `token` must NOT be unlinked by releaseProfileLock
+    const noTokenLock = path.join(profilesRoot, 'camoufox-notoken.lock');
+    writeFileSync(noTokenLock, JSON.stringify({ pid: process.pid }), 'utf8');
+    assert.equal(await releaseProfileLock({ lockPath: noTokenLock, token: 'expected-token' }), false, 'missing token in lock file must refuse unlink');
+    assert.equal(existsSync(noTokenLock), true);
+
+    // 6. Affirmative process exit required: if close() returns { exited: false }, lock is retained and close_session fails cleanly
+    failExitForSlug = 'stuck-exit';
+    const stuck = await host.execute({ action: 'create_session', profile: 'stuck-exit' }, callerA);
+    const stuckClose = await host.execute({ action: 'close_session', sessionId: stuck.sessionId }, callerA);
+    assert.equal(stuckClose.cleanupComplete, false);
+    assert.equal(stuckClose.code, 'SESSION_CLEANUP_FAILED');
+    assert.equal(existsSync(path.join(profilesRoot, 'camoufox-stuck-exit.lock')), true, 'lock must remain held when process exit is unconfirmed');
+
+    failExitForSlug = null;
+    await host.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
