@@ -1,0 +1,17 @@
+{
+  "name": "Camoufox",
+  "repository": "https://github.com/daijro/camoufox",
+  "version": "158.0.1",
+  "build": "beta.41",
+  "upstreamBrowser": "Mozilla Firefox 158.0.1",
+  "license": "MPL-2.0",
+  "asset": {
+    "platform": "windows-x64",
+    "sha256": "2644bd14f1cc345c768f6a70b576bcc87eb3d0bf0df54856d6fe0bbc3027515f"
+  },
+  "distribution": "shared-runtime",
+  "runtimePaths": [
+    "camoufox/camoufox.exe",
+    "<installRoot>/win-browser-runtime/camoufox/camoufox.exe"
+  ]
+}

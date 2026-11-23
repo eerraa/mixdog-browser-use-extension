@@ -34,12 +34,26 @@ password-import sidecar or old plugin implementation is included.
 The complete Mixdog NOTICE is preserved for reference; its unrelated
 components are not claims that those components are shipped here.
 
+## Camoufox (Mozilla Firefox 158 runtime)
+
+Camoufox `158.0.1-beta.41` (patched Mozilla Firefox 158.0.1, MPL-2.0) is the
+default browser engine, launched out-of-process via its Juggler pipe and local
+read-only Firefox DevTools Remote Debugging Protocol (RDP). Provenance and
+MPL-2.0 source availability notices are included under `licenses/camoufox/`.
+In shared-runtime installations, the unmodified Camoufox directory is stored
+once under `<installRoot>/win-browser-runtime/camoufox/` (or `camoufox/` inside
+the package, or at `WB_CAMOUFOX_PATH`).
+
 ## Electron
 
 Electron 44.9.1 is obtained from its pinned npm package and official runtime.
 The complete runtime is included under `runtime/`, including its original
-`LICENSE` and `LICENSES.chromium.html`. Chromium, Node.js and their bundled
-third-party components retain the terms in those original notices.
+`LICENSE` and `LICENSES.chromium.html`. It serves as the bundled Node.js
+runtime (`ELECTRON_RUN_AS_NODE=1`) for the MCP server, hooks, and Camoufox
+companion, and as the explicit fallback browser engine (`WB_ENGINE=electron` or
+`browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB workflows.
+Chromium, Node.js and their bundled third-party components retain the terms in
+those original notices.
 
 ## Bundled MCP dependencies
 
@@ -59,7 +73,11 @@ actual JavaScript inputs, including the adapted protocol implementation.
 
 ## Native helpers
 
-The independent native sources are included under `sources/native/`.
+The independent native sources (`bridge.cpp`, `consent.cpp`, `control-bar.cpp`)
+are included under `sources/native/`.
+`control-bar.exe` renders a floating non-focus-stealing Win32 Control Bar for
+Camoufox tabs (Take control, Return/Resume, Stop agent, Elevated · Revert,
+Revoke) using documented Win32 User32/GDI32/ComCtl32 APIs over stdin/stdout JSON.
 Windows UserConsentVerifier is used through its documented desktop ABI;
 no credential or biometric data is returned to this plugin.
 Its separate no-prompt input-idle mode uses documented Win32 input, desktop,

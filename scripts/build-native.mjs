@@ -8,10 +8,15 @@ if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Thi
 const licenseRoot = process.argv[2];
 if (!licenseRoot) throw new Error('Usage: node scripts/build-native.mjs <MinGW compiler licenses directory>');
 await mkdir(resolve(root, 'build'), { recursive: true });
-for (const [source, output] of [['consent.cpp', 'native-consent.exe'], ['bridge.cpp', 'bridge.exe']]) {
+for (const [source, output, extra] of [
+  ['consent.cpp', 'native-consent.exe', []],
+  ['bridge.cpp', 'bridge.exe', []],
+  ['control-bar.cpp', 'control-bar.exe', ['-lgdi32', '-luser32']],
+]) {
   const result = spawnSync('g++', [
     '-std=c++17', '-O2', '-static', '-municode',
     resolve(root, 'native', source), '-o', resolve(root, 'build', output),
+    ...extra,
   ], { cwd: root, stdio: 'inherit', windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
@@ -31,7 +36,7 @@ const compiler = spawnSync('g++', ['--version'], { encoding: 'utf8', windowsHide
 if (compiler.error || compiler.status !== 0) throw compiler.error ?? new Error('Compiler provenance query failed');
 await writeFile(resolve(output, 'provenance.json'), JSON.stringify({
   compiler: compiler.stdout.split(/\r?\n/)[0],
-  sources: ['native/consent.cpp', 'native/bridge.cpp'],
+  sources: ['native/consent.cpp', 'native/bridge.cpp', 'native/control-bar.cpp'],
   flags: ['-std=c++17', '-O2', '-static', '-municode'],
   licenses: Object.values(texts),
 }, null, 2));

@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const STABLE = 'win-browser';
 export const VERSIONS = 'win-browser-versions';
+export const RUNTIME = 'win-browser-runtime';
 const VERSION_DIR = /^v\d+\.\d+\.\d+$/;
 
 async function sha256(file) {
@@ -65,7 +66,7 @@ async function kindOf(location) {
 
 const same = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
-export async function install({ root, release, running = runningImages }) {
+export async function install({ root, release, running = runningImages, camoufoxSource = null }) {
   if (!path.isAbsolute(root) || !path.isAbsolute(release)) throw new Error('Install root and release dir must be absolute');
   const { version } = JSON.parse(await readFile(path.join(release, 'release.json'), 'utf8'));
   if (!VERSION_DIR.test(`v${version}`)) throw new Error(`Invalid release version ${version}`);
@@ -135,7 +136,28 @@ export async function install({ root, release, running = runningImages }) {
     await rm(trash, { recursive: true, force: true });
     pruned.push(entry.name);
   }
-  return { version, stable, target, previous, copied, pruned, inUse };
+  // Optional shared Camoufox runtime: stored once under <root>\win-browser-runtime\camoufox
+  // so version upgrades never duplicate the ~1.3 GB browser runtime and never alter
+  // the per-file SHA-256 verified version folder.
+  let sharedCamoufox = null;
+  if (camoufoxSource) {
+    if (!path.isAbsolute(camoufoxSource)) throw new Error('camoufoxSource must be an absolute directory');
+    const runtimeRoot = path.join(root, RUNTIME);
+    const camoufoxDest = path.join(runtimeRoot, 'camoufox');
+    await mkdir(runtimeRoot, { recursive: true });
+    if (await kindOf(camoufoxDest) === 'none') {
+      const stagingRuntime = path.join(runtimeRoot, `.staging-${randomUUID()}`);
+      try {
+        await cp(camoufoxSource, stagingRuntime, { recursive: true, errorOnExist: true, force: false });
+        await rename(stagingRuntime, camoufoxDest);
+      } finally {
+        await rm(stagingRuntime, { recursive: true, force: true });
+      }
+    }
+    sharedCamoufox = camoufoxDest;
+  }
+
+  return { version, stable, target, previous, copied, pruned, inUse, ...(sharedCamoufox ? { sharedCamoufox } : {}) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

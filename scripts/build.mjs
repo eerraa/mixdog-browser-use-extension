@@ -23,7 +23,12 @@ const sdkPatch = {
   },
 };
 const bundleInputs = new Set();
-for (const [entry, name] of [['src/mcp/main.mjs', 'mcp'], ['src/hook/main.mjs', 'hook'], ['src/companion/main.mjs', 'companion']]) {
+for (const [entry, name] of [
+  ['src/mcp/main.mjs', 'mcp'],
+  ['src/hook/main.mjs', 'hook'],
+  ['src/companion/main.mjs', 'companion'],
+  ['src/companion/camoufox-main.mjs', 'companion-camoufox'],
+]) {
   const result = await build({
     absWorkingDir: root, entryPoints: [entry], outfile: `build/app/${name}.cjs`,
     bundle: true, format: 'cjs', platform: 'node', target: 'node22',
