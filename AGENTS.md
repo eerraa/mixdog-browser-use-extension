@@ -15,7 +15,7 @@ Read order for a task: this file (Edit table) → the `change-map.md` steps → 
 | Runtime | Default Camoufox 158.0.1-beta.41 (patched Firefox 158, pure-Node Juggler pipe + local Firefox RDP + native Firefox `#nav-bar` Agent Control toolbar); Electron 44.9.1 stays bundled as the Node runtime (`ELECTRON_RUN_AS_NODE=1`) and explicit fallback engine (`WB_ENGINE=electron` or `browser-policy.json` `"engine": "electron"`) for WebHID/WebUSB |
 | Platform | Windows x64; development needs Node.js ≥ 22.19 |
 | Repository | `github.com/eerraa/mixdog-browser-use-extension` (private), branch `main` |
-| Version | `0.6.5`. Version locations and releases: `build-release.md` |
+| Version | `0.6.6`. Version locations and releases: `build-release.md` |
 | Languages | Code and agent docs: English. `README.md`: Korean, for end users. Toolbar UI: en and ko |
 
 ## Docs
@@ -71,7 +71,7 @@ Doc rules:
 | `tests/shared/`, `tests/companion/`, `tests/scripts/` | core unit tests (`npm test`) |
 | `tests/browser/` | engine unit tests on Electron & Camoufox fixtures (`test:browser`) |
 | `tests/native/` | native helper test (`test:native`) |
-| `tests/live/` | real Electron harnesses (11 tests) and real Camoufox 158 tests (2 tests) (`test:live`) |
+| `tests/live/` | real Electron harnesses (11 tests) and real Camoufox 158 tests (3 tests) (`test:live`) |
 | `tests/package/` | packaged folder and MCP end to end (`test:package`, default Camoufox + `WB_ENGINE=electron`) |
 | `plugin.json`, `hooks/`, `skills/`, `browser-policy.json` | shipped plugin surface and policy |
 | `third_party/mixdog/`, `third_party/camoufox/` | Mixdog fork record/notices and Camoufox MPL-2.0 provenance/notices |
