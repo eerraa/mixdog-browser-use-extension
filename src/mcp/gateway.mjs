@@ -1,13 +1,15 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { bounded } from '../shared/async.mjs';
 import { BROWSER_TOOL } from '../shared/authority.mjs';
-import { fail } from '../shared/contract.mjs';
-import { connectionPaths, engineMode } from '../shared/paths.mjs';
+import { fail, validateArgs } from '../shared/contract.mjs';
+import { automationMode, connectionPaths, engineMode } from '../shared/paths.mjs';
+import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from '../shared/policy.mjs';
+import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 
 // Under connection authority the MCP connection is the only caller.
 export const CONNECTION_CALLER = 'mcp-connection';
@@ -23,145 +25,283 @@ async function connect(pipe, hello) {
   catch (error) { peer.close(); throw error; }
 }
 
-async function resolveEngine(root) {
-  const fromEnv = engineMode();
-  if (fromEnv) return fromEnv;
-  try {
-    const raw = JSON.parse(await readFile(path.join(root, 'browser-policy.json'), 'utf8'));
-    if (raw?.engine === 'electron' || raw?.engine === 'camoufox') return raw.engine;
-  } catch { /* fall through to default */ }
-  return 'camoufox';
+function abortError(signal) {
+  const reason = signal?.reason;
+  const error = reason instanceof Error ? reason : new Error(typeof reason === 'string' && reason ? reason : 'Browser call cancelled');
+  return Object.assign(error, { code: error.code ?? 'ABORTED', requestedInputDispatched: false });
+}
+
+function awaitWithSignal(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      value => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      error => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
 }
 
 export async function createGateway(root, data, { authority = 'hook' } = {}) {
   if (authority !== 'hook' && authority !== 'connection') throw new Error('Unknown caller authority');
-  const engine = await resolveEngine(root);
+  const policy = await BrowserPolicy.load(root);
+  const engine = engineMode() ?? policy.engine;
+  const lazy = authority === 'connection' && engine === 'electron';
   const channel = randomUUID();
+  const connectionId = randomUUID();
   const paths = connectionPaths(data, channel);
-  await mkdir(path.dirname(paths.directory), { recursive: true });
-  await mkdir(paths.directory); // Fresh allocation; never reuse a previous connection.
   const key = randomBytes(32).toString('base64url');
   const flag = engine === 'electron' ? '--browser-electron' : '--browser';
-  const child = spawn(path.join(root, 'bin', 'bridge.exe'), [flag], {
-    cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, WB_CHANNEL: channel, WB_IPC_KEY: key },
+
+  // Freeze the trusted configuration snapshot once before admitting any call so
+  // cold metadata (`status`) and a lazily spawned Electron companion agree.
+  const prefs = lazy ? await loadUserPreferences(data) : null;
+  const resolvedMode = lazy ? resolveAutomationMode({ envMode: automationMode(), policy, prefs }) : null;
+  const initSnapshot = lazy ? { connectionId, policy: policy.toSnapshot(), prefs } : null;
+
+  let child = null, exit = null, peer = null, issuer = null;
+  let started = false, startFlight = null, startFailed = null;
+  let terminated = null, closing = false, terminationReason = null;
+
+  const helloBase = { channel, key, role: 'gateway' };
+  const issuerHello = { channel, key, role: 'hook' };
+  const watch = current => current.on('event', (event, params) => {
+    if (event === 'terminating') terminationReason = params?.reason;
   });
-  let terminated = null, closing = false, startup = '', errors = '', peer, terminationReason;
-  const exit = new Promise(resolve => {
-    child.once('exit', (code, signal) => {
-      terminated = { code, signal };
-      resolve(terminated);
-    });
-  });
-  const ready = new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      reject(new Error(`Browser companion startup exited (${code ?? signal})${errors ? `\n${errors}` : ''}`));
-    });
-    child.stderr.on('data', bytes => {
-      if (!peer) errors = (errors + bytes.toString('utf8')).slice(-16384);
-    });
-    child.stdout.on('data', bytes => {
-      startup += bytes.toString('utf8');
-      if (startup.includes(`WB_READY ${channel}\n`)) resolve();
-      if (startup.length > 65536) { child.kill(); reject(new Error('Invalid companion startup output')); }
-    });
-  });
-  try {
-    await bounded(ready, 20000, 'Browser companion startup', undefined, () => child.kill());
-    const hello = { channel, key, role: 'gateway' };
-    peer = await connect(paths.pipe, hello);
-    const watch = current => current.on('event', (event, params) => {
-      if (event === 'terminating') terminationReason = params?.reason;
-    });
-    watch(peer);
-    // Host hooks find the pipe and key through endpoint.json. Connection
-    // authority has no hooks, so its key never touches the disk.
-    if (authority === 'hook') {
-      await writeFile(`${paths.endpoint}.tmp`, JSON.stringify({ channel, key, pipe: paths.pipe, protocol: 1 }), { mode: 0o600, flag: 'wx' });
-      await rename(`${paths.endpoint}.tmp`, paths.endpoint);
+
+  async function startCompanion() {
+    if (closing || terminated || terminationReason || startFailed) {
+      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
+        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
+      });
     }
-    // Connection authority: this process issues each call's single-use ticket
-    // over its own hook-role connection, so the companion admits every call
-    // through CallerAuthority.consume exactly as under host hooks.
-    const issuerHello = { channel, key, role: 'hook' };
-    let issuer = authority === 'connection' ? connect(paths.pipe, issuerHello) : null;
-    if (issuer) await issuer;
-    const ticket = args => {
-      // Chained so concurrent calls share one reconnect after a lost transport.
-      issuer = issuer.catch(() => null).then(current => (current && !current.closed ? current : connect(paths.pipe, issuerHello)));
-      return issuer.then(current => current.request('issue', {
-        sessionId: CONNECTION_CALLER, callId: randomUUID(), toolName: BROWSER_TOOL, args,
-      }, { timeoutMs: 2000 })).then(response => response.ticket);
-    };
-    const livePeer = async () => {
-      if (terminated || closing || terminationReason) throw new Error('Browser connection ended; reconnect the plugin explicitly');
-      if (peer.closed) {
-        // Reconnect the transport for NEW calls only; never replay the lost call.
-        peer = await connect(paths.pipe, hello);
-        watch(peer);
+    await mkdir(path.dirname(paths.directory), { recursive: true });
+    await mkdir(paths.directory); // Fresh allocation; never reuse a previous connection.
+    let startup = '', errors = '';
+    const proc = spawn(path.join(root, 'bin', 'bridge.exe'), [flag], {
+      cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, WB_CHANNEL: channel, WB_IPC_KEY: key, ...(lazy ? { WB_LAZY_INIT: '1' } : {}) },
+    });
+    child = proc;
+    const procExit = new Promise(resolve => {
+      proc.once('exit', (code, signal) => {
+        terminated = { code, signal };
+        resolve(terminated);
+      });
+    });
+    exit = procExit;
+    const ready = new Promise((resolve, reject) => {
+      proc.once('error', reject);
+      proc.once('exit', (code, signal) => {
+        reject(new Error(`Browser companion startup exited (${code ?? signal})${errors ? `\n${errors}` : ''}`));
+      });
+      proc.stderr.on('data', bytes => {
+        if (!peer) errors = (errors + bytes.toString('utf8')).slice(-16384);
+      });
+      proc.stdout.on('data', bytes => {
+        startup += bytes.toString('utf8');
+        if (startup.includes(`WB_READY ${channel}\n`)) resolve();
+        if (startup.length > 65536) { proc.kill(); reject(new Error('Invalid companion startup output')); }
+      });
+    });
+    try {
+      await bounded(ready, 20000, 'Browser companion startup', undefined, () => proc.kill());
+      if (closing) throw new Error('Browser connection closed during startup');
+      peer = await connect(paths.pipe, lazy ? { ...helloBase, snapshot: initSnapshot } : helloBase);
+      watch(peer);
+      if (closing) throw new Error('Browser connection closed during startup');
+      // Host hooks find the pipe and key through endpoint.json. Connection
+      // authority has no hooks, so its key never touches the disk.
+      if (authority === 'hook') {
+        await writeFile(`${paths.endpoint}.tmp`, JSON.stringify({ channel, key, pipe: paths.pipe, protocol: 1 }), { mode: 0o600, flag: 'wx' });
+        await rename(`${paths.endpoint}.tmp`, paths.endpoint);
       }
-      return peer;
-    };
-    return {
-      channel,
-      authority,
-      async status() {
-        if (terminated || terminationReason) return { channel, state: 'connection-ended', terminationReason, process: terminated };
-        return { channel, ...await (await livePeer()).request('status', {}) };
-      },
-      async execute(args, signal) {
-        if (authority === 'hook' && args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
-        if (authority === 'connection' && Object.hasOwn(args, '_lease')) {
-          fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
-            { requestedInputDispatched: false });
+      // Connection authority: this process issues each call's single-use ticket
+      // over its own hook-role connection, so the companion admits every call
+      // through CallerAuthority.consume exactly as under host hooks.
+      issuer = authority === 'connection' ? connect(paths.pipe, issuerHello) : null;
+      if (issuer) await issuer;
+      if (closing) throw new Error('Browser connection closed during startup');
+      started = true;
+    } catch (error) {
+      peer?.close();
+      peer = null;
+      if (issuer) (await issuer.catch(() => null))?.close();
+      issuer = null;
+      if (!terminated) proc.kill();
+      await bounded(procExit, 4000, 'Failed companion cleanup').catch(() => {});
+      throw Object.assign(error, { requestedInputDispatched: false });
+    }
+  }
+
+  async function ensureStarted(signal) {
+    if (signal?.aborted) throw abortError(signal);
+    if (terminated || closing || terminationReason || startFailed) {
+      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
+        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
+      });
+    }
+    if (started) return;
+    if (!startFlight) {
+      startFlight = startCompanion().catch(error => {
+        startFailed = error;
+        throw error;
+      });
+      // Prevent unhandled rejection when a caller cancels before startup finishes.
+      startFlight.catch(() => {});
+    }
+    await awaitWithSignal(startFlight, signal);
+    if (signal?.aborted) throw abortError(signal);
+    if (terminated || closing || terminationReason || startFailed) {
+      throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
+        code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
+      });
+    }
+  }
+
+  // Hook authority (needs endpoint.json before PreToolUse) and Camoufox (tiny
+  // pure-Node companion that already defers launching Firefox) start eagerly.
+  // Connection-authority Electron starts lazily on the first operational call.
+  if (!lazy) {
+    await startCompanion();
+  }
+
+  const ticket = args => {
+    // Chained so concurrent calls share one reconnect after a lost transport.
+    issuer = issuer.catch(() => null).then(current => (current && !current.closed ? current : connect(paths.pipe, issuerHello)));
+    return issuer.then(current => current.request('issue', {
+      sessionId: CONNECTION_CALLER, callId: randomUUID(), toolName: BROWSER_TOOL, args,
+    }, { timeoutMs: 2000 })).then(response => response.ticket);
+  };
+
+  const livePeer = async () => {
+    if (terminated || closing || terminationReason || startFailed) {
+      throw new Error('Browser connection ended; reconnect the plugin explicitly');
+    }
+    if (!peer || peer.closed) {
+      // Reconnect the transport for NEW calls only; never replay the lost call.
+      peer = await connect(paths.pipe, helloBase);
+      watch(peer);
+    }
+    return peer;
+  };
+
+  return {
+    channel,
+    authority,
+    engine,
+    async status() {
+      if (terminated || terminationReason || startFailed) {
+        return {
+          channel,
+          engine,
+          ...(lazy ? { connectionId } : {}),
+          state: 'connection-ended',
+          companionState: 'ended',
+          terminationReason: terminationReason ?? (startFailed ? 'startup-failed' : undefined),
+          process: terminated,
+        };
+      }
+      if (lazy && !started) {
+        return {
+          channel,
+          state: 'connected',
+          companionState: startFlight ? 'starting' : 'not-started',
+          engine: 'electron',
+          connectionId,
+          automationMode: resolvedMode.mode,
+          tabCount: 0,
+          pausedCount: 0,
+          capabilities: electronCapabilities({
+            policy,
+            automationMode: resolvedMode.mode,
+            configuredAutomationMode: resolvedMode.mode,
+            automationModeSource: resolvedMode.source,
+            automationModePinned: resolvedMode.pinned,
+            automationPreferenceReason: resolvedMode.preferenceReason,
+          }),
+        };
+      }
+      return { channel, companionState: 'running', ...await (await livePeer()).request('status', {}) };
+    },
+    async execute(args, signal) {
+      if (authority === 'hook' && args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
+      if (authority === 'connection' && Object.hasOwn(args, '_lease')) {
+        fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
+          { requestedInputDispatched: false });
+      }
+      if (terminated || closing || terminationReason || startFailed) {
+        throw Object.assign(new Error('Browser connection ended; reconnect the plugin explicitly'), {
+          code: 'CONNECTION_CLOSED', requestedInputDispatched: false,
+        });
+      }
+      // Narrow connection-authority metadata exception alongside `status`:
+      // Electron has no named persistent profiles, so cold `list_profiles`
+      // answers without launching Electron or creating a connection directory.
+      if (lazy && !started && args?.action === 'list_profiles') {
+        const { _channel: _ignored, ...cleaned } = args;
+        try { validateArgs(cleaned); }
+        catch (error) { throw Object.assign(error, { requestedInputDispatched: false }); }
+        return { ...ELECTRON_LIST_PROFILES, profiles: [] };
+      }
+      if (lazy && !started) {
+        await ensureStarted(signal);
+      }
+      const current = await livePeer();
+      let call = args;
+      if (authority === 'connection') {
+        // This process owns exactly one companion, so it addresses the call itself.
+        // A host that kept an earlier process's schema still sends that _channel.
+        const own = { ...args, _channel: channel };
+        try { call = { ...own, _lease: await ticket(own) }; }
+        catch (error) {
+          // No call was sent: the companion admits nothing without a ticket.
+          throw Object.assign(error, { code: error.code ?? 'UNAUTHENTICATED_CALLER', requestedInputDispatched: false });
         }
-        const current = await livePeer();
-        let call = args;
-        if (authority === 'connection') {
-          // This process owns exactly one companion, so it addresses the call itself.
-          // A host that kept an earlier process's schema still sends that _channel.
-          const own = { ...args, _channel: channel };
-          try { call = { ...own, _lease: await ticket(own) }; }
-          catch (error) {
-            // No call was sent: the companion admits nothing without a ticket.
-            throw Object.assign(error, { code: error.code ?? 'UNAUTHENTICATED_CALLER', requestedInputDispatched: false });
-          }
+      }
+      if (signal?.aborted) throw abortError(signal);
+      try {
+        const result = await current.request('call', { args: call }, { signal, timeoutMs: 120000 });
+        if (args.action === 'revoke' && result?.closesConnection) {
+          const process = await bounded(exit, 8000, 'Companion teardown');
+          return {
+            disposition: 'connection-terminated', processTeardownConfirmed: process.code === 0,
+            scope: 'all pages of this connection', physicalDeviceIo: 'NOT_MEASURED',
+            reason: 'The owned companion job ended; live device handle/reconnect checks remain separate.',
+          };
         }
+        return result;
+      } catch (error) {
+        // Transport failure is NOT evidence that an input did not run.
+        throw Object.assign(error, { replaySafe: false });
+      }
+    },
+    async close() {
+      if (closing) return;
+      closing = true;
+      if (lazy && !started && !startFlight && !child) return;
+      if (startFlight) {
+        if (child && !terminated && !started) child.kill();
+        await startFlight.catch(() => {});
+      }
+      if (child && !terminated) {
         try {
-          const result = await current.request('call', { args: call }, { signal, timeoutMs: 120000 });
-          if (args.action === 'revoke' && result?.closesConnection) {
-            const process = await bounded(exit, 8000, 'Companion teardown');
-            return {
-              disposition: 'connection-terminated', processTeardownConfirmed: process.code === 0,
-              scope: 'all pages of this connection', physicalDeviceIo: 'NOT_MEASURED',
-              reason: 'The owned companion job ended; live device handle/reconnect checks remain separate.',
-            };
-          }
-          return result;
-        } catch (error) {
-          // Transport failure is NOT evidence that an input did not run.
-          throw Object.assign(error, { replaySafe: false });
+          if (peer && !peer.closed) await peer.request('shutdown', {}, { timeoutMs: 2000 });
+          else child.kill();
+        } catch {
+          if (!terminated) child.kill();
         }
-      },
-      async close() {
-        if (closing) return;
-        closing = true;
-        if (!terminated) {
-          try { await peer.request('shutdown', {}, { timeoutMs: 2000 }); }
-          catch { if (!terminated) child.kill(); }
+        if (exit) {
           try { await bounded(exit, 8000, 'Owned companion shutdown', undefined, () => child.kill()); }
           catch { child.kill(); }
         }
-        peer.close();
-        if (issuer) (await issuer.catch(() => null))?.close();
-        // Only the endpoint created by THIS gateway is removed. Profiles stay.
-        if (authority === 'hook') await unlink(paths.endpoint);
-      },
-    };
-  } catch (error) {
-    peer?.close();
-    child.kill();
-    throw error;
-  }
+      }
+      peer?.close();
+      if (issuer) (await issuer.catch(() => null))?.close();
+      // Only the endpoint created by THIS gateway is removed. Profiles stay.
+      if (authority === 'hook' && started) await unlink(paths.endpoint).catch(() => {});
+    },
+  };
 }

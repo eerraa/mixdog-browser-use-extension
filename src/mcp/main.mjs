@@ -3,8 +3,9 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createGateway } from './gateway.mjs';
+import { fail, validateArgs } from '../shared/contract.mjs';
 import { authorityMode, automationMode, engineMode, pluginData } from '../shared/paths.mjs';
-import { CONNECTION_INSTRUCTIONS, browserTool, errorResult, toolResult } from './tool.mjs';
+import { browserTool, connectionInstructions, errorResult, toolResult } from './tool.mjs';
 
 // The package version: the MCP handshake and `status` report it, so a host that
 // still runs an earlier install is visible to the agent and the person.
@@ -21,10 +22,10 @@ async function main() {
   // its guidance instead. Under host hooks the shipped skill does.
   const server = new Server({ name: 'win-browser', version: VERSION }, {
     capabilities: { tools: {} },
-    ...(authority === 'connection' ? { instructions: CONNECTION_INSTRUCTIONS } : {}),
+    ...(authority === 'connection' ? { instructions: connectionInstructions(gateway.engine) } : {}),
   });
   const hooked = authority === 'hook';
-  const descriptor = browserTool(hooked ? gateway.channel : null);
+  const descriptor = browserTool(hooked ? gateway.channel : null, { engine: gateway.engine });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [descriptor] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
@@ -33,8 +34,19 @@ async function main() {
       // Host hooks address this connection by _channel. Under connection authority
       // the stdio connection is the caller and the argument is not part of a call.
       if (hooked && args?._channel !== gateway.channel) throw new Error('Missing, foreign or replaced browser channel');
-      if (!args || typeof args !== 'object') throw new Error('Browse arguments must be an object');
-      const result = args.action === 'status' ? { version: VERSION, ...await gateway.status() } : await gateway.execute(args, extra.signal);
+      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Browse arguments must be an object');
+      // Enforce connection-authority _lease refusal BEFORE any metadata shortcut (including `status`).
+      if (!hooked && Object.hasOwn(args, '_lease')) {
+        fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
+          { requestedInputDispatched: false });
+      }
+      if (args.action === 'status') {
+        const { _channel: _c, _lease: _l, ...cleaned } = args;
+        try { validateArgs(cleaned); }
+        catch (error) { throw Object.assign(error, { requestedInputDispatched: false }); }
+        return toolResult({ version: VERSION, ...await gateway.status() }, 'status');
+      }
+      const result = await gateway.execute(args, extra.signal);
       return toolResult(result, args.action);
     } catch (error) {
       const args = request.params.arguments;

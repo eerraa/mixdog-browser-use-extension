@@ -110,4 +110,16 @@ test('browser-policy.json supports optional explicit engine while defaulting to 
       assert.equal(rejected.explicitEngine, false);
     }
   }
+
+  // Effective engine override and immutable snapshot round-trip.
+  const descOverride = shipped.describe('electron');
+  assert.equal(descOverride.engine, 'electron');
+  assert.equal(descOverride.configuredEngine, 'camoufox');
+  const roundTrip = BrowserPolicy.fromSnapshot(shipped.toSnapshot());
+  assert.equal(roundTrip.valid, true);
+  assert.equal(roundTrip.mode, 'delegated');
+  assert.deepEqual(roundTrip.permissions, shipped.permissions);
+  const invalidSnap = BrowserPolicy.fromSnapshot(new BrowserPolicy(null, 'malformed').toSnapshot());
+  assert.equal(invalidSnap.valid, false);
+  assert.equal(invalidSnap.reason, 'malformed');
 });

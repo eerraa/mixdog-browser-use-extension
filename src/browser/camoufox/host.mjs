@@ -317,7 +317,7 @@ export class CamoufoxHost {
         mandatoryHuman: elevated
           ? ['OS identity', 'CAPTCHA', 'human Resume in the #nav-bar after Stop/handoff']
           : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the #nav-bar after Stop/handoff'],
-        delegation: this.policy.describe(),
+        delegation: this.policy.describe('camoufox'),
       },
     };
   }

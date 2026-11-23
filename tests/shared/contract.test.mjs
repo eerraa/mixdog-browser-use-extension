@@ -137,10 +137,11 @@ test('semantic filtering is explicit, frame-scoped, and does not resolve ambigui
 });
 
 test('only the hook schema carries _channel and _lease; the connection schema and instructions name no connection', async () => {
-  const { browserTool, CONNECTION_INSTRUCTIONS } = await import('../../src/mcp/tool.mjs');
+  const { browserTool, connectionInstructions, CONNECTION_INSTRUCTIONS } = await import('../../src/mcp/tool.mjs');
   const channel = '0f8fad5b-d9cb-469f-a165-70867728950e';
   const hooked = browserTool(channel);
   const connection = browserTool();
+  const electronTool = browserTool(null, { engine: 'electron' });
   assert.equal(hooked.inputSchema.properties._lease.type, 'string');
   assert.deepEqual(hooked.inputSchema.required, ['action', '_channel']);
   assert.deepEqual(hooked.inputSchema.properties._channel.enum, [channel]);
@@ -149,12 +150,28 @@ test('only the hook schema carries _channel and _lease; the connection schema an
   assert.equal(connection.inputSchema.additionalProperties, false);
   const { _channel, _lease, ...shared } = hooked.inputSchema.properties;
   assert.deepEqual(connection.inputSchema.properties, shared, 'the two schemas differ only in _channel and _lease');
+  assert.deepEqual(electronTool.inputSchema, connection.inputSchema, 'camoufox and electron registrations share the exact inputSchema');
+  assert.equal(electronTool.name, 'browse');
+  assert.match(connection.description, /^Primary independent browser \(Camoufox/);
+  assert.match(connection.description, /win-browser-hid/);
+  assert.match(electronTool.description, /^Hardware-capable independent browser \(Electron/);
+  assert.match(electronTool.description, /WebHID.*WebUSB.*usekb\.cc/);
+  assert.match(electronTool.description, /win-browser\)/);
   // Claude Code cuts server instructions after 4096 characters.
-  assert.ok(CONNECTION_INSTRUCTIONS.length <= 4096, `${CONNECTION_INSTRUCTIONS.length} characters`);
-  assert.doesNotMatch(CONNECTION_INSTRUCTIONS, /_channel/);
-  assert.match(CONNECTION_INSTRUCTIONS, /restarted or reconnected server/);
-  assert.match(CONNECTION_INSTRUCTIONS, /never send _lease/);
-  assert.match(CONNECTION_INSTRUCTIONS, /never choose by list order/);
+  for (const engine of ['camoufox', 'electron']) {
+    const instructions = connectionInstructions(engine);
+    assert.ok(instructions.length <= 4096, `${engine}: ${instructions.length} characters`);
+    assert.doesNotMatch(instructions, /_channel/);
+    assert.match(instructions, /restarted or reconnected server/);
+    assert.match(instructions, /never send _lease/);
+    assert.match(instructions, /never choose by list order/);
+    assert.match(instructions, /never switch registrations/i);
+  }
+  assert.equal(CONNECTION_INSTRUCTIONS, connectionInstructions('camoufox'));
+  assert.match(connectionInstructions('camoufox'), /runtimeState:"dormant"/);
+  assert.match(connectionInstructions('camoufox'), /Disconnect \(연결 종료\)/);
+  assert.match(connectionInstructions('electron'), /usekb\.cc/);
+  assert.match(connectionInstructions('electron'), /showInactive\(\)/);
 });
 
 test('text results carry the status line and isError follows the disposition; JSON actions stay JSON', async () => {

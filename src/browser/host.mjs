@@ -6,7 +6,7 @@ import { FenceQueue } from './queue.mjs';
 import { bounded, pause } from '../shared/async.mjs';
 import { FrameDriver } from './frames.mjs';
 import { BrowserPermissions } from './permissions.mjs';
-import { BrowserPolicy } from './policy.mjs';
+import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from './policy.mjs';
 import { BrowserRequests } from './requests.mjs';
 import { BrowserDialogs } from './dialogs.mjs';
 import { installPageMenu } from './consent.mjs';
@@ -71,7 +71,7 @@ export class BrowserHost {
   #tabSequence = 0;
   #snapshotSequence = 0;
 
-  constructor({ dataDir, dataRoot = null, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
+  constructor({ dataDir, dataRoot = null, connectionId = null, consentHelperPath, toolbarPreloadPath, onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
     automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
     automationModePinned = undefined,
@@ -90,7 +90,7 @@ export class BrowserHost {
     this.toolbarPreloadPath = toolbarPreloadPath;
     this.runnerPreloadPath = runnerPreloadPath;
     this.createRunnerSandbox = sandboxFactory;
-    this.connectionId = freshId();
+    this.connectionId = typeof connectionId === 'string' && connectionId ? connectionId : freshId();
     this.onRevokeConnection = onRevokeConnection;
     this.policy = policy;
     this.#automationMode = automationMode;
@@ -113,47 +113,22 @@ export class BrowserHost {
   }
 
   status() {
-    const elevated = this.#automationMode === 'elevated';
     return {
       state: this.#closed ? 'closed' : this.#revoking ? 'terminating-revocation' : 'connected',
+      engine: 'electron',
       connectionId: this.connectionId,
       automationMode: this.#automationMode,
       tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
-      capabilities: {
-        automation: {
-          mode: this.#automationMode,
-          configuredMode: this.#configuredAutomationMode,
-          source: this.#automationModeSource,
-          pinned: this.#automationModePinned,
-          ...(this.#automationPreferenceReason ? { preferenceReason: this.#automationPreferenceReason } : {}),
-          scope: elevated
-            ? 'connection-wide opt-in: login and sensitive fill/type/click/observe permitted without shield auto-handoff'
-            : 'standard safety boundary: shield click/key triggers handoff; human handles sign-in and secrets',
-          shieldAutoHandoff: !elevated,
-          sensitiveInputAllowed: elevated,
-          sensitiveValuesMasked: true,
-          pageCodeBlockedBesideSecrets: true,
-          manualHandoffRequiredFor: ['OS identity', 'CAPTCHA', 'human verification'],
-          revocableByUser: true,
-        },
-        sessions: { temporary: true, namedPersistentProfiles: false, maxCreatedPerCaller: MAX_TEMPORARY_SESSIONS, defaultClosable: false },
-        nativeRequests: ['javascript-dialog', 'file-picker', 'hid', 'usb', 'notifications', 'geolocation'],
-        javascriptDialogs: {
-          supported: ['alert', 'confirm'],
-          unsupported: { prompt: 'Electron 44.9.1 overrides window.prompt() and throws before native dialog creation.' },
-          integration: 'Companion-local public-module adapter pinned to Electron 44.9.1; not a documented interception API',
-        },
-        filePickers: {
-          supported: ['html-file-input'],
-          unsupported: ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker'],
-        },
-        unsupported: ['display-capture', 'serial', 'bluetooth', 'javascript-prompt'],
-        mandatoryHuman: elevated
-          ? ['OS identity', 'CAPTCHA', 'human Resume in the browser window after Stop/handoff']
-          : ['OS identity', 'passwords', 'CAPTCHA', '2FA', 'human Resume in the browser window after Stop/handoff'],
-        delegation: this.policy.describe(),
-      },
+      capabilities: electronCapabilities({
+        policy: this.policy,
+        automationMode: this.#automationMode,
+        configuredAutomationMode: this.#configuredAutomationMode,
+        automationModeSource: this.#automationModeSource,
+        automationModePinned: this.#automationModePinned,
+        automationPreferenceReason: this.#automationPreferenceReason,
+        maxTemporarySessions: MAX_TEMPORARY_SESSIONS,
+      }),
     };
   }
   // One-way connection-wide user downgrade back to standard mode. Takes effect
@@ -932,12 +907,7 @@ export class BrowserHost {
     if (args.action === 'status') return this.status();
     if (args.action === 'revoke') return this.#revoke();
     if (args.action === 'list_profiles') {
-      return {
-        supported: false,
-        engine: 'electron',
-        reason: 'Named persistent profiles require the default Camoufox engine; Electron supports only temporary sessions',
-        profiles: [],
-      };
+      return { ...ELECTRON_LIST_PROFILES, profiles: [] };
     }
     if (args.action === 'create_session') {
       if (args.profile !== undefined) {
