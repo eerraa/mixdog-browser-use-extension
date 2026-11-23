@@ -9,7 +9,7 @@
 //     <root>\win-browser-versions\v<ver>\win-browser   verified installs
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink } from 'node:fs/promises';
+import { copyFile, cp, link, lstat, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -33,13 +33,18 @@ async function listFiles(directory, prefix = '') {
   return found;
 }
 
-/** The folder holds exactly the release's files, each with its recorded sha256. */
-export async function verify(directory, sums) {
-  const expected = new Map(sums.trim().split(/\r?\n/).map(line => {
+/** Parse release per-file sha256 manifest into Map<relativePath, sha256>. */
+function parseSums(sums) {
+  return new Map(sums.trim().split(/\r?\n/).map(line => {
     const match = line.match(/^([0-9a-f]{64}) {2}win-browser\/(.+)$/);
     if (!match) throw new Error(`Malformed release digest line: ${line}`);
     return [match[2], match[1]];
   }));
+}
+
+/** The folder holds exactly the release's files, each with its recorded sha256. */
+export async function verify(directory, sums) {
+  const expected = sums instanceof Map ? sums : parseSums(sums);
   const actual = await listFiles(directory);
   if (actual.length !== expected.size || actual.some(file => !expected.has(file))) {
     throw new Error(`${directory} does not hold exactly the release files`);
@@ -47,6 +52,47 @@ export async function verify(directory, sums) {
   for (const file of actual) {
     if (await sha256(path.join(directory, file)) !== expected.get(file)) throw new Error(`${file} differs from the release`);
   }
+}
+
+/**
+ * Stage `win-browser/` by hard-linking byte-identical files from existing
+ * verified immutable sibling installs on the same volume (MSIX-style NTFS
+ * deduplication), falling back to copyFile for new/changed files or when hard
+ * linking is unavailable. Preserves real directories, exact paths, and full
+ * per-file SHA-256 verification without junctions inside version folders.
+ */
+async function stageReleaseFiles({ sourceDir, destDir, expected, siblingDirs }) {
+  await mkdir(destDir, { recursive: true });
+  let hardLinkedFiles = 0;
+  let copiedFiles = 0;
+  let savedBytes = 0;
+  for (const [relative, expectedHash] of expected) {
+    const srcFile = path.join(sourceDir, ...relative.split('/'));
+    const dstFile = path.join(destDir, ...relative.split('/'));
+    await mkdir(path.dirname(dstFile), { recursive: true });
+    const srcStat = await stat(srcFile);
+    let linked = false;
+    for (const sibling of siblingDirs) {
+      const candidate = path.join(sibling, ...relative.split('/'));
+      try {
+        const candStat = await lstat(candidate);
+        if (!candStat.isFile() || candStat.size !== srcStat.size) continue;
+        if (await sha256(candidate) !== expectedHash) continue;
+        await link(candidate, dstFile);
+        linked = true;
+        hardLinkedFiles++;
+        savedBytes += srcStat.size;
+        break;
+      } catch {
+        // Candidate absent, modified, or cross-volume/unsupported hard link; try next sibling or copy.
+      }
+    }
+    if (!linked) {
+      await copyFile(srcFile, dstFile);
+      copiedFiles++;
+    }
+  }
+  return { hardLinkedFiles, copiedFiles, savedBytes };
 }
 
 /** Lower-cased image paths of running processes (read-only listing). */
@@ -71,21 +117,39 @@ export async function install({ root, release, running = runningImages, camoufox
   const { version } = JSON.parse(await readFile(path.join(release, 'release.json'), 'utf8'));
   if (!VERSION_DIR.test(`v${version}`)) throw new Error(`Invalid release version ${version}`);
   const sums = await readFile(path.join(release, `win-browser-v${version}-files.sha256`), 'utf8');
-  await verify(path.join(release, 'win-browser'), sums);
+  const expected = parseSums(sums);
+  await verify(path.join(release, 'win-browser'), expected);
 
   const versions = path.join(root, VERSIONS);
   const home = path.join(versions, `v${version}`);
   const target = path.join(home, 'win-browser');
   await mkdir(versions, { recursive: true });
   let copied = false;
+  let hardLinkedFiles = 0;
+  let copiedFiles = 0;
+  let savedBytes = 0;
   if (await kindOf(home) !== 'none') {
     // An existing install may be running: reuse it only when intact, never overwrite it.
-    await verify(target, sums);
+    await verify(target, expected);
   } else {
+    const existingEntries = await readdir(versions, { withFileTypes: true }).catch(() => []);
+    const siblingDirs = existingEntries
+      .filter(entry => entry.isDirectory() && VERSION_DIR.test(entry.name) && entry.name !== `v${version}`)
+      .map(entry => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+      .map(name => path.join(versions, name, 'win-browser'));
     const staging = path.join(versions, `.staging-${randomUUID()}`);
     try {
-      await cp(path.join(release, 'win-browser'), path.join(staging, 'win-browser'), { recursive: true, errorOnExist: true, force: false });
-      await verify(path.join(staging, 'win-browser'), sums);
+      const staged = await stageReleaseFiles({
+        sourceDir: path.join(release, 'win-browser'),
+        destDir: path.join(staging, 'win-browser'),
+        expected,
+        siblingDirs,
+      });
+      hardLinkedFiles = staged.hardLinkedFiles;
+      copiedFiles = staged.copiedFiles;
+      savedBytes = staged.savedBytes;
+      await verify(path.join(staging, 'win-browser'), expected);
       await rename(staging, home);
       copied = true;
     } finally {
@@ -157,7 +221,10 @@ export async function install({ root, release, running = runningImages, camoufox
     sharedCamoufox = camoufoxDest;
   }
 
-  return { version, stable, target, previous, copied, pruned, inUse, ...(sharedCamoufox ? { sharedCamoufox } : {}) };
+  return {
+    version, stable, target, previous, copied, hardLinkedFiles, copiedFiles, savedBytes, pruned, inUse,
+    ...(sharedCamoufox ? { sharedCamoufox } : {}),
+  };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

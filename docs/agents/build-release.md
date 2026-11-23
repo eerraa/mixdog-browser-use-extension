@@ -79,7 +79,7 @@ One stable path per machine is the only registration of MCP hosts (D29). `npm ru
 | `<root>\win-browser-runtime\camoufox` | shared Camoufox 158 runtime installed once and reused across upgrades |
 
 1. Verify the release folder's `win-browser/` against `win-browser-v<ver>-files.sha256`: exactly the listed files, each with its sha256.
-2. Copy it to a staging folder beside the versions, verify again, rename to `v<ver>`. An existing `v<ver>` is reused only when it verifies; it may be running, so it is never replaced.
+2. Stage `win-browser/` beside the versions by NTFS hard-linking byte-identical files (e.g. the 368 MB Electron `runtime/`) from verified immutable sibling versions on the same volume and copying changed/new files, verify every staged file again, then rename to `v<ver>`. An existing `v<ver>` is reused only when it verifies; it may be running, so it is never replaced or modified in place.
 3. Create the new junction beside the stable path, then swap names (stable → old, new → stable, remove the old link). A real folder at the stable path is refused.
 4. Remove each other `v<ver>` that no running process has its image in (`Win32_Process.ExecutablePath`) and whose name can be detached by rename; report the rest as `inUse` for a later install.
 
