@@ -82,9 +82,17 @@ export class ControlBarClient extends EventEmitter {
     try { this.#child.stdin.write(`${JSON.stringify(object)}\n`); } catch { /* ignore */ }
   }
 
-  sync({ elevated, activeId, tabs, visible = true }) {
+  sync({ elevated, activeId, tabs, visible = true, browserPid = 0 }) {
     this.start();
-    this.#send({ cmd: 'state', locale: this.locale, elevated: Boolean(elevated), active: activeId ?? '', visible, tabs });
+    this.#send({
+      cmd: 'state',
+      locale: this.locale,
+      elevated: Boolean(elevated),
+      active: activeId ?? '',
+      visible,
+      browserPid: Number.isInteger(browserPid) && browserPid > 0 ? browserPid : 0,
+      tabs,
+    });
   }
 
   flash() {
@@ -194,7 +202,7 @@ export class CamoufoxPresentation {
     this.onSync();
   }
 
-  barEntry() {
+  barEntry({ title = '', url = '' } = {}) {
     const s = this.strings;
     const elevated = this.isElevated();
     let status = elevated ? s.elevated : s.automation;
@@ -227,13 +235,22 @@ export class CamoufoxPresentation {
       stopEnabled = this.pausedReason !== 'explicit-stop';
     }
 
+    const cleanTitle = String(title ?? '').replace(/\s+/g, ' ').trim();
+    let host = '';
+    try { host = url && url !== 'about:blank' ? new URL(url).host : ''; } catch { host = ''; }
+    const pageTag = cleanTitle || host || this.sessionLabel;
+    const clippedTag = pageTag.length > 26 ? `${pageTag.slice(0, 25)}…` : pageTag;
+    const isCustomSession = !/^Default\b/.test(this.sessionLabel);
+    const label = isCustomSession ? `${this.id} · ${clippedTag} [${this.sessionLabel}]` : `${this.id} · ${clippedTag}`;
+
     return {
       id: this.id,
-      label: `${this.id} · ${this.sessionLabel}`,
+      label,
       status,
       primaryText,
       primaryAction,
       stopEnabled,
+      needsReturn: this.mode === 'native-handoff' || Boolean(this.returnFailure),
     };
   }
 

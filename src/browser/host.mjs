@@ -1219,6 +1219,24 @@ export class BrowserHost {
             state.code = error.code;
           }
           state.acked = true;
+        } else if (args.action === 'scroll' && !args.ref && !args.target && !args.point) {
+          const frame = await this.#rootFrame(p);
+          await p.driver.inputReady(frame, laneSignal);
+          this.#owned(p.id, caller, laneSignal, true);
+          state.frameId = frame.id;
+          armed = this.#arm(p);
+          const dx = args.deltaX ?? 0, dy = args.deltaY ?? 0;
+          const scroller = await p.driver.evaluate(frame, 'document.scrollingElement || document.documentElement', false);
+          if (!scroller.objectId) fail('INVALID_SCROLL_TARGET', 'No connected native scrolling container');
+          try {
+            this.#owned(p.id, caller, laneSignal, true);
+            await p.driver.callOn(frame, scroller.objectId, `function(x,y){
+              if(!this.isConnected)throw new Error('Scroller replaced');
+              this.scrollBy({left:x,top:y,behavior:'instant'});
+              return {x:this.scrollLeft,y:this.scrollTop};
+            }`, [dx, dy], true, markSent);
+          } finally { await p.driver.release(frame, scroller.objectId); }
+          state.acked = true;
         } else {
           const target = args.point ? await this.#validatePoint(p, args, caller, laneSignal)
             : await this.#validate(p, args, caller, laneSignal, phase => { state.preparation = phase; });
@@ -1779,6 +1797,7 @@ export class BrowserHost {
       // Scroll the verified DOM's actual overflow container exactly once. A
       // synthetic wheel targets whatever is under the point and its ACK races
       // layout, so it cannot prove which container scrolled.
+      const dx = args.deltaX ?? 0, dy = args.deltaY ?? 0;
       const scrollFrame = frame;
       const start = entry
         ? `(()=>{const s=globalThis.__independentState;return s&&s.documentId===${JSON.stringify(entry.documentId)}?s.resolve(${Number(entry.id)}):null})()`
@@ -1788,8 +1807,8 @@ export class BrowserHost {
         if(!el||!el.isConnected||el.matches('iframe,frame'))throw new Error('Explicit frame target required');
         while(el && el!==document.scrollingElement){
           const style=getComputedStyle(el);
-          if((${args.deltaY}!==0 && el.scrollHeight>el.clientHeight && /(auto|scroll)/.test(style.overflowY))
-            ||(${args.deltaX}!==0 && el.scrollWidth>el.clientWidth && /(auto|scroll)/.test(style.overflowX)))return el;
+          if((${dy}!==0 && el.scrollHeight>el.clientHeight && /(auto|scroll)/.test(style.overflowY))
+            ||(${dx}!==0 && el.scrollWidth>el.clientWidth && /(auto|scroll)/.test(style.overflowX)))return el;
           el=el.parentElement||el.getRootNode()?.host;
         }
         return document.scrollingElement;
@@ -1802,7 +1821,7 @@ export class BrowserHost {
           if(!this.isConnected)throw new Error('Scroller replaced');
           this.scrollBy({left:x,top:y,behavior:'instant'});
           return {x:this.scrollLeft,y:this.scrollTop};
-        }`, [args.deltaX, args.deltaY], true, markSent);
+        }`, [dx, dy], true, markSent);
       } finally { await p.driver.release(scrollFrame, scroller.objectId); }
       return;
     }

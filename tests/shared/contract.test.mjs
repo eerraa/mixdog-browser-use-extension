@@ -41,6 +41,9 @@ test('every public action has a bounded explicit accepted argument shape', () =>
     { action: 'press', tabId: 't1', ref: 'e1', key: 'Enter' },
     { action: 'select', tabId: 't1', ref: 'e1', values: ['one'] },
     { action: 'scroll', tabId: 't1', ref: 'e1', deltaX: 0, deltaY: 200 },
+    { action: 'scroll', tabId: 't1', deltaY: 500 },
+    { action: 'scroll', tabId: 't1', deltaX: -120 },
+    { action: 'scroll', tabId: 't1', deltaX: 50, deltaY: 300 },
     { action: 'read', tabId: 't1' }, { action: 'read', tabId: 't1', ref: 'e1' },
     { action: 'evaluate', tabId: 't1', expression: 'document.title', frame: 'e3' },
     { action: 'upload', tabId: 'tab', target: { selector: 'input[type=file]' }, files: ['C:\\fixture.txt'] },
@@ -92,6 +95,9 @@ test('every public action has a bounded explicit accepted argument shape', () =>
     { action: 'run', script: '' }, { action: 'run', script: '  ' }, { action: 'run', script: 'x'.repeat(100001) },
     { action: 'run', script: '1', timeoutMs: 999 }, { action: 'run', script: '1', timeoutMs: 100001 }, { action: 'run', script: '1', tabId: '' },
     { action: 'run', script: '1', url: 'http://x.test/' },
+    { action: 'scroll', tabId: 't' },
+    { action: 'scroll', tabId: 't', ref: 'e1' },
+    { action: 'scroll', tabId: 't', ref: 'e1', target: { name: 'x' }, deltaY: 100 },
   ]) assert.throws(() => validateArgs(args), error => error.code === 'INVALID_ARGUMENT', JSON.stringify(args));
   assert.throws(() => validateArgs({ action: 'scroll', tabId: 't', ref: 'e1', deltaX: 0, deltaY: Infinity }), /Bounded/);
   assert.throws(() => validateArgs({ action: 'press', tabId: 't', ref: 'e1', key: 'Control+A' }), /Unsupported key/);

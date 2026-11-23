@@ -342,13 +342,13 @@ export class CamoufoxFrameDriver {
     return returnByValue ? (reply.result?.value ?? null) : reply.result;
   }
 
-  async evaluate(frame, expression, returnByValue = true, signal = this.actorSignal) {
+  async evaluate(frame, expression, returnByValue = true, signal = this.actorSignal, beforeDispatch = undefined) {
     const ctx = await this.#ensureWalkerContext(frame, signal);
     if (!ctx) fail('FRAME_UNAVAILABLE', 'Frame walker world is unavailable; never falling back to page world');
-    const result = await this.#evaluateInContext(ctx, expression, returnByValue, signal);
+    const result = await this.#evaluateInContext(ctx, expression, returnByValue, signal, beforeDispatch);
     if (returnByValue && result?.missing) {
       await this.#evaluateInContext(ctx, WALKER_SOURCE, true, signal);
-      return this.#evaluateInContext(ctx, expression, returnByValue, signal);
+      return this.#evaluateInContext(ctx, expression, returnByValue, signal, beforeDispatch);
     }
     return result;
   }

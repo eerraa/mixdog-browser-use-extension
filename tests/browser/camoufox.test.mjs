@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { JugglerTransport, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
@@ -209,6 +209,21 @@ test('DevToolsRecorder Juggler HTTP, redirects, timing, TLS, WebSockets, RDP ded
   assert.equal(wd.reqHeaders.Authorization, '[redacted]');
   assert.ok(!wd.reqBody.includes('wpw') && wd.reqBody.includes('"count":3'));
 
+  // 204 keepalive beacon receiving Network.requestFailed after 204 response must NOT appear as is:failed
+  rec.recordJuggler('Network.requestWillBeSent', {
+    requestId: 'r-beacon-ok', frameId: 'f-root', method: 'POST', url: 'https://api.test/telemetry', cause: 'TYPE_BEACON',
+  });
+  rec.recordJuggler('Network.responseReceived', { requestId: 'r-beacon-ok', status: 204, statusText: 'No Content' });
+  rec.recordJuggler('Network.requestFailed', { requestId: 'r-beacon-ok', errorCode: 'NS_ERROR_DOM_NETWORK_ERR' });
+  // Genuine network-error beacon (no 2xx/3xx status) MUST still appear as is:failed
+  rec.recordJuggler('Network.requestWillBeSent', {
+    requestId: 'r-beacon-bad', frameId: 'f-root', method: 'POST', url: 'https://api.test/telemetry-fail', cause: 'TYPE_BEACON',
+  });
+  rec.recordJuggler('Network.requestFailed', { requestId: 'r-beacon-bad', errorCode: 'NS_ERROR_CONNECTION_REFUSED' });
+  const failedRows = rec.networkRows({ filter: 'is:failed' }).rows;
+  assert.ok(!failedRows.some(r => r.u.includes('/telemetry') && !r.u.includes('-fail')), '204 beacon must not count as failed');
+  assert.ok(failedRows.some(r => r.u.includes('/telemetry-fail')), 'real failed beacon must still count as failed');
+
   // Handoff privacy: drop all Juggler HTTP, WebSocket, and RDP events during native-handoff
   mode = 'native-handoff';
   rec.boundary();
@@ -228,10 +243,14 @@ test('CamoufoxPresentation transitions fail closed and reflect elevated/return-f
   const p = new CamoufoxPresentation({ id: 't1', locale: 'en-US', isElevated: () => elevated, onSync: () => { syncs++; } });
   assert.equal(p.mode, 'automation');
   assert.equal(p.barEntry().status, 'Elevated active');
+  assert.equal(p.barEntry({ title: 'HubSpot OAuth', url: 'https://app.hubspot.com/oauth' }).label, 't1 · HubSpot OAuth');
+  assert.equal(p.barEntry({ title: '', url: 'https://app.hubspot.com/oauth' }).label, 't1 · app.hubspot.com');
+  assert.equal(p.barEntry().needsReturn, false);
   const g1 = p.beginDrain('human-handoff');
   assert.throws(() => p.assertObservable(), { code: 'PRIVATE_HANDOFF' });
   assert.equal(p.enterNative('human-handoff', g1), true);
   assert.equal(p.barEntry().primaryAction, 'resume');
+  assert.equal(p.barEntry().needsReturn, true);
   p.failReturn({ stage: 'privacy', code: 'RETURN_FAILED' });
   assert.equal(p.mode, 'draining');
   assert.match(p.barEntry().status, /Return failed \(privacy\)/);
@@ -393,5 +412,124 @@ test('CamoufoxHost with mock Juggler+RDP enforces standard vs elevated mode, one
     await host.close();
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CamoufoxHost persistentProfileDir acquires atomic lock, falls back to ephemeral-busy on live conflict, recovers stale lock, and supports resume-all', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-persist-'));
+  try {
+    const persistentDir = path.join(root, 'profiles', 'camoufox-default');
+    const lockPath = `${persistentDir}.lock`;
+    const makeMockProc = () => {
+      const p = new EventEmitter();
+      p.closed = false;
+      p.rdpPort = 0;
+      p.pid = 42424;
+      p.profileDir = null;
+      p.start = async () => p;
+      p.send = async (method, params = {}, sessionId) => {
+        if (method === 'Browser.newPage') {
+          const sid = `s-${Math.random().toString(36).slice(2, 7)}`;
+          const tid = `t-${Math.random().toString(36).slice(2, 7)}`;
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: 'https://app.test/', title: 'App', scrollHeight: 800,
+                  checkpoint: { documentId: 'doc-1', revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('privatize(')) return { result: { value: { marked: 0 } } };
+          if (expr.includes('quiet(')) return { result: { value: { quiet: true } } };
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.close = async () => { p.closed = true; };
+      return p;
+    };
+
+    const dataA = path.join(root, 'conn-a');
+    const dataB = path.join(root, 'conn-b');
+    const dataC = path.join(root, 'conn-c');
+    let usedA = null;
+    let usedB = null;
+    let usedC = null;
+
+    const hostA = new CamoufoxHost({
+      dataDir: dataA, persistentProfileDir: persistentDir, executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true, enableRdp: false, onRevokeConnection: () => {},
+      createProcess: ({ profileDir }) => { usedA = profileDir; return makeMockProc(); },
+    });
+    const caller = makeCaller('u-persist');
+    assert.equal((await hostA.execute({ action: 'status' }, caller)).profilePersistence, 'persistent-pending');
+    const t1 = await hostA.execute({ action: 'open', url: 'https://app.test/' }, caller);
+    const t2 = await hostA.execute({ action: 'open', url: 'https://app.test/' }, caller);
+    assert.equal(usedA, persistentDir);
+    assert.equal((await hostA.execute({ action: 'status' }, caller)).profilePersistence, 'persistent');
+    assert.equal(existsSync(lockPath), true);
+
+    // Second live host conflicts with lock -> falls back to ephemeral-busy isolated profile
+    const hostB = new CamoufoxHost({
+      dataDir: dataB, persistentProfileDir: persistentDir, executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true, enableRdp: false, onRevokeConnection: () => {},
+      createProcess: ({ profileDir }) => { usedB = profileDir; return makeMockProc(); },
+    });
+    await hostB.execute({ action: 'open', url: 'https://app.test/' }, caller);
+    assert.notEqual(usedB, persistentDir);
+    assert.equal((await hostB.execute({ action: 'status' }, caller)).profilePersistence, 'ephemeral-busy');
+
+    // Handoff both tabs in hostA and verify resume-all returns both to automation
+    await hostA.execute({ action: 'handoff', tabId: t1.tabId }, caller);
+    await hostA.execute({ action: 'handoff', tabId: t2.tabId }, caller);
+    assert.equal((await hostA.execute({ action: 'status' }, caller)).pausedCount, 2);
+    hostA.triggerControlBarAction('resume-all');
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && (await hostA.execute({ action: 'status' }, caller)).pausedCount > 0) {
+      await new Promise(r => setTimeout(r, 25));
+    }
+    assert.equal((await hostA.execute({ action: 'status' }, caller)).pausedCount, 0);
+
+    await hostB.close();
+    await hostA.close();
+    assert.equal(existsSync(lockPath), false, 'clean close releases persistent profile lock');
+
+    // Write a stale lock owned by a non-existent PID -> next host recovers and acquires persistent dir
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999, connectionId: 'dead', acquiredAt: 1 }), 'utf8');
+    const hostC = new CamoufoxHost({
+      dataDir: dataC, persistentProfileDir: persistentDir, executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true, enableRdp: false, onRevokeConnection: () => {},
+      createProcess: ({ profileDir }) => { usedC = profileDir; return makeMockProc(); },
+    });
+    await hostC.execute({ action: 'open', url: 'https://app.test/' }, caller);
+    assert.equal(usedC, persistentDir);
+    assert.equal((await hostC.execute({ action: 'status' }, caller)).profilePersistence, 'persistent');
+    await hostC.close();
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

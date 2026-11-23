@@ -184,13 +184,30 @@ async function startFixtureServer() {
       res.end('ok');
       return;
     }
+    if (u.pathname === '/privacy-link') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>Privacy Policy Trap</title><p>Should not have navigated here</p>');
+      return;
+    }
     if (u.pathname === '/form') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><title>Runner Form</title>
+        <style>
+          .consent-wrap { position: relative; display: inline-flex; align-items: center; width: 420px; padding-left: 28px; height: 28px; cursor: pointer; }
+          .consent-wrap input { position: absolute; opacity: 0; width: 1px; height: 1px; left: 0; top: 0; }
+          .consent-box { position: absolute; left: 4px; top: 6px; width: 16px; height: 16px; border: 1px solid #333; }
+        </style>
         <label>Email <input id="email"></label>
         <label>Plan <select id="plan"><option value="free">Free</option><option value="pro">Pro</option></select></label>
-        <button onclick="fetch('/click-hit');document.querySelector('[role=status]').textContent='Saved '+email.value+' '+plan.value">Save</button>
-        <p role="status"></p>`);
+        <label class="consent-wrap">
+          <input id="agreeBox" type="checkbox">
+          <span class="consent-box"></span>
+          <span>I agree to the <a id="privacyLink" href="/privacy-link">HubSpot Terms and Privacy Policy</a></span>
+        </label>
+        <button onclick="fetch('/click-hit');document.querySelector('[role=status]').textContent='Saved '+email.value+' '+plan.value+' '+agreeBox.checked">Save</button>
+        <p role="status"></p>
+        <div style="height:1800px">Tall spacer</div>
+        <p id="bottomMarker">Bottom reached</p>`);
       return;
     }
     state.ua = req.headers['user-agent'] || '';
@@ -517,8 +534,21 @@ test('live Camoufox 158: token-saving perception, complete network/WebSocket/wor
   const closedSes = await host.execute({ action: 'close_session', sessionId: sesB.sessionId }, caller.next());
   assert.equal(closedSes.cleanupComplete, true);
 
-  // 8. Hardened Camoufox `run` script runner (form flow + network block!)
-  const formTab = (await host.execute({ action: 'open', url: srv.url + 'form' }, caller.next())).tabId;
+  // 8. Checkbox label with nested link avoids clicking link, page-level scroll works without ref/target/point, and hardened Camoufox `run` script runner
+  const formOpened = await host.execute({ action: 'open', url: srv.url + 'form' }, caller.next());
+  const formTab = formOpened.tabId;
+  const agreeMatch = formOpened.text.match(/(e\d+) checkbox "I agree to the HubSpot Terms and Privacy Policy"/);
+  assert.ok(agreeMatch, `Expected hidden consent checkbox proxy in:\n${formOpened.text}`);
+  const agreeClick = await host.execute({ action: 'click', tabId: formTab, ref: agreeMatch[1] }, caller.next());
+  assert.equal(agreeClick.disposition, 'executed');
+  const agreeState = await host.execute({ action: 'evaluate', tabId: formTab, expression: '({ url: location.pathname, checked: document.getElementById("agreeBox").checked })' }, caller.next());
+  assert.deepEqual(agreeState.value, { url: '/form', checked: true }, 'clicking checkbox label with nested link must check checkbox without navigating to link');
+
+  const scrolled = await host.execute({ action: 'scroll', tabId: formTab, deltaY: 450 }, caller.next());
+  assert.equal(scrolled.disposition, 'executed');
+  const scrollY = await host.execute({ action: 'evaluate', tabId: formTab, expression: 'window.scrollY' }, caller.next());
+  assert.ok(scrollY.value >= 300, `Expected page-level scroll to move window.scrollY >= 300, got ${scrollY.value}`);
+
   const clicksBefore = srv.state.clicks;
   const ran = await host.execute({
     action: 'run', tabId: formTab,
@@ -526,14 +556,14 @@ test('live Camoufox 158: token-saving perception, complete network/WebSocket/wor
       await page.getByLabel('Email').fill('cfx@example.test');
       await page.getByRole('combobox', { name: 'Plan' }).selectOption('pro');
       await page.getByRole('button', { name: 'Save' }).click();
-      await page.waitForText('Saved cfx@example.test pro');
+      await page.waitForText('Saved cfx@example.test pro true');
       let net = 'blocked';
       try { await fetch(${JSON.stringify(srv.url + 'click-hit')}); net = 'open'; } catch {}
       return { text: await page.getByRole('status').innerText(), net };
     `,
   }, caller.next());
   assert.equal(ran.status, 'ok', ran.text);
-  assert.match(ran.text, /Saved cfx@example\.test pro/);
+  assert.match(ran.text, /Saved cfx@example\.test pro true/);
   assert.match(ran.text, /"net":"blocked"/);
   assert.equal(srv.state.clicks, clicksBefore + 1, 'run script must execute Save click once and block direct fetch');
 

@@ -885,3 +885,52 @@ test('packaged connection authority: WB_AUTOMATION_MODE=elevated opts into sensi
   assert.equal(elEval.isError, true, textOf(elEval));
   assert.match(textOf(elEval), /SENSITIVE_PRESENT/);
 });
+
+test('packaged connection authority: Camoufox persists default profile across clean restarts and isolates concurrent connections as ephemeral-busy', { timeout: 90000 }, async t => {
+  const context = await connectionEnvironment(t);
+  const page = await fixture(t);
+
+  // 1. First connection acquires persistent default profile and stores cookie + localStorage.
+  const first = await plainClient(t, context);
+  assert.equal(dataOf(await first.call({ action: 'status' })).profilePersistence, 'persistent-pending');
+  const open1 = await first.call({ action: 'open', url: page.url + 'sessions/persist' });
+  assert.equal(open1.isError, false, textOf(open1));
+  const tab1 = tabOf(open1);
+  assert.equal(dataOf(await first.call({ action: 'status' })).profilePersistence, 'persistent');
+  const write1 = await first.call({
+    action: 'evaluate', tabId: tab1, world: 'page',
+    expression: 'document.cookie="persistToken=kept-v061; Path=/; Max-Age=3600"; localStorage.setItem("persistKey","kept-v061"); "ok"',
+  });
+  assert.equal(write1.isError, false, textOf(write1));
+
+  // 2. Concurrent second connection on the same WB_DATA_DIR falls back to ephemeral-busy without touching persistent storage.
+  const busy = await plainClient(t, context);
+  const openBusy = await busy.call({ action: 'open', url: page.url + 'sessions/busy' });
+  assert.equal(openBusy.isError, false, textOf(openBusy));
+  assert.equal(dataOf(await busy.call({ action: 'status' })).profilePersistence, 'ephemeral-busy');
+  const readBusy = await busy.call({
+    action: 'evaluate', tabId: tabOf(openBusy),
+    expression: '({ cookie: document.cookie, local: localStorage.getItem("persistKey") })',
+  });
+  assert.deepEqual(valueOf(readBusy), { cookie: '', local: null });
+  await busy.client.close();
+
+  // 3. Cleanly close first connection so Camoufox flushes profile and releases the lock.
+  await first.client.close();
+  await until(async () => {
+    try { await stat(path.join(context.directory, 'profiles', 'camoufox-default.lock')); return false; }
+    catch (err) { return err?.code === 'ENOENT'; }
+  }, 'persistent profile lock released on clean MCP close');
+
+  // 4. New connection against the same WB_DATA_DIR reuses the persistent default profile and reads back the saved login state.
+  const second = await plainClient(t, context);
+  const open2 = await second.call({ action: 'open', url: page.url + 'sessions/persist' });
+  assert.equal(open2.isError, false, textOf(open2));
+  assert.equal(dataOf(await second.call({ action: 'status' })).profilePersistence, 'persistent');
+  const read2 = await second.call({
+    action: 'evaluate', tabId: tabOf(open2),
+    expression: '({ cookie: document.cookie, local: localStorage.getItem("persistKey") })',
+  });
+  assert.equal(read2.isError, false, textOf(read2));
+  assert.deepEqual(valueOf(read2), { cookie: 'persistToken=kept-v061', local: 'kept-v061' });
+});

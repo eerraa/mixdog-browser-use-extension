@@ -7,7 +7,9 @@
 // Changed: the measurement no longer scrolls the target or its frames into
 // view, because the host prepares the exact target and ancestor viewports
 // first (frames.mjs `prepare`); the resolver reads the validated element from
-// the isolated-world global `__independentTargetSnapshot` (renamed); TypeScript
+// the isolated-world global `__independentTargetSnapshot` (renamed); label
+// proxy targeting avoids nested interactive descendants (such as links inside
+// consent checkbox labels) and probes left-edge checkbox positions; TypeScript
 // types removed.
 
 /** Two layout samples a frame apart fence movement; measuring never mutates
@@ -66,8 +68,12 @@ export function browserRefPointExpression(ref) {
       offsetX += frameRect.left;
       offsetY += frameRect.top;
     }
-    const points = [
+    const basePoints = [
       [0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+    ];
+    const labelPoints = [
+      [0.04, 0.5], [0.12, 0.5], [0.04, 0.25], [0.04, 0.75],
+      [0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75], [0.9, 0.5],
     ];
     const controlSelector = 'a[href],button,input,select,textarea,summary,[role="button"],[role="link"]';
     const controlFor = (value) => value?.matches?.(controlSelector)
@@ -110,19 +116,21 @@ export function browserRefPointExpression(ref) {
       const rect = candidate === el ? targetRect : candidate.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) continue;
       visible = true;
-      for (const [rx, ry] of points) {
+      const samplePoints = candidate === el ? basePoints : labelPoints;
+      for (const [rx, ry] of samplePoints) {
         const x = Math.round(Math.min(Math.max(0, window.innerWidth - 1), Math.max(0, offsetX + rect.left + rect.width * rx)));
         const y = Math.round(Math.min(Math.max(0, window.innerHeight - 1), Math.max(0, offsetY + rect.top + rect.height * ry)));
         const hit = deepHit(x, y);
         const targetControl = controlFor(el);
         const hitControl = controlFor(hit);
+        const sameOrNoOtherControl = !hitControl || hitControl === targetControl;
         const related = hit && (
           hit === el
-          || hit === candidate
-          || (candidate.contains(hit) && (!hitControl || hitControl === targetControl))
+          || (hit === candidate && sameOrNoOtherControl)
+          || (candidate.contains(hit) && sameOrNoOtherControl)
           || (targetControl && hitControl === targetControl)
           || sameDestination(targetControl, hitControl)
-          || labelControl(hit) === el
+          || (labelControl(hit) === el && sameOrNoOtherControl)
         );
         if (related) return { x, y };
         covering = hit || covering;

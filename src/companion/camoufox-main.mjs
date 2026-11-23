@@ -9,13 +9,15 @@ import { CallerAuthority, withoutLease } from '../shared/authority.mjs';
 import { CamoufoxHost } from '../browser/camoufox/host.mjs';
 import { BrowserPolicy } from '../browser/policy.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
-import { automationMode, camoufoxExecutable, connectionPaths, pluginData } from '../shared/paths.mjs';
+import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, pluginData } from '../shared/paths.mjs';
 
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
+const authority = authorityMode();
+const dataRoot = pluginData();
 const envAutomationMode = automationMode();
-const paths = connectionPaths(pluginData(), channel);
+const paths = connectionPaths(dataRoot, channel);
 if (!key || !/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error('Companion launch credential is missing');
 mkdirSync(paths.directory, { recursive: true });
 
@@ -56,9 +58,14 @@ async function main() {
   const automationModeSource = envAutomationMode ? 'env' : policy.explicitAutomationMode ? 'policy' : 'default';
   const camoufox = camoufoxExecutable(root);
   const headless = process.env.WB_HEADLESS === '1' || process.env.WB_HEADLESS === 'true';
+  const persistentPref = process.env.WB_PERSISTENT_PROFILE;
+  const usePersistent = persistentPref === '1' || persistentPref === 'true'
+    || (authority === 'connection' && persistentPref !== '0' && persistentPref !== 'false');
+  const persistentProfileDir = usePersistent ? path.join(dataRoot, 'profiles', 'camoufox-default') : null;
 
   host = new CamoufoxHost({
     dataDir: paths.directory,
+    persistentProfileDir,
     executablePath: camoufox.executablePath,
     camoufoxVersion: camoufox.version,
     controlBarPath: path.join(root, 'bin', 'control-bar.exe'),

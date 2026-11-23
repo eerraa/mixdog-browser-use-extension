@@ -154,7 +154,7 @@ export function validateArgs(args) {
     }
   }
   const targets = [args.ref, args.target, args.point].filter(v => v !== undefined).length;
-  if (targets > 1 || (['click', 'fill', 'type', 'press', 'select', 'scroll', 'upload', 'inspect'].includes(args.action) && targets !== 1)) {
+  if (targets > 1 || (['click', 'fill', 'type', 'press', 'select', 'upload', 'inspect'].includes(args.action) && targets !== 1)) {
     fail('INVALID_ARGUMENT', 'Supply exactly one ref, target, or supported point');
   }
   if (['fill', 'type'].includes(args.action) && (typeof args.text !== 'string' || args.text.length > 100000)) {
@@ -164,8 +164,14 @@ export function validateArgs(args) {
   if (args.action === 'select' && (!Array.isArray(args.values) || !args.values.length || args.values.some(v => !text(v, 4096)))) {
     fail('INVALID_ARGUMENT', 'values must be a nonempty string array');
   }
-  if (args.action === 'scroll' && (!Number.isFinite(args.deltaX) || !Number.isFinite(args.deltaY)
-    || Math.abs(args.deltaX) > 10000 || Math.abs(args.deltaY) > 10000)) fail('INVALID_ARGUMENT', 'Bounded deltaX and deltaY are required');
+  if (args.action === 'scroll') {
+    const hasX = args.deltaX !== undefined, hasY = args.deltaY !== undefined;
+    if ((!hasX && !hasY)
+      || (hasX && (!Number.isFinite(args.deltaX) || Math.abs(args.deltaX) > 10000))
+      || (hasY && (!Number.isFinite(args.deltaY) || Math.abs(args.deltaY) > 10000))) {
+      fail('INVALID_ARGUMENT', 'Bounded deltaX and/or deltaY are required');
+    }
+  }
   if (args.action === 'evaluate' && !text(args.expression)) fail('INVALID_ARGUMENT', 'expression is required; frame is optional');
   if (args.world !== undefined && !['isolated', 'page'].includes(args.world)) fail('INVALID_ARGUMENT', 'world must be isolated or page');
   if (args.action === 'console' || args.action === 'network') {

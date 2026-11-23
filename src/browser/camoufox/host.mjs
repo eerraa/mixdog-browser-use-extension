@@ -6,7 +6,7 @@
 // native alert/confirm/prompt dialogs, standard vs elevated automation mode,
 // Win32 Control Bar handoff/Stop/Revert, and hardened Camoufox `run` sandboxes.
 import { createHash } from 'node:crypto';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { FenceQueue } from '../queue.mjs';
@@ -150,9 +150,11 @@ export class CamoufoxHost {
   #activeTabId = null;
   #pendingAttach = null;
   #earlyMessages = new Map(); // sessionId → Array<{ method, params }>
+  #profileLockPath = null;
+  #profilePersistence = 'ephemeral';
 
   constructor({
-    dataDir, executablePath, camoufoxVersion = '158.0.1-beta.41', controlBarPath = null,
+    dataDir, persistentProfileDir = null, executablePath, camoufoxVersion = '158.0.1-beta.41', controlBarPath = null,
     onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
     automationModeSource = policy.explicitAutomationMode ? 'policy' : 'default',
@@ -166,6 +168,9 @@ export class CamoufoxHost {
       throw new TypeError('automationMode must be standard or elevated');
     }
     this.dataDir = dataDir;
+    this.persistentProfileDir = typeof persistentProfileDir === 'string' && path.isAbsolute(persistentProfileDir)
+      ? persistentProfileDir : null;
+    this.#profilePersistence = this.persistentProfileDir ? 'persistent-pending' : 'ephemeral';
     this.executablePath = executablePath;
     this.camoufoxVersion = camoufoxVersion;
     this.headless = headless;
@@ -194,6 +199,7 @@ export class CamoufoxHost {
       runtime: `Camoufox ${this.camoufoxVersion}`,
       connectionId: this.connectionId,
       automationMode: this.#automationMode,
+      profilePersistence: this.#profilePersistence,
       tabCount: [...this.#pages.values()].filter(p => !p.closed).length,
       pausedCount: [...this.#pages.values()].filter(p => !p.closed && p.paused).length,
       capabilities: {
@@ -242,13 +248,74 @@ export class CamoufoxHost {
     };
   }
 
+  static #pidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return error?.code === 'EPERM'; }
+  }
+
+  async #acquireProfileDir() {
+    const connProfilesRoot = path.join(this.dataDir, 'profiles');
+    await mkdir(connProfilesRoot, { recursive: true });
+    if (this.persistentProfileDir) {
+      const lockPath = `${this.persistentProfileDir}.lock`;
+      await mkdir(path.dirname(this.persistentProfileDir), { recursive: true });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const fh = await open(lockPath, 'wx');
+          try {
+            await fh.writeFile(JSON.stringify({ pid: process.pid, connectionId: this.connectionId, acquiredAt: Date.now() }));
+          } finally {
+            await fh.close();
+          }
+          await mkdir(this.persistentProfileDir, { recursive: true });
+          this.#profileLockPath = lockPath;
+          this.#profilePersistence = 'persistent';
+          await writeFile(path.join(connProfilesRoot, 'camoufox.persistent.json'),
+            JSON.stringify({ profileDir: this.persistentProfileDir, persistent: true }), 'utf8').catch(() => {});
+          return this.persistentProfileDir;
+        } catch (error) {
+          if (error?.code !== 'EEXIST') break;
+          let ownerPid = 0;
+          try { ownerPid = JSON.parse(await readFile(lockPath, 'utf8'))?.pid ?? 0; } catch { ownerPid = 0; }
+          if (ownerPid === 0) {
+            const info = await stat(lockPath).catch(() => null);
+            if (info && Date.now() - info.mtimeMs < 2000) {
+              await pause(50);
+              try { ownerPid = JSON.parse(await readFile(lockPath, 'utf8'))?.pid ?? 0; } catch { ownerPid = 0; }
+              if (ownerPid === 0) {
+                this.#profilePersistence = 'ephemeral-busy';
+                break;
+              }
+            }
+          }
+          if (CamoufoxHost.#pidAlive(ownerPid)) {
+            this.#profilePersistence = 'ephemeral-busy';
+            break;
+          }
+          await unlink(lockPath).catch(() => {});
+        }
+      }
+    }
+    const fallbackDir = path.join(connProfilesRoot, 'camoufox');
+    await mkdir(fallbackDir, { recursive: true });
+    if (this.#profilePersistence !== 'ephemeral-busy') this.#profilePersistence = 'ephemeral';
+    return fallbackDir;
+  }
+
+  async #releaseProfileLock() {
+    if (!this.#profileLockPath) return;
+    const lockPath = this.#profileLockPath;
+    this.#profileLockPath = null;
+    await unlink(lockPath).catch(() => {});
+  }
+
   async #ensureBrowser() {
     if (this.#closed || this.#revoking) fail('CONNECTION_CLOSED', 'Browser connection is closed or terminating revocation');
     if (this.#proc && !this.#proc.closed) return this.#proc;
     if (this.#startFlight) return this.#startFlight;
     this.#startFlight = (async () => {
-      const profileDir = path.join(this.dataDir, 'profiles', 'camoufox');
-      await mkdir(profileDir, { recursive: true });
+      const profileDir = await this.#acquireProfileDir();
       const proc = this.createProcess
         ? await this.createProcess({ profileDir, enableRdp: this.enableRdp, headless: this.headless, locale: this.locale })
         : new CamoufoxProcess({
@@ -261,7 +328,12 @@ export class CamoufoxHost {
           if (!p.closed) { p.connected = false; this.#pause(p, 'presentation-lost'); }
         }
       });
-      await proc.start();
+      try {
+        await proc.start();
+      } catch (error) {
+        await this.#releaseProfileLock();
+        throw error;
+      }
       this.#proc = proc;
       if (this.enableRdp && proc.rdpPort) {
         this.#rdp = this.createRdp ? this.createRdp(proc.rdpPort) : new FirefoxRdpClient(proc.rdpPort);
@@ -273,9 +345,12 @@ export class CamoufoxHost {
 
   #syncControlBar() {
     if (this.#closed) return;
-    const tabs = [...this.#pages.values()].filter(p => !p.closed).map(p => p.presentation.barEntry());
+    const tabs = [...this.#pages.values()]
+      .filter(p => !p.closed)
+      .map(p => p.presentation.barEntry({ title: p.currentTitle, url: p.currentUrl }));
+    const browserPid = this.#proc?.pid ?? 0;
     if (!tabs.length) {
-      this.#controlBar.sync({ elevated: this.#automationMode === 'elevated', activeId: '', tabs: [], visible: false });
+      this.#controlBar.sync({ elevated: this.#automationMode === 'elevated', activeId: '', tabs: [], visible: false, browserPid });
       return;
     }
     if (!this.#activeTabId || !this.#pages.get(this.#activeTabId) || this.#pages.get(this.#activeTabId).closed) {
@@ -286,6 +361,7 @@ export class CamoufoxHost {
       activeId: this.#activeTabId,
       tabs,
       visible: true,
+      browserPid,
     });
   }
 
@@ -298,6 +374,14 @@ export class CamoufoxHost {
     if (this.#closed || this.#revoking) return;
     if (action === 'revoke') { this.#revoke().catch(() => {}); return; }
     if (action === 'revert-standard') { this.#revertToStandard(); return; }
+    if (action === 'resume-all') {
+      for (const q of this.#pages.values()) {
+        if (!q.closed && (q.presentation.mode !== 'automation' || q.paused)) {
+          this.#resume(q).catch(() => {});
+        }
+      }
+      return;
+    }
     const p = (tabId && this.#pages.get(tabId)) || (this.#activeTabId && this.#pages.get(this.#activeTabId));
     if (!p || p.closed) return;
     if (action === 'stop-automation') {
@@ -822,8 +906,10 @@ export class CamoufoxHost {
       if (!model.frames.has(frameId)) this.#refs.retireDocument(p.id, frameId);
     }
     p.model = model;
+    const prevUrl = p.currentUrl, prevTitle = p.currentTitle;
     p.currentUrl = model.url || p.currentUrl;
     p.currentTitle = model.title || p.currentTitle;
+    if (p.currentUrl !== prevUrl || p.currentTitle !== prevTitle) this.#syncControlBar();
     return model;
   }
 
@@ -1543,6 +1629,21 @@ export class CamoufoxHost {
             state.code = error.code;
           }
           state.acked = true;
+        } else if (args.action === 'scroll' && !args.ref && !args.target && !args.point) {
+          const root = p.driver.rootFrame();
+          if (!root) fail('STALE_FRAME', 'The root frame is not available; observe again');
+          await p.driver.inputReady(root.frameId, laneSignal);
+          this.#owned(p.id, caller, laneSignal, true);
+          state.frameId = root.frameId;
+          armed = this.#arm(p);
+          const dx = args.deltaX ?? 0, dy = args.deltaY ?? 0;
+          await p.driver.evaluate(root, `(() => {
+            const scroller = document.scrollingElement || document.documentElement;
+            if (!scroller) throw new Error('No document scroller');
+            scroller.scrollBy({ left: ${dx}, top: ${dy}, behavior: 'instant' });
+            return { x: scroller.scrollLeft, y: scroller.scrollTop };
+          })()`, true, laneSignal, () => { this.#owned(p.id, caller, laneSignal, true); markSent(); });
+          state.acked = true;
         } else {
           const target = args.point
             ? await this.#validatePoint(p, args, caller, laneSignal)
@@ -1740,9 +1841,10 @@ export class CamoufoxHost {
       return;
     }
     if (args.action === 'scroll') {
+      const dx = args.deltaX ?? 0, dy = args.deltaY ?? 0;
       if (!entry) {
         await p.driver.send('Page.dispatchWheelEvent', {
-          x: point.x, y: point.y, deltaX: args.deltaX, deltaY: args.deltaY, deltaZ: 0, modifiers: 0,
+          x: point.x, y: point.y, deltaX: dx, deltaY: dy, deltaZ: 0, modifiers: 0,
         }, signal, () => { this.#owned(p.id, caller, signal, true); markSent(); });
         return;
       }
@@ -1756,7 +1858,7 @@ export class CamoufoxHost {
           el = el.parentElement || el.getRootNode()?.host;
         }
         (el || document.scrollingElement || document.documentElement).scrollBy({ left: dx, top: dy, behavior: 'instant' });
-      }`, [args.deltaX, args.deltaY], true, signal, () => { this.#owned(p.id, caller, signal, true); markSent(); });
+      }`, [dx, dy], true, signal, () => { this.#owned(p.id, caller, signal, true); markSent(); });
       return;
     }
 
@@ -1863,6 +1965,10 @@ export class CamoufoxHost {
     for (const p of this.#pages.values()) {
       if (!p.closed) { p.closedByAgent = true; this.#closePageRecord(p); }
     }
-    await this.#proc?.close();
+    try {
+      await this.#proc?.close();
+    } finally {
+      await this.#releaseProfileLock();
+    }
   }
 }

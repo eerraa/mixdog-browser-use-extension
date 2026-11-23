@@ -795,6 +795,14 @@ export class DevToolsRecorder {
     if (method === 'Network.requestFailed') {
       const entry = this.#live(sessionId, params.requestId);
       if (!entry) return;
+      // Firefox Juggler emits NS_ERROR_DOM_NETWORK_ERR when closing keepalive
+      // 204/2xx beacons even after the HTTP response succeeded.
+      if (entry.ty === 'beacon' && typeof entry.s === 'number' && entry.s >= 200 && entry.s < 400) {
+        entry.st = 'done';
+        this.#running.delete(entry);
+        this.#finish(entry, Date.now() / 1000);
+        return;
+      }
       entry.st = 'fail';
       entry.err = clip(params.errorCode || 'failed', 100);
       this.#running.delete(entry);

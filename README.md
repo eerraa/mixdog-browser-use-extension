@@ -117,9 +117,12 @@ claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_D
   호출자로 인증합니다. Mixdog 훅이 넣던 `_lease`는 쓰지 않으며, 인수로 보내면 아무것도 실행하지
   않고 거부합니다. 같은 세션의 하위 에이전트는 탭·프로필을 함께 쓰고, 다른 세션은 별도
   브라우저 프로세스·프로필을 씁니다.
-- 세션 도중 서버가 다시 시작되거나 `/mcp`로 다시 연결되면 새 브라우저로 시작합니다. 이전 탭과
-  로그인 상태는 이어지지 않으므로 페이지를 다시 엽니다. 도구 정의에는 연결마다 바뀌는 값이 없어
-  같은 세션에서 그대로 이어서 쓸 수 있습니다.
+- 세션 도중 서버가 다시 시작되거나 `/mcp`로 다시 연결되면 새 브라우저 연결로 시작하므로 이전
+  탭 ID는 닫힙니다(`CLOSED_TAB`). 다만 기본 Camoufox 엔진에서는 `WB_DATA_DIR\profiles\camoufox-default`
+  영구 기본 프로필을 잠금(`camoufox-default.lock`)으로 보호해 재사용하므로, 유휴 종료나 버전 업그레이드
+  뒤에도 자체 프로필의 로그인 상태가 유지됩니다(다른 브라우저 프로필은 복사하지 않으며, 동시에 다른
+  연결이 잠금을 사용 중이면 자동으로 격리된 임시 프로필 `ephemeral-busy`로 떨어지고, `WB_PERSISTENT_PROFILE=0`으로
+  영구 프로필을 끌 수 있습니다). 도구 정의에는 연결마다 바뀌는 값이 없어 같은 세션에서 그대로 이어서 쓸 수 있습니다.
 - `WB_DATA_DIR`: 연결별 Electron 데이터·프로필·다운로드를 둘 절대 경로입니다. Mixdog 데이터와
   섞이지 않으며 연결 키를 디스크에 쓰지 않습니다. 연결이 끝나도 프로필 폴더는 지우지 않습니다.
 - 둘 중 하나라도 없거나 잘못되면 서버가 시작하지 않으며 `claude mcp get win-browser`에 실패로
@@ -150,10 +153,13 @@ C:\설치루트\win-browser-runtime\camoufox              ← 버전 간 공유 
   `browser-policy.json`에 `"engine": "electron"`을 추가합니다(`camoufox`·`electron` 외 값은
   시작 시 거부). Camoufox 실행 파일은 `WB_CAMOUFOX_PATH` → 패키지 내부 `camoufox/` →
   공유 `<설치루트>\win-browser-runtime\camoufox` 순으로 찾습니다.
-- **Camoufox 제어 막대**: Camoufox 창에는 DOM 오버레이를 주입하지 않고 별도의 포커스 비탈취
-  Win32 Control Bar(`bin/control-bar.exe`)로 **직접 조작 / 에이전트에게 돌려주기 / 에이전트 중지 /
-  권한 상승 · 해제 / 연결 회수**를 제공합니다. Camoufox에서는 `window.prompt()`까지 네이티브로
-  지원하며, `WB_ENGINE=electron`에서는 기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따릅니다.
+- **Camoufox 제어 막대**: Camoufox 창에는 DOM 오버레이를 주입하지 않고, Camoufox 창에 직접
+  도킹(`GWLP_HWNDPARENT`, 최상단 고정 없음)되는 슬림 Win32 Control Bar(`bin/control-bar.exe`)를
+  제공합니다. 다른 앱 위로 떠다니지 않고 Camoufox 창 이동·최소화·Z-순서를 함께 따르며(일반 창은 상단
+  바로 위, 최대화 시에는 탭·주소창을 가리지 않도록 하단 작업 영역 가장자리에 밀착), 탭별 페이지
+  제목 표시와 **직접 조작 / 에이전트에게 돌려주기 / 모두 반환 / 에이전트 중지 / 권한 상승 · 해제 /
+  연결 회수**를 지원합니다. Camoufox에서는 `window.prompt()`까지 네이티브로 지원하며,
+  `WB_ENGINE=electron`에서는 기존 툴바·보호막 UI와 Electron 44.9.1 제약을 따릅니다.
 
 - 새 버전은 옆 폴더에 풀고 정션만 바꿉니다. 실행 중인 폴더는 덮어쓰지 않습니다.
 - 이미 실행 중인 연결은 시작할 때의 버전을 끝까지 쓰고, 다음 연결(새 세션, `/mcp` 재연결,

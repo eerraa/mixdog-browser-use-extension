@@ -19,7 +19,7 @@ notice of its changes, and the bundled `app/*.cjs.map` source maps embed them):
 | `cdp-execution.ts` | `src/browser/cdp-execution.mjs` | TypeScript types removed; the CDP request timeout imported from `./command` is a local constant (15 s) |
 | `actionability.ts` | `src/browser/actionability.mjs` | TypeScript types removed; `pause` comes from the plugin's async helper instead of `./settle` |
 | `stable-rect.ts` | `src/browser/perception/target-point.mjs` (`BROWSER_STABLE_RECT`) | scrolling removed from the measurement: the host prepares the exact target and ancestor viewports first, so geometry and hit testing stay mutation-free |
-| `snapshot-scripts.ts` | `src/browser/perception/target-point.mjs` (`browserRefPointExpression`), `src/browser/perception/semantics.mjs` (`compact`, `inferRole`, `accessibleName`, `stateList`) | only these are kept; the snapshot expression is not used. The ref-point resolver reads its element from the renamed isolated-world global `__independentTargetSnapshot`. The accessible name reads labels, `aria-labelledby` targets and element content through a plugin-owned rendered-text helper instead of `textContent`/`innerText`, and its `textContent` fallback is removed, so style, script and unrendered text never become names |
+| `snapshot-scripts.ts` | `src/browser/perception/target-point.mjs` (`browserRefPointExpression`), `src/browser/perception/semantics.mjs` (`compact`, `inferRole`, `accessibleName`, `stateList`) | only these are kept; the snapshot expression is not used. The ref-point resolver reads its element from the renamed isolated-world global `__independentTargetSnapshot`, avoids nested interactive descendants (such as links inside consent checkbox `<label>` proxies) and probes left-edge checkbox positions. The accessible name reads labels, `aria-labelledby` targets and element content through a plugin-owned rendered-text helper instead of `textContent`/`innerText`, and its `textContent` fallback is removed, so style, script and unrendered text never become names |
 | `semantic-query.ts` | `src/browser/perception/match.mjs` | only the element matcher is kept; TypeScript types removed |
 
 The independent perception walker composes the role, name and state helpers;
@@ -75,9 +75,11 @@ actual JavaScript inputs, including the adapted protocol implementation.
 
 The independent native sources (`bridge.cpp`, `consent.cpp`, `control-bar.cpp`)
 are included under `sources/native/`.
-`control-bar.exe` renders a floating non-focus-stealing Win32 Control Bar for
-Camoufox tabs (Take control, Return/Resume, Stop agent, Elevated · Revert,
-Revoke) using documented Win32 User32/GDI32/ComCtl32 APIs over stdin/stdout JSON.
+`control-bar.exe` renders a slim, non-topmost, owner-docked Win32 Control Bar
+attached to the Camoufox window (`GWLP_HWNDPARENT`, DWM extended frame bounds)
+for Camoufox tabs (page-title tab selector, Take control, Return/Resume, Return
+all, Stop agent, Elevated · Revert, Revoke) using documented Win32
+User32/GDI32/Toolhelp/DWM APIs over stdin/stdout JSON.
 Windows UserConsentVerifier is used through its documented desktop ABI;
 no credential or biometric data is returned to this plugin.
 Its separate no-prompt input-idle mode uses documented Win32 input, desktop,

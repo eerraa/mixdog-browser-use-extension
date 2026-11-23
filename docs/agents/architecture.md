@@ -15,7 +15,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 │    ├─ gateway (default Camoufox)
 │    │          bin/bridge.exe --browser          → runtime/electron.exe app/companion-camoufox.cjs ELECTRON_RUN_AS_NODE=1
 │    │             ├─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
-│    │             └─ bin/control-bar.exe (floating Win32 Control Bar, non-focus-stealing, stdin/stdout JSON)
+│    │             └─ bin/control-bar.exe (slim non-topmost Win32 Control Bar owner-docked to Camoufox, stdin/stdout JSON)
 │    └─ gateway (WB_ENGINE=electron fallback for WebHID/WebUSB)
 │               bin/bridge.exe --browser-electron → runtime/electron.exe app/companion.cjs          Electron main
 │                  ⇅ named pipe, newline JSON (RpcPeer), role "gateway"
@@ -58,7 +58,7 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/camoufox/presentation.mjs` | Camoufox handoff/Stop/return state machine and `ControlBarClient` stdin/stdout JSON bridge to `bin/control-bar.exe` | `CamoufoxPresentation`, `ControlBarClient` |
 | `src/browser/camoufox/runner-sandbox.mjs` | Dedicated hardened headless Camoufox sandbox per `run` (WebRTC off, dead proxy `127.0.0.1:9`, request interception abort-all, CSP `default-src 'none'`, nonce-checked isolated bridge binding) | `createCamoufoxRunnerSandboxFactory`, `CAMOUFOX_BOOTSTRAP_URL` |
 | `src/browser/camoufox/host.mjs` | Camoufox-backed 32-action host matching `BrowserHost` contract (perception, refs, diffs, signals, full Juggler/WS/RDP DevTools with privacy windows, Firefox BrowserContext sessions, elevated mode + one-way Control Bar revert, native `prompt` dialogs) | `CamoufoxHost` |
-| `native/control-bar.cpp` | Floating non-focus-stealing Win32 Control Bar (`bin/control-bar.exe`): tab selector, Take control / Return / Resume / Retry return, Stop agent, amber Elevated · Revert, Revoke, `FlashWindowEx` | `wWinMain` |
+| `native/control-bar.cpp` | Slim non-topmost Win32 Control Bar (`bin/control-bar.exe`) owner-docked to Camoufox (`GWLP_HWNDPARENT`, DWM extended frame bounds): page-title tab selector, Take control / Return / Resume / Retry return, Return all (`resume-all`), Stop agent, amber Elevated · Revert, Revoke, `FlashWindowEx` | `wmain` |
 | `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
 | `src/shared/paths.mjs` | caller authority of the registration, automation mode env parsing (`WB_AUTOMATION_MODE`), data root per authority, connection directory, pipe name | `authorityMode`, `automationMode`, `pluginData`, `connectionPaths`, `validChannel` |
@@ -155,7 +155,8 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 | --- | --- | --- |
 | `connections/<channel>/endpoint.json` | `{channel, key, pipe, protocol:1}`; hook authority only | removed on clean MCP close |
 | `connections/<channel>/electron/` | Electron userData | kept |
-| `connections/<channel>/profiles/<sha256(callerId)>/` | Default Chromium profile per authenticated caller | kept; never reused by a new connection |
+| `profiles/camoufox-default/` + `profiles/camoufox-default.lock` | Persistent default Camoufox profile under connection authority (`WB_PERSISTENT_PROFILE=0` opts out); atomic PID lock with `ephemeral-busy` fallback to per-connection `profiles/camoufox/` when another live connection holds the lock | kept across restarts/upgrades; lock removed on close or stale-PID recovery |
+| `connections/<channel>/profiles/<sha256(callerId)>/` | Default Electron profile (or per-connection Camoufox fallback/hook profile `profiles/camoufox/`) | kept; never reused by a new connection |
 | memory-only `independent-session-<uuid>` partition | Temporary browser session's Chromium storage | cleared on session close/connection end; partition object lives until companion exit |
 | `connections/<channel>/downloads/<sha256(callerId)>/` | Default session's `<uuid>-<sanitized name>` | kept |
 | `connections/<channel>/downloads/<sha256(callerId + NUL + ctxId)>/` | Temporary session's downloaded files | kept; pending downloads cancelled on session close |

@@ -339,8 +339,10 @@ closes when control returns.
   discarded before handoff). In `elevated` mode, accidental clicks or keys on
   the shield are ignored while automation runs so only explicit Take control,
   Stop agent, Elevated · Revert, or the native menu pause or downgrade it.
-- Scrolling uses the verified native DOM scroll container. A widget that
-  requires physical wheel gestures needs human handoff, not synthetic retries.
+- Scrolling works on either an explicit scroll container (`ref`/`target`/`point`)
+  or the main page (`scroll` with `tabId` and `deltaY`/`deltaX`, omitting the
+  target). A widget that requires physical wheel gestures needs human handoff,
+  not synthetic retries.
 - A terminated/revoked connection requires the user's explicit reconnection;
   do not edit plugin settings or silently replace it.
 - On Camoufox (default), real `alert`, `confirm` and `prompt` dialogs are all
@@ -348,10 +350,15 @@ closes when control returns.
   Under `WB_ENGINE=electron`, Electron 44.9.1 throws `prompt() is not supported.`
   before native `window.prompt()` creates a request; report a prompt-dependent app
   under Electron as blocked by that capability, not verified.
-- On Camoufox, human takeover, return, Stop, one-way Elevated revert and Revoke
-  live in the floating Win32 Control Bar (`bin/control-bar.exe`) so Firefox windows
-  stay native without DOM overlays, while the isolated-world `__wbTrustedInput`
-  guard still pauses automation on out-of-band trusted input.
+- On Camoufox, human takeover, return, Return all (`resume-all`), Stop, one-way
+  Elevated revert and Revoke live in the slim owner-docked Win32 Control Bar
+  (`bin/control-bar.exe`, attached to the Camoufox window without always-on-top)
+  so Firefox windows stay native without DOM overlays, while the isolated-world
+  `__wbTrustedInput` guard still pauses automation on out-of-band trusted input.
+  Under connection authority, the default Camoufox profile persists inside
+  `WB_DATA_DIR/profiles/camoufox-default` (protected by a PID lock, falling back
+  to `ephemeral-busy` when another live connection holds it; `status.profilePersistence`
+  reports the live state).
 
 ## Verification
 
