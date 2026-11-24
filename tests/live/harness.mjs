@@ -4,7 +4,7 @@ import http from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { BrowserHost } from '../../src/browser/host.mjs';
-import { BrowserPolicy } from '../../src/browser/policy.mjs';
+import { BrowserPolicy } from '../../src/shared/policy.mjs';
 import { configureBrowserIdentity } from '../../src/browser/user-agent.mjs';
 import { runAdditionalScenarios } from './scenarios.mjs';
 import { assertShielded, pageContents, pixelAt, presentationOf, refOf, rendered, toolbarPreloadPath } from './presentation.mjs';

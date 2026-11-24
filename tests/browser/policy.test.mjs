@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserPolicy } from '../../src/browser/policy.mjs';
+import { BrowserPolicy } from '../../src/shared/policy.mjs';
 
 const delegated = () => ({
   version: 1, mode: 'delegated', permissions: ['hid', 'usb', 'notifications', 'geolocation'],

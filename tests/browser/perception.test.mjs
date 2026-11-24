@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { walkerInstallSource, snapshotExpression, targetPointExpression } from '../../src/browser/perception/walker.mjs';
 import { ELEMENT_SEMANTICS } from '../../src/browser/perception/semantics.mjs';
 import { rankBrowserSemanticMatch } from '../../src/browser/perception/match.mjs';
@@ -394,4 +395,16 @@ test('settle: bounded under constant mutation, late navigations, requests, inter
   setTimeout(() => controller.abort(new Error('caller cancelled')), 10);
   await assert.rejects(settle({ armed: armNavigation(navigationSource().subscribe), signal: controller.signal,
     bounds: { ...fastBounds, probeMs: 1000 }, quiet: async () => ({ quiet: true }) }), /caller cancelled/);
+
+  // Normal settle completion must detach its abort listener from a long-lived caller signal.
+  const reused = new AbortController();
+  for (let i = 0; i < 5; i++) {
+    await settle({
+      armed: armNavigation(navigationSource().subscribe),
+      signal: reused.signal,
+      bounds: fastBounds,
+      quiet: async () => ({ quiet: true }),
+    });
+  }
+  assert.equal(getEventListeners(reused.signal, 'abort').length, 0, 'settle removes abort listeners on normal completion');
 });

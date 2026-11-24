@@ -8,7 +8,8 @@ import path from 'node:path';
 import { JugglerTransport, CamoufoxProcess, chunkCamouEnv, defaultCamouConfig, defaultCamouPrefs } from '../../src/browser/camoufox/juggler.mjs';
 import { FirefoxRdpTransport, FirefoxRdpClient } from '../../src/browser/camoufox/rdp.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient, formatPausedStatus, toolbarLabels } from '../../src/browser/camoufox/presentation.mjs';
-import { CamoufoxHost, pngClipMatchesTile } from '../../src/browser/camoufox/host.mjs';
+import { CamoufoxHost } from '../../src/browser/camoufox/host.mjs';
+import { pngClipMatchesTile } from '../../src/browser/camoufox/png.mjs';
 import { CamoufoxFrameDriver, INPUT_BINDING } from '../../src/browser/camoufox/driver.mjs';
 import { CAMOUFOX_BOOTSTRAP_URL, createCamoufoxRunnerSandboxFactory } from '../../src/browser/camoufox/runner-sandbox.mjs';
 import { deflateSync } from 'node:zlib';
@@ -1756,4 +1757,231 @@ test('CamoufoxHost cleans up finished downloads and detached target buffers so n
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('CamoufoxHost enforces C7 role/name ref drift on read and inspect and keeps closed-tab STALE_REF diagnosis', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-c7-'));
+  try {
+    let describedName = 'Original';
+    let describedRole = 'button';
+    let tabIdx = 0;
+    const makeProc = () => {
+      const p = new EventEmitter();
+      p.closed = false;
+      p.exited = false;
+      p.send = async (method, params = {}, sessionId = undefined) => {
+        if (method === 'Browser.newPage') {
+          const i = ++tabIdx;
+          const sid = `s-${i}`, tid = `t-${i}`;
+          queueMicrotask(() => {
+            p.emit('message', 'Browser.attachedToTarget', { sessionId: sid, targetInfo: { targetId: tid } });
+            p.emit('message', 'Page.frameAttached', { frameId: 'f-root' }, sid);
+          });
+          return { targetId: tid };
+        }
+        if (method === 'Page.setInitScripts') {
+          for (const sc of params.scripts) {
+            p.emit('message', 'Runtime.executionContextCreated', { executionContextId: `c-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } }, sessionId);
+          }
+          return {};
+        }
+        if (method === 'Page.navigate') {
+          p.emit('message', 'Page.navigationCommitted', { frameId: 'f-root', url: params.url }, sessionId);
+          p.emit('message', 'Page.eventFired', { frameId: 'f-root', name: 'DOMContentLoaded' }, sessionId);
+          return {};
+        }
+        if (method === 'Runtime.evaluate') {
+          const expr = String(params.expression ?? '');
+          if (expr.includes('snapshot(')) {
+            return {
+              result: {
+                value: {
+                  url: 'https://c7.test/', title: 'C7', scrollHeight: 400,
+                  checkpoint: { documentId: 'doc-1', revision: 1, x: 0, y: 0, w: 1120, h: 820 },
+                  nodes: [{ id: 1, p: 0, k: 'i', r: describedRole, n: describedName, b: [10, 10, 80, 24], vp: true, o: 0 }],
+                  texts: [], gone: [], renamed: [],
+                },
+              },
+            };
+          }
+          if (expr.includes('describe(')) {
+            return { result: { value: { described: { role: describedRole, name: describedName } } } };
+          }
+          return { result: { value: 0 } };
+        }
+        return {};
+      };
+      p.sendRaw = p.send;
+      p.start = async () => {};
+      p.close = async () => { p.closed = true; p.exited = true; return { exited: true }; };
+      return p;
+    };
+
+    const host = new CamoufoxHost({
+      dataDir: path.join(root, 'conn-c7'),
+      dataRoot: root,
+      executablePath: 'C:\\fake\\camoufox.exe',
+      headless: true,
+      enableRdp: false,
+      onRevokeConnection: () => {},
+      createProcess: () => makeProc(),
+    });
+    const caller = makeCaller('caller-c7');
+    const first = await host.execute({ action: 'open', url: 'https://c7.test/' }, caller);
+    const ref1 = first.text.match(/\b(e\d+)\s+button\s+"Original"/)?.[1];
+    assert.ok(ref1, 'initial button ref observed');
+
+    // Mutate name without re-observing: read must fail with STALE_REF.
+    describedName = 'Mutated';
+    await assert.rejects(
+      host.execute({ action: 'read', tabId: first.tabId, ref: ref1 }, caller),
+      err => err.code === 'STALE_REF' && /changed its role or name/.test(err.message),
+    );
+
+    // Re-observe to get fresh ref, then mutate role: inspect must fail with STALE_REF.
+    const obs2 = await host.execute({ action: 'observe', tabId: first.tabId }, caller);
+    const ref2 = obs2.text.match(/\b(e\d+)\s+button\s+"Mutated"/)?.[1];
+    assert.ok(ref2, 'fresh button ref observed');
+    describedRole = 'link';
+    await assert.rejects(
+      host.execute({ action: 'inspect', tabId: first.tabId, ref: ref2 }, caller),
+      err => err.code === 'STALE_REF' && /changed its role or name/.test(err.message),
+    );
+
+    // Closing tab 1 releases heavy buffers while retaining closed-tab STALE_REF diagnosis.
+    const second = await host.execute({ action: 'open', url: 'https://c7.test/' }, caller);
+    const obs3 = await host.execute({ action: 'observe', tabId: first.tabId }, caller);
+    const ref3 = obs3.text.match(/\b(e\d+)\s+link\s+"Mutated"/)?.[1];
+    assert.ok(ref3);
+    await host.execute({ action: 'close_tab', tabId: first.tabId }, caller);
+    await assert.rejects(
+      host.execute({ action: 'read', tabId: second.tabId, ref: ref3 }, caller),
+      err => err.code === 'STALE_REF' && /which is closed/.test(err.message),
+    );
+    await host.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CamoufoxProcess detaches startup stdout/stderr listeners once ready and drains cleanly', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'wb-cfx-stdio-'));
+  try {
+    let fakeChild = null;
+    let killCount = 0;
+    const proc = new CamoufoxProcess({
+      executablePath: 'C:\\fake\\camoufox.exe',
+      profileDir: path.join(root, 'profile'),
+      headless: true,
+      enableRdp: false,
+      spawnImpl: () => {
+        const child = new EventEmitter();
+        child.pid = 0;
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        const toBrowser = new PassThrough();
+        const fromBrowser = new PassThrough();
+        child.stdio = [null, child.stdout, child.stderr, toBrowser, fromBrowser];
+        child.kill = () => {
+          killCount++;
+          queueMicrotask(() => child.emit('exit', 0, null));
+          return true;
+        };
+        let buf = '';
+        toBrowser.on('data', chunk => {
+          buf += chunk.toString('utf8');
+          let idx;
+          while ((idx = buf.indexOf('\0')) !== -1) {
+            const msg = JSON.parse(buf.slice(0, idx));
+            buf = buf.slice(idx + 1);
+            if (msg.method === 'Browser.getInfo') {
+              fromBrowser.write(JSON.stringify({ id: msg.id, result: { userAgent: 'Firefox/158.0' } }) + '\0');
+            } else {
+              fromBrowser.write(JSON.stringify({ id: msg.id, result: {} }) + '\0');
+            }
+          }
+        });
+        queueMicrotask(() => child.stdout.write('Juggler listening to the pipe\n'));
+        fakeChild = child;
+        return child;
+      },
+    });
+    await proc.start();
+    assert.equal(fakeChild.stdout.listenerCount('data'), 0, 'startup stdout listener detached after start');
+    assert.equal(fakeChild.stderr.listenerCount('data'), 0, 'startup stderr listener detached after start');
+    // Post-startup chatter exceeding 64 KiB must drain without killing or closing the process.
+    fakeChild.stdout.write('x'.repeat(80 * 1024));
+    fakeChild.stderr.write('e'.repeat(80 * 1024));
+    await new Promise(r => setImmediate(r));
+    assert.equal(killCount, 0);
+    assert.equal(proc.closed, false);
+    await proc.close({ force: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CamoufoxFrameDriver caches iframe owners per parent documentId and invalidates on document replacement', async () => {
+  let docId = 'doc-1';
+  let describeCalls = 0;
+  const proc = {
+    send: async (method, params = {}) => {
+      if (method === 'Page.setInitScripts') {
+        for (const sc of params.scripts) {
+          driver.onMessage('Runtime.executionContextCreated', { executionContextId: `c-root-${sc.worldName}`, auxData: { frameId: 'f-root', name: sc.worldName } });
+          driver.onMessage('Runtime.executionContextCreated', { executionContextId: `c-child-${sc.worldName}`, auxData: { frameId: 'f-child', name: sc.worldName } });
+        }
+        return {};
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        const isRoot = params.executionContextId?.startsWith('c-root-');
+        if (expr.includes('snapshot(')) {
+          return {
+            result: {
+              value: isRoot
+                ? {
+                  url: 'https://parent.test/', title: 'Parent', scrollHeight: 400,
+                  checkpoint: { documentId: docId, revision: 1, x: 0, y: 0, w: 800, h: 600 },
+                  nodes: [{ id: 10, p: 0, k: 'f', r: 'iframe', n: 'Child', b: [0, 0, 300, 200], vp: true, o: 0 }],
+                  texts: [], gone: [], renamed: [],
+                }
+                : {
+                  url: 'https://child.test/', title: 'Child', scrollHeight: 200,
+                  checkpoint: { documentId: 'child-doc-1', revision: 1, x: 0, y: 0, w: 300, h: 200 },
+                  nodes: [], texts: [], gone: [], renamed: [],
+                },
+            },
+          };
+        }
+        if (expr.includes('resolve(')) return { result: { objectId: `obj-${docId}` } };
+        return { result: { value: null } };
+      }
+      if (method === 'Page.describeNode') {
+        describeCalls++;
+        return { contentFrameId: 'f-child' };
+      }
+      return {};
+    },
+    sendRaw: async (method, params = {}) => proc.send(method, params),
+  };
+  const page = { id: 't1', sessionId: 's-1', connected: true, onTrustedInput: () => {}, onNativeDialog: () => {}, onNativeDialogClosed: () => {}, onNativePicker: () => {} };
+  proc.closed = false;
+  const driver = new CamoufoxFrameDriver({ page, process: proc, sessionId: 's-1', rdp: null, invalidate: () => {} });
+  driver.onMessage('Page.frameAttached', { frameId: 'f-root', parentFrameId: null });
+  driver.onMessage('Page.frameAttached', { frameId: 'f-child', parentFrameId: 'f-root' });
+  await driver.start();
+
+  const first = await driver.snapshot();
+  assert.equal(first.find(f => f.frameId === 'f-child')?.ownerId, 10);
+  assert.equal(describeCalls, 1, 'first snapshot resolves iframe owner via Page.describeNode');
+
+  const second = await driver.snapshot();
+  assert.equal(second.find(f => f.frameId === 'f-child')?.ownerId, 10);
+  assert.equal(describeCalls, 1, 'second snapshot reuses cached iframe owner without extra describeNode RPC');
+
+  docId = 'doc-2';
+  const third = await driver.snapshot();
+  assert.equal(third.find(f => f.frameId === 'f-child')?.ownerId, 10);
+  assert.equal(describeCalls, 2, 'new parent documentId invalidates cached iframe owner');
 });

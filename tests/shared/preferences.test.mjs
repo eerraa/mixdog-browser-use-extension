@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   PREFERENCES_FILE, isProtectedInternalPath, loadUserPreferences, resolveAutomationMode, saveUserPreferences,
 } from '../../src/shared/preferences.mjs';
-import { BrowserPolicy } from '../../src/browser/policy.mjs';
+import { BrowserPolicy } from '../../src/shared/policy.mjs';
 
 test('user-preferences.json loads, validates strictly, persists atomically, and fails closed on corruption', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wb-prefs-'));

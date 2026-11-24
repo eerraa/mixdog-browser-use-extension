@@ -17,7 +17,7 @@ const { deliverFocus, FixtureContents, ownedViews, ownedWindows, profiles, dialo
 const { BrowserHost } = await import('../../src/browser/host.mjs');
 const { BrowserHostError } = await import('../../src/shared/contract.mjs');
 const { FrameDriver, INPUT_BINDING, INPUT_CREDIT_MS } = await import('../../src/browser/frames.mjs');
-const { BrowserPolicy } = await import('../../src/browser/policy.mjs');
+const { BrowserPolicy } = await import('../../src/shared/policy.mjs');
 const { loadUserPreferences } = await import('../../src/shared/preferences.mjs');
 
 // Stub ONLY the CDP boundary. Exercise the real host, queue, caller authority
@@ -3064,6 +3064,36 @@ test('BrowserHost uses single-RPC inspectTarget to skip resolveObject on in-view
   } finally {
     FrameDriver.prototype.inspectTarget = prevInspect;
     FrameDriver.prototype.resolveObject = prevResolve;
+    await host.close();
+  }
+});
+
+test('BrowserHost releases closed-tab buffers while keeping STALE_REF closed-tab diagnosis', async () => {
+  const { host, tab, tabId, call } = await setup();
+  try {
+    page.nodes = [button(1, 'CloseMe')];
+    const observed = await call({ action: 'observe', tabId, screenshot: true });
+    const ref = observed.text.match(/\b(e\d+)\s+button\s+"CloseMe"/)?.[1];
+    assert.ok(ref, 'ref observed on tab 1');
+    const pageRecord = drivers.get(tab.contents).page;
+    assert.ok(pageRecord.model && pageRecord.base && pageRecord.devtools, 'live page holds model, base, and devtools');
+
+    const second = await call({ action: 'open', url: 'https://example.test/two' });
+    await call({ action: 'close_tab', tabId });
+
+    assert.equal(pageRecord.closed, true);
+    assert.equal(pageRecord.model, null, 'closed page releases model');
+    assert.equal(pageRecord.base, null, 'closed page releases diff base');
+    assert.equal(pageRecord.shot, null, 'closed page releases screenshot buffer');
+    assert.equal(pageRecord.devtools, null, 'closed page releases DevToolsRecorder');
+    assert.deepEqual(pageRecord.downloads, [], 'closed page releases download entries');
+
+    await assert.rejects(
+      call({ action: 'click', tabId: second.tabId, ref }),
+      err => err.code === 'STALE_REF' && /which is closed/.test(err.message),
+      'tombstone still diagnoses refs from a closed tab',
+    );
+  } finally {
     await host.close();
   }
 });
