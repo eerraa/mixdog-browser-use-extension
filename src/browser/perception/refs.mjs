@@ -25,10 +25,15 @@ export class RefRegistry {
     if (!frames.has(frameId)) frames.set(frameId, new Set());
     return frames.get(frameId);
   }
-  #entries(tabId, frameId) {
+  *#iterEntries(tabId, frameId) {
     const frames = this.#byTab.get(tabId);
-    if (!frames) return [];
-    return frameId === undefined ? [...frames.values()].flatMap(set => [...set]) : [...(frames.get(frameId) ?? [])];
+    if (!frames) return;
+    if (frameId !== undefined) {
+      const set = frames.get(frameId);
+      if (set) yield* set;
+      return;
+    }
+    for (const set of frames.values()) yield* set;
   }
   #setState(entry, state) {
     entry.state = state;
@@ -61,9 +66,10 @@ export class RefRegistry {
   }
   /** Node removal or rename reported by the walker for one document. */
   gone(tabId, frameId, documentId, ids, renamed = []) {
+    if (!ids?.length && !renamed?.length) return;
     const removed = new Set(ids);
     const next = new Map(renamed);
-    for (const entry of this.#entries(tabId, frameId)) {
+    for (const entry of this.#iterEntries(tabId, frameId)) {
       if (entry.state !== 'live' || entry.documentId !== documentId) continue;
       if (next.has(entry.id)) { entry.successorId = next.get(entry.id); this.#setState(entry, 'renamed'); }
       else if (removed.has(entry.id)) this.#setState(entry, 'removed');
@@ -71,18 +77,20 @@ export class RefRegistry {
   }
   /** A frame's document was replaced (or the frame went away). */
   retireDocument(tabId, frameId, keepDocumentId = null) {
-    this.#retire(this.#entries(tabId, frameId), entry => entry.documentId !== keepDocumentId, 'replaced');
+    this.#retire(this.#iterEntries(tabId, frameId), entry => entry.documentId !== keepDocumentId, 'replaced');
   }
   /** Presentation generation changed (handoff, return, hide). */
   retireGeneration(tabId, keepGeneration) {
-    this.#retire(this.#entries(tabId), entry => entry.generation !== keepGeneration, 'retired');
+    this.#retire(this.#iterEntries(tabId), entry => entry.generation !== keepGeneration, 'retired');
   }
   retireTab(tabId) {
-    this.#retire(this.#entries(tabId), () => true, 'retired');
+    this.#retire(this.#iterEntries(tabId), () => true, 'retired');
   }
   /** Live refs of a tab, for diff bookkeeping. */
   live(tabId) {
-    return this.#entries(tabId).filter(entry => entry.state === 'live');
+    const out = [];
+    for (const entry of this.#iterEntries(tabId)) if (entry.state === 'live') out.push(entry);
+    return out;
   }
   get size() { return this.#byRef.size; }
   #forget(entry) {

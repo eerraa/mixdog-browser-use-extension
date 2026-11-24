@@ -9,7 +9,7 @@ import { browserRefPointExpression } from '../perception/target-point.mjs';
 import { bounded, pause } from '../../shared/async.mjs';
 import { fail, freshId } from '../../shared/contract.mjs';
 import { DEVTOOLS_LIMITS, INSPECT_ELEMENT } from '../devtools.mjs';
-import { paintHoldingExpression } from '../host-common.mjs';
+import { OWNER_STABLE, paintHoldingExpression } from '../host-common.mjs';
 import { clip, redactURL } from '../redact.mjs';
 import { quote as quoteText } from '../perception/render.mjs';
 import {
@@ -25,12 +25,6 @@ const ACTIONABLE_MS = 2000;
 const PAINT_HOLDING_MS = 350;
 const WALKER_SOURCE = walkerInstallSource(ELEMENT_SEMANTICS);
 const L = DEVTOOLS_LIMITS;
-
-const OWNER_STABLE = `function(){return new Promise(resolve=>{
-  const box=()=>{const r=this.getBoundingClientRect();return [r.left,r.top,r.width,r.height]};
-  const first=box();let frames=0;setTimeout(()=>resolve(false),1000);
-  const step=()=>{if(box().some((v,i)=>Math.abs(v-first[i])>1))return resolve(false);if(++frames>=2)return resolve(true);requestAnimationFrame(step)};
-  requestAnimationFrame(step)})}`;
 
 const PAINT_HOLDING_EXPRESSION = paintHoldingExpression(PAINT_HOLDING_MS);
 
@@ -91,7 +85,7 @@ export class CamoufoxFrameDriver {
   #worlds = new Map(); // frameId → Map<worldName, executionContextId>
   #worldWaiters = new Set();
   #rootFrameWaiters = new Set();
-  #pendingDialog = null;
+  #ownerCache = new Map(); // childFrameId → { parentFrameId, parentDocId, ownerId }
 
   constructor({ page, process: proc, sessionId, rdp, invalidate }) {
     this.page = page;
@@ -111,7 +105,6 @@ export class CamoufoxFrameDriver {
     this.beforeInputDispatch = null;
     this.beforeCleanupDispatch = null;
     this.rootFrameId = null;
-    this.ready = false;
   }
 
   isAttached() { return !this.proc.closed && !!this.page.connected; }
@@ -198,10 +191,6 @@ export class CamoufoxFrameDriver {
   }
 
   onMessage(method, params = {}) {
-    if (method === 'Page.ready') {
-      this.ready = true;
-      return;
-    }
     if (method === 'Page.crashed') {
       this.page.connected = false;
       this.invalidate('presentation-renderer-lost');
@@ -228,6 +217,7 @@ export class CamoufoxFrameDriver {
       this.pageWorlds.delete(params.frameId);
       this.#worlds.delete(params.frameId);
       this.owners.delete(params.frameId);
+      this.#ownerCache.delete(params.frameId);
       this.#inputReady.delete(params.frameId);
       this.invalidate('Page.frameDetached');
     } else if (method === 'Page.navigationStarted') {
@@ -292,10 +282,8 @@ export class CamoufoxFrameDriver {
         if (!this.claimInput(kind)) this.page.onTrustedInput?.(kind);
       }
     } else if (method === 'Page.dialogOpened') {
-      this.#pendingDialog = params;
       this.page.onDialogOpened?.(params);
     } else if (method === 'Page.dialogClosed') {
-      if (this.#pendingDialog?.dialogId === params.dialogId) this.#pendingDialog = null;
       this.page.onDialogClosed?.(params);
     } else if (method === 'Page.fileChooserOpened') {
       this.page.onFileChooserOpened?.(params);
@@ -490,20 +478,40 @@ export class CamoufoxFrameDriver {
       const parent = byId.get(parentFrameId);
       const emittedIframes = (parent.snapshot.nodes ?? []).filter(n => n.k === 'f');
       if (!emittedIframes.length) return;
-      const resolved = await Promise.all(emittedIframes.map(async n => {
-        const obj = await this.evaluate(parent.frame, resolveExpression(n.id, parent.snapshot.checkpoint.documentId), false, signal).catch(() => null);
+      const parentDocId = parent.snapshot.checkpoint.documentId;
+      const emittedIds = new Set(emittedIframes.map(n => n.id));
+      const remainingChildren = new Set(childSet);
+      const matchedOwnerIds = new Set();
+      for (const childId of childSet) {
+        const cached = this.#ownerCache.get(childId);
+        if (cached && cached.parentFrameId === parentFrameId && cached.parentDocId === parentDocId && emittedIds.has(cached.ownerId)) {
+          this.owners.set(childId, cached.ownerId);
+          remainingChildren.delete(childId);
+          matchedOwnerIds.add(cached.ownerId);
+        }
+      }
+      if (!remainingChildren.size) return;
+      const toResolve = emittedIframes.filter(n => !matchedOwnerIds.has(n.id));
+      const resolved = await Promise.all(toResolve.map(async n => {
+        const obj = await this.evaluate(parent.frame, resolveExpression(n.id, parentDocId), false, signal).catch(() => null);
         if (!obj?.objectId) return null;
         try {
           const desc = await this.send('Page.describeNode', { frameId: parent.frame.frameId, objectId: obj.objectId }, signal).catch(() => null);
-          return desc?.contentFrameId && childSet.has(desc.contentFrameId) ? [desc.contentFrameId, n.id] : null;
+          return desc?.contentFrameId && remainingChildren.has(desc.contentFrameId) ? [desc.contentFrameId, n.id] : null;
         } finally {
           this.disposeObject(parent.frame, obj.objectId);
         }
       }));
       for (const pair of resolved) {
-        if (pair && !this.owners.has(pair[0])) this.owners.set(pair[0], pair[1]);
+        if (pair && !this.owners.has(pair[0])) {
+          this.owners.set(pair[0], pair[1]);
+          this.#ownerCache.set(pair[0], { parentFrameId, parentDocId, ownerId: pair[1] });
+        }
       }
     }));
+    for (const childId of this.#ownerCache.keys()) {
+      if (!this.frames.has(childId)) this.#ownerCache.delete(childId);
+    }
 
     const activeOut = captures.map(({ frame, snapshot, error }) => ({
       frameId: frame.frameId,
@@ -764,13 +772,13 @@ export class CamoufoxFrameDriver {
     return this.evaluate(target, viewportExpression(), true, signal);
   }
 
-  async screenshot(signal = this.actorSignal) {
-    const vp = await this.viewport(null, signal);
-    const width = Math.max(1, Math.round(vp?.w || 1120));
-    const height = Math.max(1, Math.round(vp?.h || 820));
+  async screenshot(signal = this.actorSignal, vp = null) {
+    const view = vp ?? await this.viewport(null, signal);
+    const width = Math.max(1, Math.round(view?.w || 1120));
+    const height = Math.max(1, Math.round(view?.h || 820));
     const reply = await this.send('Page.screenshot', {
       mimeType: 'image/png',
-      clip: { x: Math.round(vp?.x || 0), y: Math.round(vp?.y || 0), width, height },
+      clip: { x: Math.round(view?.x || 0), y: Math.round(view?.y || 0), width, height },
       omitDeviceScaleFactor: true,
     }, signal);
     if (!reply?.data) fail('CAPTURE_FAILED', 'Browser image capture failed; observe again without replaying input');

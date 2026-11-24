@@ -7,7 +7,6 @@
 // Nothing produced while the person controls the page is recorded or exposed.
 import { fail } from '../shared/contract.mjs';
 import { clip, redactBody, redactClip, redactHeaders, redactText, redactURL } from './redact.mjs';
-export { clip, redactBody, redactHeaders, redactText, redactURL };
 
 export const DEVTOOLS_LIMITS = Object.freeze({
   console: 500, network: 1000, rows: 30, maxRows: 100, chars: 8192, maxChars: 65536,

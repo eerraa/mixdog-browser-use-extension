@@ -5,7 +5,7 @@ import { browserRefPointExpression, BROWSER_STABLE_RECT } from './perception/tar
 import { bounded, pause } from '../shared/async.mjs';
 import { fail, freshId } from '../shared/contract.mjs';
 import { DEVTOOLS_LIMITS } from './devtools.mjs';
-import { paintHoldingExpression } from './host-common.mjs';
+import { OWNER_STABLE, paintHoldingExpression } from './host-common.mjs';
 import { quote as quoteText } from './perception/render.mjs';
 import {
   actionTargetExpression, armGuardExpression, coveringExpression, describeExpression, disarmGuardExpression, hitExpression,
@@ -31,13 +31,6 @@ export const FRAME_CAP = 50;
 export const INPUT_CREDIT_MS = 500;
 // Binding visible only in the walker world: trusted page input outside an agent dispatch.
 export const INPUT_BINDING = '__wbTrustedInput';
-// A frame owner's box in its parent document, sampled now and after each of
-// the next two animation frames: true only if it never moved.
-const OWNER_STABLE = `function(){return new Promise(resolve=>{
-  const box=()=>{const r=this.getBoundingClientRect();return [r.left,r.top,r.width,r.height]};
-  const first=box();let frames=0;setTimeout(()=>resolve(false),1000);
-  const step=()=>{if(box().some((v,i)=>Math.abs(v-first[i])>1))return resolve(false);if(++frames>=2)return resolve(true);requestAnimationFrame(step)};
-  requestAnimationFrame(step)})}`;
 // Composed once from the walker and its role/name/state helpers
 // (walker.mjs, semantics.mjs).
 const WALKER_SOURCE = walkerInstallSource(ELEMENT_SEMANTICS);
@@ -588,8 +581,20 @@ export class FrameDriver {
         ? kept.get(frame.id) : this.#snapshotFrame(frame))));
     }
     const byId = new Map(results.map(result => [result.frameId, result]));
+    const emittedByParent = new Map();
+    const emittedFor = parentResult => {
+      if (!parentResult?.snapshot) return null;
+      let set = emittedByParent.get(parentResult.frameId);
+      if (!set) {
+        set = new Set();
+        for (const node of parentResult.snapshot.nodes) if (node.k === 'f') set.add(node.id);
+        emittedByParent.set(parentResult.frameId, set);
+      }
+      return set;
+    };
     await Promise.all(results.filter(result => result.parentId).map(async result => {
-      result.ownerId = await this.#ownerId(result, byId.get(result.parentId));
+      const parentResult = byId.get(result.parentId);
+      result.ownerId = await this.#ownerId(result, parentResult, emittedFor(parentResult));
     }));
     // Unavailable frames are set up again on the next observation.
     if (all.some(frame => frame.unavailable)) this.treeDirty = true;
@@ -617,10 +622,9 @@ export class FrameDriver {
   // The walker id of a child frame's owner element in its parent document:
   // an id when the owner was emitted, -1 when it exists but was not rendered,
   // null when it could not be mapped. Cached while the owner keeps its id.
-  async #ownerId(child, parentResult) {
+  async #ownerId(child, parentResult, emitted) {
     const parent = this.frames.get(child.parentId);
-    if (!parent || !parentResult?.snapshot) return null;
-    const emitted = new Set(parentResult.snapshot.nodes.filter(node => node.k === 'f').map(node => node.id));
+    if (!parent || !parentResult?.snapshot || !emitted) return null;
     const cached = this.owners.get(child.frameId);
     if (cached && cached.contextId === parent.contextId && emitted.has(cached.id)) return cached.id;
     try {
@@ -825,15 +829,27 @@ export class FrameDriver {
       if (!hit.visible) return { hops, opacity };
       if (!hit.frame) return { hops, opacity };
       let child = null;
-      for (const candidate of frames.filter(entry => entry.parentId === frame.id)) {
-        try {
-          const { backendNodeId } = await this.send('DOM.getFrameOwner', { frameId: candidate.id }, frame.sessionId);
-          const { object } = await this.send('DOM.resolveNode', { backendNodeId, executionContextId: frame.contextId }, frame.sessionId);
+      const children = frames.filter(entry => entry.parentId === frame.id);
+      for (const candidate of children) {
+        const cached = this.owners.get(candidate.id);
+        if (cached && cached.contextId === frame.contextId && cached.id === hit.frame.id) {
+          child = candidate;
+          break;
+        }
+      }
+      if (!child) {
+        for (const candidate of children) {
           try {
-            if (await this.callOn(frame, object.objectId, 'function(){return globalThis.__independentState?.idOf(this)||0}') === hit.frame.id) child = candidate;
-          } finally { await this.release(frame, object.objectId); }
-        } catch { /* a frame that went away is not the hit */ }
-        if (child) break;
+            const { backendNodeId } = await this.send('DOM.getFrameOwner', { frameId: candidate.id }, frame.sessionId);
+            const { object } = await this.send('DOM.resolveNode', { backendNodeId, executionContextId: frame.contextId }, frame.sessionId);
+            try {
+              const id = await this.callOn(frame, object.objectId, 'function(){return globalThis.__independentState?.idOf(this)||0}');
+              if (id) this.owners.set(candidate.id, { id, contextId: frame.contextId });
+              if (id === hit.frame.id) child = candidate;
+            } finally { await this.release(frame, object.objectId); }
+          } catch { /* a frame that went away is not the hit */ }
+          if (child) break;
+        }
       }
       if (!child || child.contextId === undefined) return { hops, opacity, unverified: 'frame under the point is not observed' };
       const viewport = await this.viewport(child);

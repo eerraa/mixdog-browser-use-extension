@@ -13,7 +13,7 @@ import { formatSignals } from './signals.mjs';
 
 // Shared contract bounds (contracts.md Observation and input / Browser sessions).
 export const TILE = 24;
-export const WAIT_POLL_MS = 100;
+const WAIT_POLL_MS = 100;
 export const SHORT_SETTLE = new Set(['scroll', 'evaluate']);
 export const SHORT_PROBE_ACTIONS = new Set(['scroll', 'fill', 'type', 'select', 'upload']);
 export const NATIVE_REQUEST_ACK_GRACE_MS = 300;
@@ -22,12 +22,43 @@ export const MAX_SESSION_TABS = 32;
 export const MAX_TEMPORARY_SESSIONS = 16;
 export const RETURN_TIMEOUT_MS = 25000;
 
+// A frame owner's box in its parent document, sampled now and after each of
+// the next two animation frames: true only if it never moved (D21).
+export const OWNER_STABLE = `function(){return new Promise(resolve=>{
+  const box=()=>{const r=this.getBoundingClientRect();return [r.left,r.top,r.width,r.height]};
+  const first=box();let frames=0;setTimeout(()=>resolve(false),1000);
+  const step=()=>{if(box().some((v,i)=>Math.abs(v-first[i])>1))return resolve(false);if(++frames>=2)return resolve(true);requestAnimationFrame(step)};
+  requestAnimationFrame(step)})}`;
+
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export const hostOf = url => { try { return new URL(url).host || String(url).slice(0, 40); } catch { return ''; } };
 export const clipText = (value, max) => {
   const text = String(value ?? '');
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 };
+
+export function canElevate({ closed, revoking, automationMode, pinned, reverted, dataRoot }) {
+  return !closed && !revoking && automationMode === 'standard' && !pinned && !reverted && Boolean(dataRoot);
+}
+
+export function ownerPages(pages, owner) {
+  const out = [];
+  for (const p of pages.values()) {
+    if (!p.closed && p.owner === owner) out.push(p);
+  }
+  return out;
+}
+
+export function releaseClosedPage(p) {
+  p.model = null;
+  p.base = null;
+  p.shot = null;
+  p.dialog = null;
+  p.modelFresh = null;
+  p.devtools = null;
+  p.downloads = [];
+  p.navListeners?.clear();
+}
 
 // Paint holding: resolve as soon as real `first-contentful-paint` fires via
 // `PerformanceObserver` (which page script cannot forge), capped at `maxMs`
@@ -93,7 +124,7 @@ export async function validateUploadFiles(files, multiple, { dataRoot, connectio
   return real;
 }
 
-export function formatRequestLines(pending) {
+function formatRequestLines(pending) {
   return pending.map(request => `request ${request.requestRef} ${request.kind}`
     + `${request.context?.message ? ` ${quote(clipText(String(request.context.message), 200))}` : ''}`
     + `${request.options?.length ? ` options ${request.options.map(option => `${option.optionRef}=${quote(option.label)}`).join(' ')}` : ' (respond with files or cancel)'}`);
@@ -105,10 +136,12 @@ export function drainPageSignals(p, caller, { signals, nativeRequests, header = 
   const queued = signals.drain(p.owner, p.id)
     .filter(signal => !(header && signal.tabId === p.id && signal.kind === 'navigated'));
   const lines = formatSignals(queued, p.id);
-  const devtools = p.devtools.since(p.cursor ?? { console: 0, network: 0 });
-  p.cursor = devtools.cursor;
-  if (devtools.errors) lines.push(formatSignals([{ tabId: p.id, kind: 'console', count: devtools.errors }], p.id)[0]);
-  if (devtools.failed) lines.push(formatSignals([{ tabId: p.id, kind: 'network', count: devtools.failed }], p.id)[0]);
+  if (p.devtools) {
+    const devtools = p.devtools.since(p.cursor ?? { console: 0, network: 0 });
+    p.cursor = devtools.cursor;
+    if (devtools.errors) lines.push(formatSignals([{ tabId: p.id, kind: 'console', count: devtools.errors }], p.id)[0]);
+    if (devtools.failed) lines.push(formatSignals([{ tabId: p.id, kind: 'network', count: devtools.failed }], p.id)[0]);
+  }
   const pending = caller ? nativeRequests.list(p, caller?.requestOwner?.caller ?? caller).length : 0;
   if (pending) lines.push(formatSignals([{ tabId: p.id, kind: 'requests', count: pending }], p.id)[0]);
   return lines;
@@ -186,7 +219,21 @@ export function lookupLiveRef(p, ref, { refs, pages }) {
   return entry;
 }
 
-export function scopeKeyForRef(p, ref, { refs, pages }) {
+export function assertDescribedRef(p, entry, described, { refs }) {
+  if (described?.stale || described?.missing) {
+    refs.retireDocument(p.id, entry.frameId, null);
+    failStaleRef(p, entry, 'belongs to a replaced document', { refs });
+  }
+  if (!described?.described) {
+    refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]);
+    failStaleRef(p, entry, 'was removed', { refs });
+  }
+  if (described.described.role !== entry.role || described.described.name !== entry.name) {
+    failStaleRef(p, entry, 'changed its role or name', { refs });
+  }
+}
+
+function scopeKeyForRef(p, ref, { refs, pages }) {
   const entry = lookupLiveRef(p, ref, { refs, pages });
   const key = `${entry.frameId}:${entry.documentId}:${entry.id}`;
   if (!p.model?.byKey.has(key)) fail('STALE_REF', `${ref} is not on the page now; observe again`);

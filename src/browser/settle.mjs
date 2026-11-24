@@ -4,14 +4,13 @@
 // window in the root and target frames. Settle never sends input; its outcome
 // only shapes the result observation.
 
+import { pause } from '../shared/async.mjs';
+
 export const SETTLE_BOUNDS = Object.freeze({
   probeMs: 150, navigationMs: 3000, quietMs: 100, capMs: 1000, shortCapMs: 500, requestPollMs: 25,
 });
 
-const defaults = { now: () => performance.now(), sleep: (ms, signal) => new Promise((resolve, reject) => {
-  const timer = setTimeout(resolve, ms);
-  signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
-}) };
+const defaults = { now: () => performance.now(), sleep: pause };
 
 /**
  * Arm BEFORE dispatch. subscribe(listener) must call listener({kind}) for
@@ -61,11 +60,13 @@ export async function settle({ armed, quiet, pendingRequests, interrupt, signal,
   const start = now();
   const result = { navigated: false, loading: false, failed: false, quiet: false, interrupted: null, ms: 0 };
   const INTERRUPTED = Symbol('interrupted');
+  let onAbort = null;
   const stop = new Promise((resolve, reject) => {
     interrupt?.then(reason => { result.interrupted = reason ?? 'interrupted'; resolve(INTERRUPTED); });
     if (signal) {
-      if (signal.aborted) reject(signal.reason);
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      if (signal.aborted) { reject(signal.reason); return; }
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
     }
   });
   stop.catch(() => {});
@@ -80,34 +81,38 @@ export async function settle({ armed, quiet, pendingRequests, interrupt, signal,
     return true;
   };
 
-  if (armed) {
-    const started = await race(armed.until(armed.started, b.probeMs));
-    if (started === INTERRUPTED) return finish();
-    if (started && !(await awaitDocument())) return finish();
-  }
-  const cap = short ? b.shortCapMs : b.capMs;
-  let deadline = now() + cap;
-  const quietOnce = async () => {
-    deadline = now() + cap;
-    try {
-      const outcome = await race(quiet(b.quietMs, cap));
-      if (outcome === INTERRUPTED) return false;
-      result.quiet = !!outcome?.quiet;
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      result.quiet = false;
+  try {
+    if (armed) {
+      const started = await race(armed.until(armed.started, b.probeMs));
+      if (started === INTERRUPTED) return finish();
+      if (started && !(await awaitDocument())) return finish();
     }
-    return true;
-  };
-  if (!(await quietOnce())) return finish();
-  // A navigation the action started late (after a fetch, a timer) still
-  // replaces the document; wait for it instead of observing the old one.
-  if (armed && !result.navigated && armed.started()) {
-    if (!(await awaitDocument())) return finish();
+    const cap = short ? b.shortCapMs : b.capMs;
+    let deadline = now() + cap;
+    const quietOnce = async () => {
+      deadline = now() + cap;
+      try {
+        const outcome = await race(quiet(b.quietMs, cap));
+        if (outcome === INTERRUPTED) return false;
+        result.quiet = !!outcome?.quiet;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        result.quiet = false;
+      }
+      return true;
+    };
     if (!(await quietOnce())) return finish();
+    // A navigation the action started late (after a fetch, a timer) still
+    // replaces the document; wait for it instead of observing the old one.
+    if (armed && !result.navigated && armed.started()) {
+      if (!(await awaitDocument())) return finish();
+      if (!(await quietOnce())) return finish();
+    }
+    while (pendingRequests && now() < deadline && pendingRequests() > 0) {
+      if ((await race(sleep(b.requestPollMs, signal))) === INTERRUPTED) break;
+    }
+    return finish();
+  } finally {
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
   }
-  while (pendingRequests && now() < deadline && pendingRequests() > 0) {
-    if ((await race(sleep(b.requestPollMs, signal))) === INTERRUPTED) break;
-  }
-  return finish();
 }

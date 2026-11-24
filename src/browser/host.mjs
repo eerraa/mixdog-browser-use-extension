@@ -5,7 +5,7 @@ import { FenceQueue } from './queue.mjs';
 import { bounded } from '../shared/async.mjs';
 import { FrameDriver } from './frames.mjs';
 import { BrowserPermissions } from './permissions.mjs';
-import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from './policy.mjs';
+import { BrowserPolicy, ELECTRON_LIST_PROFILES, electronCapabilities } from '../shared/policy.mjs';
 import { BrowserRequests } from './requests.mjs';
 import { BrowserDialogs } from './dialogs.mjs';
 import { confirmDisconnectDialog, installPageMenu } from './consent.mjs';
@@ -25,11 +25,11 @@ import {
 } from '../shared/contract.mjs';
 import { saveUserPreferences } from '../shared/preferences.mjs';
 import {
-  assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, classifyRunError, clipText,
-  drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS, MAX_TEMPORARY_SESSIONS,
-  MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, presentModel, resolveFrameRef, retirePerceivedRefs,
-  RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError, TILE, validateUploadFiles,
-  waitForCondition,
+  assertDescribedRef, assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, canElevate,
+  classifyRunError, clipText, drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS,
+  MAX_TEMPORARY_SESSIONS, MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, ownerPages, presentModel, releaseClosedPage,
+  resolveFrameRef, retirePerceivedRefs, RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError,
+  TILE, validateUploadFiles, waitForCondition,
 } from './host-common.mjs';
 
 /**
@@ -103,12 +103,14 @@ export class BrowserHost {
   }
 
   #canElevate() {
-    return !this.#closed
-      && !this.#revoking
-      && this.#automationMode === 'standard'
-      && !this.#automationModePinned
-      && !this.#revertedThisConnection
-      && Boolean(this.dataRoot);
+    return canElevate({
+      closed: this.#closed,
+      revoking: this.#revoking,
+      automationMode: this.#automationMode,
+      pinned: this.#automationModePinned,
+      reverted: this.#revertedThisConnection,
+      dataRoot: this.dataRoot,
+    });
   }
 
   status() {
@@ -216,7 +218,7 @@ export class BrowserHost {
     assertLiveCaller(caller, signal, this.#closed || this.#revoking);
   }
   #ownerPages(owner) {
-    return [...this.#pages.values()].filter(p => !p.closed && p.owner === owner);
+    return ownerPages(this.#pages, owner);
   }
   #owned(tabId, caller, signal, input = false, allowDisconnected = false, dialogCleanup = false) {
     this.#assertCaller(caller, signal);
@@ -443,8 +445,8 @@ export class BrowserHost {
   // the profile's shared workers), the human DevTools menu item, and closing
   // human DevTools whenever the person no longer controls the page.
   #devtoolsMode(p) {
-    for (const q of this.#profilePages(p)) q.devtools.boundary();
-    p.devtools.boundary();
+    for (const q of this.#profilePages(p)) q.devtools?.boundary();
+    p.devtools?.boundary();
     const handoff = p.presentation?.mode === 'native-handoff';
     if (p.devtoolsMenuItem) p.devtoolsMenuItem.enabled = handoff;
     if (!handoff && (p.devtoolsOpening || (!p.contents.isDestroyed() && p.contents.isDevToolsOpened()))) {
@@ -815,6 +817,7 @@ export class BrowserHost {
       this.dialogs.destroyed(p);
       this.#invalidate(p, 'closed');
       this.#queue.abort(p.id, new BrowserHostError('CLOSED_TAB', 'Tab closed'));
+      releaseClosedPage(p);
       this.#refreshAllToolbars();
     });
     wc.on('render-process-gone', () => {
@@ -1011,9 +1014,6 @@ export class BrowserHost {
       catch (error) { p.frame.destroy(); throw error; }
     } else p = this.#owned(args.tabId, caller, signal, inputActions.has(args.action), args.action === 'navigate',
       ['handle_dialog', 'respond'].includes(args.action));
-    if (!p.connected && inputActions.has(args.action) && args.action !== 'navigate') {
-      fail('DEBUGGER_DISCONNECTED', 'Browser debugger disconnected; observe or explicitly navigate to recover; no input was replayed');
-    }
     if (args.action === 'close_tab') {
       p.closedByAgent = true;
       p.frame.destroy();
@@ -1377,7 +1377,7 @@ export class BrowserHost {
           const capped = new Promise(resolve => { timer = setTimeout(() => resolve({ quiet: false }), cap + 100); });
           return Promise.race([p.driver.quiet(state.frameId ? [state.frameId] : [], ms, cap), capped]).finally(() => clearTimeout(timer));
         },
-        pendingRequests: () => p.devtools.running(state.wall),
+        pendingRequests: () => p.devtools?.running(state.wall) ?? 0,
       });
     } finally {
       p.settleInterrupt = null;
@@ -1575,22 +1575,12 @@ export class BrowserHost {
     if (input) await p.driver.inputReady(frame, signal);
     if (!input) {
       const described = await p.driver.describe(frame, entry.id, entry.documentId);
-      if (described?.stale || described?.missing) {
-        this.#refs.retireDocument(p.id, entry.frameId, null);
-        this.#staleRef(p, entry, 'belongs to a replaced document');
-      }
-      if (!described?.described) { this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]); this.#staleRef(p, entry, 'was removed'); }
-      if (described.described.role !== entry.role || described.described.name !== entry.name) this.#staleRef(p, entry, 'changed its role or name');
+      assertDescribedRef(p, entry, described, { refs: this.#refs });
       const objectId = await p.driver.resolveObject(frame, entry.id, entry.documentId);
       return { frame, entry, ref: entry.ref, objectId };
     }
     const inspected = await p.driver.inspectTarget(frame, entry.id, entry.documentId);
-    if (inspected?.stale || inspected?.missing) {
-      this.#refs.retireDocument(p.id, entry.frameId, null);
-      this.#staleRef(p, entry, 'belongs to a replaced document');
-    }
-    if (!inspected?.described) { this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]); this.#staleRef(p, entry, 'was removed'); }
-    if (inspected.described.role !== entry.role || inspected.described.name !== entry.name) this.#staleRef(p, entry, 'changed its role or name');
+    assertDescribedRef(p, entry, inspected, { refs: this.#refs });
     const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
     const now = inspected.view ?? await p.driver.inView(frame, entry.id, entry.documentId);
     const needsScroll = !now.inView || (frame.parentId && !item?.inView);

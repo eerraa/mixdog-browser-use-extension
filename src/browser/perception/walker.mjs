@@ -468,7 +468,7 @@ function pageInstall(U) {
       const assigned = !el.shadowRoot && tag === 'slot' ? el.assignedNodes({ flatten: true }) : null;
       const children = el.shadowRoot ? el.shadowRoot.childNodes
         : assigned?.length ? assigned : el.childNodes;
-      return { el, b, node, child, run, style, summary, children: Array.from(children), index: 0, textual: !!run && visible && !tiny };
+      return { el, b, node, child, run, style, summary, children, index: 0, textual: !!run && visible && !tiny };
     };
     const exit = frame => {
       const { el, b, node, child, run, summary } = frame;
@@ -504,9 +504,8 @@ function pageInstall(U) {
       }
       const childNode = frame.children[frame.index++];
       if (childNode.nodeType === 3) {
-        if (frame.textual) {
-          const data = childNode.data.replace(/\s+/g, ' ');
-          if (data.trim()) frame.run.parts.push(data);
+        if (frame.textual && /\S/.test(childNode.data)) {
+          frame.run.parts.push(childNode.data.replace(/\s+/g, ' '));
         }
       } else if (childNode.nodeType === 1) {
         const entered = enter(childNode, frame.child, frame.style);

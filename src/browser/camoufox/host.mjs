@@ -10,10 +10,9 @@
 // and hardened Camoufox `run` sandboxes.
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { inflateSync } from 'node:zlib';
 import { FenceQueue } from '../queue.mjs';
 import { bounded, pause } from '../../shared/async.mjs';
-import { BrowserPolicy, camoufoxCapabilities } from '../policy.mjs';
+import { BrowserPolicy, camoufoxCapabilities } from '../../shared/policy.mjs';
 import { BrowserRequests } from '../requests.mjs';
 import { DEVTOOLS_LIMITS, DevToolsRecorder, PrivacyWindows, responseBody } from '../devtools.mjs';
 import { composeModel } from '../perception/model.mjs';
@@ -28,124 +27,22 @@ import {
 import { saveUserPreferences } from '../../shared/preferences.mjs';
 import { acquireProfileLock, inspectProfiles, releaseProfileLock, slugFromDirName } from '../../shared/profile-lock.mjs';
 import {
-  assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, classifyRunError, clipText,
-  drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS, MAX_TEMPORARY_SESSIONS,
-  MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, presentModel, resolveFrameRef, retirePerceivedRefs,
-  RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError, TILE, validateUploadFiles,
-  waitForCondition,
+  assertDescribedRef, assertLiveCaller, buildDialogFirst, buildPendingUncertain, buildUnobserved, canElevate,
+  classifyRunError, clipText, drainPageSignals, failStaleRef, hash, hostOf, lookupLiveRef, MAX_SESSION_TABS,
+  MAX_TEMPORARY_SESSIONS, MIN_POINT_OPACITY, NATIVE_REQUEST_ACK_GRACE_MS, ownerPages, presentModel, releaseClosedPage,
+  resolveFrameRef, retirePerceivedRefs, RETURN_TIMEOUT_MS, SHORT_PROBE_ACTIONS, SHORT_SETTLE, tagNotDispatchedError,
+  TILE, validateUploadFiles, waitForCondition,
 } from '../host-common.mjs';
 import { CamoufoxProcess } from './juggler.mjs';
 import { FirefoxRdpClient } from './rdp.mjs';
 import { CamoufoxFrameDriver } from './driver.mjs';
+import { decodePngPixels, pngClipMatchesTile } from './png.mjs';
 import { CamoufoxPresentation, ChromeToolbarClient } from './presentation.mjs';
 import { createCamoufoxRunnerSandboxFactory } from './runner-sandbox.mjs';
 
 const MAX_PERSISTENT_PROFILES = 8;
 const DEFAULT_IDLE_PROFILE_TIMEOUT_MS = 120000;
 const L = DEVTOOLS_LIMITS;
-
-// Minimal zero-dependency PNG decoder (8-bit RGB/RGBA non-interlaced) used to
-// compare a 32×32 pixel tile around a screenshot coordinate (D18 parity).
-function decodePngPixels(buf) {
-  if (!Buffer.isBuffer(buf) || buf.length < 33 || buf.readUInt32BE(0) !== 0x89504e47) return null;
-  let width = 0, height = 0, bitDepth = 0, colorType = 0;
-  const idat = [];
-  let pos = 8;
-  while (pos + 8 <= buf.length) {
-    const len = buf.readUInt32BE(pos);
-    const type = buf.toString('ascii', pos + 4, pos + 8);
-    const dataStart = pos + 8;
-    const dataEnd = dataStart + len;
-    if (dataEnd + 4 > buf.length) break;
-    if (type === 'IHDR' && len >= 13) {
-      width = buf.readUInt32BE(dataStart);
-      height = buf.readUInt32BE(dataStart + 4);
-      bitDepth = buf[dataStart + 8];
-      colorType = buf[dataStart + 9];
-      if (buf[dataStart + 12] !== 0) return null; // interlaced unsupported
-    } else if (type === 'IDAT') {
-      idat.push(buf.subarray(dataStart, dataEnd));
-    } else if (type === 'IEND') {
-      break;
-    }
-    pos = dataEnd + 4;
-  }
-  const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
-  if (!width || !height || bitDepth !== 8 || !bpp || !idat.length) return null;
-  let raw;
-  try { raw = inflateSync(Buffer.concat(idat)); } catch { return null; }
-  const stride = width * bpp;
-  if (raw.length < (stride + 1) * height) return null;
-  const pixels = Buffer.allocUnsafe(stride * height);
-  const paeth = (a, b, c) => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const src = y * (stride + 1) + 1;
-    const dst = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const a = x >= bpp ? pixels[dst + x - bpp] : 0;
-      const b = y > 0 ? pixels[dst - stride + x] : 0;
-      const c = x >= bpp && y > 0 ? pixels[dst - stride + x - bpp] : 0;
-      const v = raw[src + x];
-      pixels[dst + x] = filter === 0 ? v : filter === 1 ? (v + a) & 0xff
-        : filter === 2 ? (v + b) & 0xff : filter === 3 ? (v + ((a + b) >> 1)) & 0xff
-          : (v + paeth(a, b, c)) & 0xff;
-    }
-  }
-  return { width, height, bpp, pixels };
-}
-
-function pngTilesEqual(aBuf, bBuf, w, h, x, y, aDecoded = null) {
-  const a = aDecoded ?? decodePngPixels(aBuf), b = decodePngPixels(bBuf);
-  if (!a || !b) return aBuf.equals(bBuf);
-  if (a.width !== b.width || a.height !== b.height || a.bpp !== b.bpp) return false;
-  const sx = a.width / w, sy = a.height / h;
-  const left = Math.max(0, Math.min(w - TILE, x - TILE / 2));
-  const top = Math.max(0, Math.min(h - TILE, y - TILE / 2));
-  const x0 = Math.max(0, Math.floor(left * sx));
-  const y0 = Math.max(0, Math.floor(top * sy));
-  const x1 = Math.min(a.width, x0 + Math.ceil(TILE * sx));
-  const y1 = Math.min(a.height, y0 + Math.ceil(TILE * sy));
-  const stride = a.width * a.bpp;
-  for (let row = y0; row < y1; row++) {
-    const start = row * stride + x0 * a.bpp;
-    const end = row * stride + x1 * a.bpp;
-    if (!a.pixels.subarray(start, end).equals(b.pixels.subarray(start, end))) return false;
-  }
-  return true;
-}
-
-export function pngClipMatchesTile(baseBuf, clipBuf, baseW, baseH, left, top, tileW, tileH, baseDecoded = null) {
-  const a = baseDecoded ?? decodePngPixels(baseBuf);
-  const b = decodePngPixels(clipBuf);
-  if (!a || !b) return baseBuf.equals(clipBuf);
-  if (a.bpp !== b.bpp) return false;
-  // Fallback when a full-viewport screenshot was returned instead of a clipped tile.
-  if (b.width === a.width && b.height === a.height) {
-    return pngTilesEqual(baseBuf, clipBuf, baseW, baseH, left + tileW / 2, top + tileH / 2, a);
-  }
-  const sx = a.width / baseW, sy = a.height / baseH;
-  const x0 = Math.max(0, Math.round(left * sx));
-  const y0 = Math.max(0, Math.round(top * sy));
-  const cmpW = Math.min(b.width, a.width - x0);
-  const cmpH = Math.min(b.height, a.height - y0);
-  if (cmpW <= 0 || cmpH <= 0) return false;
-  const aStride = a.width * a.bpp;
-  const bStride = b.width * b.bpp;
-  const rowBytes = cmpW * a.bpp;
-  for (let row = 0; row < cmpH; row++) {
-    const aStart = (y0 + row) * aStride + x0 * a.bpp;
-    const bStart = row * bStride;
-    if (!a.pixels.subarray(aStart, aStart + rowBytes).equals(b.pixels.subarray(bStart, bStart + rowBytes))) {
-      return false;
-    }
-  }
-  return true;
-}
 
 function mapPermissionKind(kind) {
   return kind === 'notifications' ? 'notifications' : kind === 'geolocation' ? 'geolocation' : null;
@@ -240,12 +137,14 @@ export class CamoufoxHost {
   }
 
   #canElevate() {
-    return !this.#closed
-      && !this.#revoking
-      && this.#automationMode === 'standard'
-      && !this.#automationModePinned
-      && !this.#revertedThisConnection
-      && Boolean(this.dataRoot);
+    return canElevate({
+      closed: this.#closed,
+      revoking: this.#revoking,
+      automationMode: this.#automationMode,
+      pinned: this.#automationModePinned,
+      reverted: this.#revertedThisConnection,
+      dataRoot: this.dataRoot,
+    });
   }
 
   status() {
@@ -819,7 +718,7 @@ export class CamoufoxHost {
   #devtoolsMode(p) {
     p.profile.devtoolsPrivacy.update();
     for (const q of this.#pages.values()) {
-      if (!q.closed && q.profile === p.profile) q.devtools.boundary();
+      if (!q.closed && q.profile === p.profile) q.devtools?.boundary();
     }
     const allow = p.presentation.mode === 'automation';
     if (p.runtime?.rdp?.connected) p.runtime.rdp.setWatching(p.id, allow).catch(() => {});
@@ -851,7 +750,7 @@ export class CamoufoxHost {
     if (!syncedByPresentation) this.#syncControlBar(p.runtime);
   }
 
-  #ownerPages(owner) { return [...this.#pages.values()].filter(p => !p.closed && p.owner === owner); }
+  #ownerPages(owner) { return ownerPages(this.#pages, owner); }
 
   #assertSessionMutationAllowed(owner, targetProfile = null) {
     const pages = targetProfile ? this.#ownerPages(owner).filter(p => p.profile === targetProfile) : this.#ownerPages(owner);
@@ -1331,6 +1230,7 @@ export class CamoufoxHost {
     p.runtime?.byTargetId.delete(p.targetId);
     this.#queue.abort(p.id, new BrowserHostError('CLOSED_TAB', 'Tab closed'));
     p.presentation.destroy();
+    releaseClosedPage(p);
     this.#scheduleProfileIdle(p.profile);
   }
 
@@ -1379,7 +1279,7 @@ export class CamoufoxHost {
         await runtime.rdp.attachTab(p.id, {
           matchTab: t => t.url === 'about:blank' || t.url === url,
           onResource: (phase, rtype, item, _from, target) => {
-            p.devtools.recordRdp(phase, rtype, item, target?.targetType || null);
+            p.devtools?.recordRdp(phase, rtype, item, target?.targetType || null);
           },
           watchResources: p.presentation.mode === 'automation',
         }).catch(() => {});
@@ -1404,11 +1304,11 @@ export class CamoufoxHost {
       p.onDomContentLoaded = null;
     }
     p.currentUrl = p.driver.rootFrame()?.url || url;
-    if (p.runtime?.rdp) {
+    if (p.runtime?.rdp && !p.runtime.rdp.hasTab?.(p.id)) {
       p.runtime.rdp.attachTab(p.id, {
         matchTab: t => t.url === p.currentUrl,
         onResource: (phase, rtype, item, _from, target) => {
-          p.devtools.recordRdp(phase, rtype, item, target?.targetType || null);
+          p.devtools?.recordRdp(phase, rtype, item, target?.targetType || null);
         },
         watchResources: p.presentation.mode === 'automation',
       }).then(() => this.#syncControlBar(p.runtime)).catch(() => {});
@@ -1456,9 +1356,9 @@ export class CamoufoxHost {
   }
 
   async #screenshot(p, model, snapshotId) {
-    const shot = await p.driver.screenshot();
-    const after = await p.driver.viewport();
     const checkpoint = model.frames.get(model.rootId).checkpoint;
+    const shot = await p.driver.screenshot(undefined, checkpoint);
+    const after = await p.driver.viewport();
     const { w, h } = model.viewport;
     p.shot = after?.documentId === checkpoint.documentId && after.w === w && after.h === h
       && after.x === checkpoint.x && after.y === checkpoint.y
@@ -2164,7 +2064,7 @@ export class CamoufoxHost {
           armed, signal: laneSignal, interrupt, short: SHORT_SETTLE.has(args.action),
           bounds: SHORT_PROBE_ACTIONS.has(args.action) ? { probeMs: 20 } : undefined,
           quiet: (ms, cap) => p.driver.quiet(state.frameId ? [state.frameId] : [], ms, cap, laneSignal),
-          pendingRequests: () => p.devtools.running(state.wall),
+          pendingRequests: () => p.devtools?.running(state.wall) ?? 0,
         }).catch(err => { if (laneSignal.aborted) throw err; });
 
         if (state.delivered) return null;
@@ -2219,8 +2119,7 @@ export class CamoufoxHost {
       if (args.ref) {
         const entry = this.#liveRef(p, args.ref);
         const described = await p.driver.describe(entry.frameId, entry.id, entry.documentId, signal);
-        if (described?.stale || described?.missing) this.#staleRef(p, entry, 'belongs to a replaced document');
-        if (!described?.described) this.#staleRef(p, entry, 'was removed');
+        assertDescribedRef(p, entry, described, { refs: this.#refs });
         info = await p.driver.inspectElement({ frameId: entry.frameId, id: entry.id, documentId: entry.documentId, values: args.values ?? [] }, signal);
         located = { ref: args.ref };
       } else {
@@ -2234,8 +2133,7 @@ export class CamoufoxHost {
     if (args.action === 'read' && (args.ref || args.target)) {
       const entry = args.ref ? this.#liveRef(p, args.ref) : await this.#targetEntry(p, args.target, caller, signal);
       const described = await p.driver.describe(entry.frameId, entry.id, entry.documentId, signal);
-      if (described?.stale || described?.missing) this.#staleRef(p, entry, 'belongs to a replaced document');
-      if (!described?.described) this.#staleRef(p, entry, 'was removed');
+      assertDescribedRef(p, entry, described, { refs: this.#refs });
       const resolved = await p.driver.resolveObject(entry.frameId, entry.id, entry.documentId, signal);
       try {
         const value = await p.driver.callOn(resolved.frame, resolved.objectId, `function() {
@@ -2278,17 +2176,7 @@ export class CamoufoxHost {
     if (!frame) this.#staleRef(p, entry, 'is in a frame that is gone');
     await p.driver.inputReady(frame.frameId, signal);
     const inspected = await p.driver.inspectTarget(frame.frameId, entry.id, entry.documentId, signal);
-    if (inspected?.stale || inspected?.missing) {
-      this.#refs.retireDocument(p.id, entry.frameId, null);
-      this.#staleRef(p, entry, 'belongs to a replaced document');
-    }
-    if (!inspected?.described) {
-      this.#refs.gone(p.id, entry.frameId, entry.documentId, [entry.id]);
-      this.#staleRef(p, entry, 'was removed');
-    }
-    if (inspected.described.role !== entry.role || inspected.described.name !== entry.name) {
-      this.#staleRef(p, entry, 'changed its role or name');
-    }
+    assertDescribedRef(p, entry, inspected, { refs: this.#refs });
     const item = p.model?.byKey.get(`${entry.frameId}:${entry.documentId}:${entry.id}`);
     const now = inspected.view ?? await p.driver.inView(frame.frameId, entry.id, entry.documentId, signal);
     const needsScroll = !now.inView || (frame.parentId && !item?.inView);
