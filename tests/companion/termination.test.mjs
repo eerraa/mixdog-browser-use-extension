@@ -21,24 +21,45 @@ registerHooks({
   },
 });
 
-test('native revocation after gateway disconnect still closes host, peers and listener and exits', async () => {
+test('companion authenticates single gateway role, issues fresh per-call ids, and closes cleanly on native revocation', async () => {
   const channel = randomUUID(), key = randomBytes(32).toString('base64url');
   process.env.WB_CHANNEL = channel;
   process.env.WB_IPC_KEY = key;
-  process.env.MIXDOG_PLUGIN_DATA = await mkdtemp(path.join(os.tmpdir(), 'companion-termination-'));
+  process.env.WB_DATA_DIR = await mkdtemp(path.join(os.tmpdir(), 'companion-termination-'));
   await import(companion.href);
   await state.listening.promise;
   assert.doesNotMatch(app.userAgentFallback, /Electron\/|IndependentWindowsBrowser\//);
+
+  // Hook role is no longer accepted on companion hello.
   state.listener.accept({});
-  const gateway = state.peers[0];
+  const rejected = state.peers[0];
+  await assert.rejects(rejected.handler('hello', { channel, key, role: 'hook' }), /Unauthenticated local connection/);
+
+  // Single gateway peer authenticates with constant-time key + channel.
+  state.listener.accept({});
+  const gateway = state.peers[1];
   await gateway.handler('hello', { channel, key, role: 'gateway' });
+
+  // A second concurrent gateway connection is rejected.
   state.listener.accept({});
-  const hook = state.peers[1];
-  await hook.handler('hello', { channel, key, role: 'hook' });
+  const secondGateway = state.peers[2];
+  await assert.rejects(secondGateway.handler('hello', { channel, key, role: 'gateway' }), /Gateway already connected/);
+
+  // Each call gets a fresh callId, strips _channel/_lease, and shares the connection abort signal.
+  const first = await gateway.handler('call', { args: { action: 'list_tabs', _channel: channel, _lease: 'ignored' } });
+  const second = await gateway.handler('call', { args: { action: 'list_tabs', _channel: channel } });
+  assert.notEqual(first.callId, second.callId, 'every call must receive a distinct callId');
+  assert.deepEqual(state.host.calls[0].body, { action: 'list_tabs' });
+  assert.equal(state.host.calls[0].caller.sessionId, 'mcp-connection');
+  assert.equal(state.host.calls[0].caller.signal.aborted, false);
+  assert.doesNotThrow(() => state.host.calls[0].caller.assertLive());
+
   gateway.close();
   assert.doesNotThrow(() => state.host.options.onRevokeConnection());
+  assert.equal(state.host.calls[0].caller.signal.aborted, true, 'revocation aborts connection-scoped caller signal');
+  assert.throws(() => state.host.calls[0].caller.assertLive(), /terminating|ended/i);
   assert.equal(await bounded(state.exited.promise, 1000, 'Companion revocation'), 0);
   assert.equal(state.host.closed, true, 'A failed flush must not skip browser cleanup');
-  assert.equal(hook.closed, true);
+  assert.equal(secondGateway.closed, true);
   assert.equal(state.listener.closed, true);
 });

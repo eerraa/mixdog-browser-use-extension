@@ -10,47 +10,42 @@ package path is added, moved, renamed or removed.
 ## Processes
 
 ```text
-Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (connection authority)
-├─ MCP (stdio)  bin/bridge.exe --mcp              → runtime/electron.exe app/mcp.cjs                ELECTRON_RUN_AS_NODE=1
-│    ├─ gateway (default Camoufox)
-│    │          bin/bridge.exe --browser          → runtime/electron.exe app/companion-camoufox.cjs ELECTRON_RUN_AS_NODE=1
-│    │             └─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
-│    │                  └─ native Firefox #nav-bar Agent Control toolbar (mounted once via parent-chrome RDP; live SSE sync + action callback over token-authenticated 127.0.0.1 HTTP, 0px height delta)
-│    └─ gateway (WB_ENGINE=electron fallback for WebHID/WebUSB)
-│               bin/bridge.exe --browser-electron → runtime/electron.exe app/companion.cjs          Electron main
-│                  ⇅ named pipe, newline JSON (RpcPeer), role "gateway"
-│                  ⇅ connection authority only: same pipe, role "hook", the gateway's ticket issuer
-└─ hooks        bin/bridge.exe --hook             → runtime/electron.exe app/hook.cjs               ELECTRON_RUN_AS_NODE=1
-   (hook authority only)  ⇅ same pipe, role "hook", one short connection per event
+MCP host (Claude Code, Codex, Antigravity, DSH, etc. — plain stdio connection authority)
+└─ MCP (stdio)  bin/bridge.exe --mcp              → runtime/electron.exe app/mcp.cjs                ELECTRON_RUN_AS_NODE=1
+     ├─ gateway (default Camoufox)
+     │          bin/bridge.exe --browser          → runtime/electron.exe app/companion-camoufox.cjs ELECTRON_RUN_AS_NODE=1
+     │             └─ camoufox.exe (-juggler-pipe -silent -wait-for-browser --start-debugger-server <ephemeral-port>)
+     │                  └─ native Firefox #nav-bar Agent Control toolbar (mounted once via parent-chrome RDP; live SSE sync + action callback over token-authenticated 127.0.0.1 HTTP, 0px height delta)
+     └─ gateway (WB_ENGINE=electron fallback for WebHID/WebUSB)
+                bin/bridge.exe --browser-electron → runtime/electron.exe app/companion.cjs          Electron main
+                   ⇅ named pipe, newline JSON (RpcPeer), single authenticated role "gateway"
 ```
 
-- Authority (`src/shared/paths.mjs authorityMode`): `WB_AUTHORITY` from the registration, `hook` by default. Mixdog runs `${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe --mcp` from `plugin.json` plus `hooks/hooks.json`; Claude Code runs the same launcher by absolute path with `WB_AUTHORITY=connection` and `WB_DATA_DIR`, and loads no manifest, hooks or skill.
-- `native/bridge.cpp` resolves the plugin root from the final path of its own executable (junctions resolved, so the whole tree runs from one version folder of a Local install), clears `NODE_OPTIONS` and `NODE_PATH`, and creates the child inside a kill-on-close Job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, D28), so children die with the launcher at any moment, including during creation. Claude Code on Windows closes a server's stdin and ends its process tree 300 ms later; the Jobs end the companion with it.
-- One companion per MCP server process, which is one connection. Channel = fresh UUID; key = 32 random bytes (base64url); both passed as `WB_CHANNEL`/`WB_IPC_KEY`. Ready line `WB_READY <channel>` on stdout within 20 s.
-- Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`. Hooks find it through `connections/<channel>/endpoint.json` (hook authority only).
+- Authority (`src/shared/paths.mjs authorityMode`): plain MCP stdio connection authority is the sole mode. `WB_DATA_DIR` (absolute path) is required; `WB_AUTHORITY` is optional (unset/empty or `connection` accepted; `hook` and unknown values fail closed).
+- `native/bridge.cpp` resolves the package root from the final path of its own executable (junctions resolved, so the whole tree runs from one version folder of a Local install), clears `NODE_OPTIONS` and `NODE_PATH`, and creates the child inside a kill-on-close Job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, D28), so children die with the launcher at any moment, including during creation.
+- One companion per MCP server process, which is one connection, spawned lazily on the first operational call. Channel = fresh UUID; key = 32 random bytes (base64url); both passed in process memory via `WB_CHANNEL`/`WB_IPC_KEY` (never written to disk). Ready line `WB_READY <channel>` on stdout within 20 s.
+- Pipe `\\.\pipe\independent-browser-<sha256(data\0channel)[:32]>`.
 
 ## Call path
 
-1. The agent calls `browse`. Hook authority: with `_channel` (schema const = connection UUID). Connection authority: the schema has no `_channel`; step 3 stamps the gateway's own.
-2. Hook authority: `PreToolUse` → `src/hook/main.mjs`: endpoint.json → `hello{role:hook}` → `issue` → `CallerAuthority.issue` → ticket. The hook returns `updatedInput` with `_lease`, or denies on any failure. Connection authority: no hook; step 3 refuses a `_lease` argument and takes the ticket itself.
-3. `src/mcp/main.mjs` → `gateway.execute` → (connection authority: `issue{sessionId: CONNECTION_CALLER, callId: fresh UUID}` over the gateway's hook-role connection) → pipe `call{args}` (120 s). Action `status` goes to `gateway.status` without a ticket.
-4. `src/companion/main.mjs` → `authority.consume(_lease, args)` → caller `{sessionId, callId, signal, assertLive}` → `BrowserHost.execute`.
-5. `BrowserHost.execute` → `validateArgs` → immediate actions (including DevTools buffer reads), or `#run` (per-tab `FenceQueue` lane, 25 s): input → `#validate` (after `FrameDriver.inputReady`) → `#perform` (dispatch guard) → `settle` → `#perceive` → `#present`; observe/read → `#read` → `#perceive` → `#present`. `run` → `#runScript` → `runner/run.mjs runScript`: a sandbox renderer (`runner/sandbox.mjs`) whose bridge ops (`runner/bridge.mjs`) each call `BrowserHost.execute` under the run's caller (`keepSignals`), then one final `#run` observe-after per touched tab.
+1. The agent calls `browse` with a static schema (`required: ['action']`, no `_channel` or `_lease`).
+2. `src/mcp/main.mjs` rejects any supplied `_lease` (`INVALID_ARGUMENT`), answers `status` via `gateway.status()` (cold when companion not yet started), and forwards all other calls to `gateway.execute(args, signal)`.
+3. `src/mcp/gateway.mjs` serves cold read-only `list_profiles` without spawning a companion, otherwise lazily starts the companion on first operational call, stamps its own `_channel` (ignoring any stale cached `_channel`, D26), and sends `call{args}` over the single PSK-authenticated `gateway` pipe (120 s timeout).
+4. `src/companion/server.mjs` validates the channel, strips `_channel`/`_lease`, constructs a fresh per-call caller (`{sessionId: CONNECTION_CALLER, callId: randomUUID(), signal, assertLive}` backed by the connection-scoped `AbortController`), and invokes `host.execute`.
+5. `BrowserHost.execute` / `CamoufoxHost.execute` → `validateArgs` → immediate actions (including DevTools buffer reads), or `#run` (per-tab `FenceQueue` lane, 25 s): input → `#validate` (after `inputReady`) → `#perform` (dispatch guard) → `settle` → `#perceive` → `#present`; observe/read → `#read` → `#perceive` → `#present`. `run` → `#runScript` → `runner/run.mjs runScript`: a sandbox renderer (`runner/sandbox.mjs` or `camoufox/runner-sandbox.mjs`) whose bridge ops (`runner/bridge.mjs`) each call `execute` under the run's caller (`keepSignals`), then one final `#run` observe-after per touched tab.
 6. `toolResult` (`src/mcp/tool.mjs`) renders page results as text (`statusLine` + body), adds the screenshot as image content only on request, keeps `JSON_ACTIONS` as JSON, and sets `isError` (`contracts.md` Result vocabulary).
 
-- Lifecycle (hook authority): `SessionStart`, `UserPromptSubmit`, `SubagentStart` send `begin`; `Stop`, `StopFailure`, `SessionEnd`, `SubagentStop` send `end` to every `connections/*` channel (150 ms each). Connection authority has no lifecycle events; the connection is the caller's lifetime.
-- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits; endpoint.json (hook authority) is removed, profiles stay. Closing the last page window never ends the companion (`window-all-closed` is handled in `src/companion/main.mjs`).
-- Revoke: companion `terminate` → gateway waits up to 8 s for exit and reports `processTeardownConfirmed`.
+- Teardown: MCP stdin EOF → `server.close` → `gateway.close` → `shutdown` → companion exits (profiles stay). Closing the last page window never ends the companion (`window-all-closed` is handled in `src/companion/main.mjs`; Camoufox respawns on next `open` per AC18).
+- Revoke: companion `terminate` aborts the connection caller signal and exits → gateway waits up to 8 s for exit and reports `processTeardownConfirmed`.
 
 ## Module map
 
 | Path | Role | Key symbols |
 | --- | --- | --- |
-| `src/mcp/main.mjs` | MCP stdio server; authority from the registration; single tool; server instructions under connection authority; error envelope; EOF shutdown | `main` |
-| `src/mcp/tool.mjs` | tool schema (action enum from contract; `_lease` only under hook authority; identical schema across engines with routing-first descriptions); result shaping and the status line; engine-tuned connection-authority server instructions | `browserTool`, `connectionInstructions`, `CONNECTION_INSTRUCTIONS`, `toolResult`, `errorResult`, `statusLine` |
-| `src/mcp/gateway.mjs` | spawn and own the companion (lazy connection-authority startup for both Camoufox and Electron with frozen policy/preference snapshot, cold `status`/`list_profiles` metadata, shared concurrent startup, latched failure/teardown), endpoint.json (hook authority), connection-authority tickets over its own hook-role connection, reconnect for new calls only, revoke confirmation | `createGateway`, `CONNECTION_CALLER` |
-| `src/hook/main.mjs` | lease injection for this tool only; lifecycle fan-out | `main`, `deliver` |
-| `src/companion/server.mjs` | Shared companion named-pipe RPC server, constant-time `sameKey`, role/method auth, `CallerAuthority` routing, and graceful teardown (Electron-free) | `createCompanionServer`, `sameKey`, `normalizePrefsSnapshot` |
+| `src/mcp/main.mjs` | MCP stdio server; validates env vars fail-closed; single `browse` tool with engine-tuned server instructions; `_lease` refusal; error envelope; EOF shutdown | `main` |
+| `src/mcp/tool.mjs` | static `browse` tool schema (action enum from contract; no `_channel`/`_lease`; identical schema across engines with routing-first descriptions); result shaping and the status line; engine-tuned server instructions | `browserTool`, `connectionInstructions`, `CONNECTION_INSTRUCTIONS`, `toolResult`, `errorResult`, `statusLine` |
+| `src/mcp/gateway.mjs` | lazily spawn and own the companion (both Camoufox and Electron with frozen policy/preference snapshot, cold `status`/`list_profiles` metadata, shared concurrent startup, latched failure/teardown), single PSK-authenticated `gateway` pipe, reconnect for new calls only, revoke confirmation | `createGateway`, `CONNECTION_CALLER` |
+| `src/companion/server.mjs` | Shared companion named-pipe RPC server, constant-time `sameKey`, single `gateway`-role auth, per-call caller construction (`CONNECTION_CALLER` + fresh `callId` + connection-scoped `AbortController`), and graceful teardown (Electron-free) | `createCompanionServer`, `CONNECTION_CALLER`, `normalizePrefsSnapshot` |
 | `src/companion/camoufox-main.mjs` | Default pure-Node Camoufox companion entry (`ELECTRON_RUN_AS_NODE=1`); wires `CamoufoxHost` into `createCompanionServer` | — |
 | `src/companion/main.mjs` | Electron fallback main entry (`WB_ENGINE=electron`); wires `BrowserHost` into `createCompanionServer` and Electron lifecycle hooks | — |
 | `src/browser/redact.mjs` | Pure bounded linear redaction (URLs, text, headers, bodies, clipping); zero protocol/DOM/Electron dependencies | `clip`, `redactClip`, `redactURL`, `redactText`, `redactHeaders`, `redactBody` |
@@ -66,9 +61,8 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/shared/policy.mjs` | `browser-policy.json` loader, validator, immutable snapshot serialization, `describe(effectiveEngine)`, shared Camoufox & Electron cold/live capability & `list_profiles` metadata | `BrowserPolicy`, `ELECTRON_LIST_PROFILES`, `camoufoxCapabilities`, `electronCapabilities` |
 | `src/shared/preferences.mjs` | Out-of-band `<dataRoot>/user-preferences.json` atomic load/save, shared startup `automationMode` precedence (`env > policy > user-preferences > standard`), and internal protected-path upload filter | `PREFERENCES_FILE`, `loadUserPreferences`, `saveUserPreferences`, `resolveAutomationMode`, `isProtectedInternalPath` |
 | `src/shared/ui-strings.mjs` | Shared en/ko Agent Control toolbar & Disconnect confirmation strings (single source of truth for Camoufox `#nav-bar` and Electron toolbar/dialog) | `CONTROL_STRINGS`, `controlStrings` |
-| `src/shared/authority.mjs` | caller generations; single-use tickets bound to an args digest | `CallerAuthority`, `BROWSER_TOOL`, `withoutLease` |
 | `src/shared/rpc.mjs` | newline-JSON request, response, event and cancel; 16 MiB frames; 256 in flight | `RpcPeer` |
-| `src/shared/paths.mjs` | caller authority of the registration, automation mode env parsing (`WB_AUTOMATION_MODE`), data root per authority, connection directory, pipe name | `authorityMode`, `automationMode`, `pluginData`, `connectionPaths`, `validChannel` |
+| `src/shared/paths.mjs` | connection-authority validation (`WB_AUTHORITY` optional, `hook` refused), automation mode (`WB_AUTOMATION_MODE`), engine mode (`WB_ENGINE`), absolute data root (`WB_DATA_DIR`), connection directory, pipe name, Camoufox binary resolution | `authorityMode`, `automationMode`, `engineMode`, `persistentProfilesEnabled`, `camoufoxExecutable`, `pluginData`, `connectionPaths`, `validChannel` |
 | `src/shared/async.mjs` | abortable pause; timeout + signal bound | `pause`, `bounded` |
 | `src/shared/contract.mjs` | action table, argument validation, keys, URL rules, error type | `actions`, `inputActions`, `keys`, `validateArgs`, `pageURL`, `addressURL`, `fail`, `BrowserHostError` |
 | `src/browser/queue.mjs` | per-key FIFO lane; abort settles the caller, the actual operation keeps fencing | `FenceQueue` |
@@ -99,10 +93,10 @@ Host: Mixdog (hook authority) or a plain MCP registration such as Claude Code (c
 | `src/browser/dialogs.mjs` | JS dialog adapter: wraps `dialog.showMessageBox`, pairs CDP events | `BrowserDialogs`, `showManualMessageBox` |
 | `src/browser/consent.mjs` | `native-consent.exe` prompt surface; native page menu; native Disconnect confirmation dialog | `ConsentSurface`, `confirmDisconnectDialog`, `installPageMenu` |
 | `src/browser/user-agent.mjs` | removes `IndependentWindowsBrowser/` and `Electron/` UA tokens | `configureBrowserIdentity` |
-| `native/bridge.cpp` | launcher modes `--mcp`, `--hook`, `--browser`; final-path package root; child created in its Job | `wmain`, `packageRoot` |
+| `native/bridge.cpp` | launcher modes `--mcp`, `--browser`, `--browser-electron`; final-path package root; child created in its Job | `wmain`, `packageRoot` |
 | `native/consent.cpp` | Windows `UserConsentVerifier` helper: `--availability` or prompt | — |
 
-Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` → `shared/`; `hook/` → `shared/`. `shared/` imports no other layer and no Electron, and `mcp/` and `hook/` never import `browser/`, so the MCP and hook bundles carry no engine code. Inside `browser/`, `host.mjs` and `camoufox/host.mjs` compose `host-common.mjs` and their engine modules; `redact.mjs` and `perception/*` modules are pure (zero protocol, DOM, or Electron imports). Nothing under `src/` imports `build/`.
+Import direction, one way: `companion/` → `browser/` → `shared/`; `mcp/` → `shared/`. `shared/` imports no other layer and no Electron, and `mcp/` never imports `browser/`, so the MCP bundle carries no engine code. Inside `browser/`, `host.mjs` and `camoufox/host.mjs` compose `host-common.mjs` and their engine modules; `redact.mjs` and `perception/*` modules are pure (zero protocol, DOM, or Electron imports). Nothing under `src/` imports `build/`.
 
 ## Electron hooks
 
@@ -155,15 +149,14 @@ BrowserWindow "frame"  default 1120×820; its own webContents is the toolbar (da
 
 ## Data layout
 
-Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered folder (a new package path gets a new root); connection authority `WB_DATA_DIR`, set by the registration (`src/shared/paths.mjs pluginData`).
+Root: `WB_DATA_DIR`, an absolute directory set by the MCP host registration (`src/shared/paths.mjs pluginData`).
 
 | Path | Content | Lifetime |
 | --- | --- | --- |
-| `connections/<channel>/endpoint.json` | `{channel, key, pipe, protocol:1}`; hook authority only | removed on clean MCP close |
 | `connections/<channel>/electron/` | Electron userData | kept |
-| `user-preferences.json` | `{version:1, automationMode:"standard"\|"elevated"}` out-of-band human preference (read at startup below explicit env/policy; updated atomically by trusted `#nav-bar` click or direct user edit; blocked from uploads) | kept across restarts/upgrades |
+| `user-preferences.json` | `{version:1, automationMode:"standard"\|"elevated"}` out-of-band human preference (read at startup below explicit env/policy; updated atomically by trusted toolbar click or direct user edit; blocked from uploads) | kept across restarts/upgrades |
 | `profiles/camoufox-<slug>/` + `profiles/camoufox-<slug>.lock` | Named persistent Camoufox profiles (`default`, `work`, `personal`, plus user-created slugs) with serialized stale-lock recovery and token-verified release; implicit default falls back to per-connection `profiles/camoufox/` (`ephemeral-busy`) on live conflict, while explicit binds fail `PROFILE_IN_USE` | kept across restarts/upgrades and `close_session`; lock removed after process exit |
-| `connections/<channel>/profiles/<sha256(callerId)>/` | Default Electron profile (or per-connection Camoufox fallback/hook profile `profiles/camoufox/`) | kept; never reused by a new connection |
+| `connections/<channel>/profiles/<sha256(callerId)>/` | Default Electron profile (or per-connection Camoufox `ephemeral-busy` / opt-out profile `profiles/camoufox/`) | kept; never reused by a new connection |
 | memory-only `independent-session-<uuid>` partition | Temporary browser session's Chromium storage | cleared on session close/connection end; partition object lives until companion exit |
 | `connections/<channel>/downloads/<sha256(callerId)>/` | Default session's `<uuid>-<sanitized name>` | kept |
 | `connections/<channel>/downloads/<sha256(callerId + NUL + ctxId)>/` | Temporary session's downloaded files | kept; pending downloads cancelled on session close |
@@ -171,7 +164,7 @@ Root: hook authority `MIXDOG_PLUGIN_DATA`, assigned by Mixdog per registered fol
 ## Package layout
 
 `npm run package` → `dist/win-browser-XXXXXX/win-browser/`:
-`plugin.json`, `browser-policy.json`, `hooks/`, `skills/`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist for bundled Node & `WB_ENGINE=electron`), `app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and `provenance.json`), `licenses/camoufox/` (`NOTICE.md`, `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
+`browser-policy.json`, `bin/bridge.exe`, `bin/native-consent.exe`, `runtime/` (Electron dist for bundled Node & `WB_ENGINE=electron`), `app/{mcp,companion,companion-camoufox}.cjs` + maps, `app/toolbar-preload.cjs`, `app/runner-preload.cjs`, `licenses/mixdog/` (Mixdog `LICENSE`, `NOTICE.md` and `provenance.json`), `licenses/camoufox/` (`NOTICE.md`, `provenance.json`), `licenses/native/`, `licenses/npm/`, `licenses/npm-packages.json`, `sources/native/*.cpp`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`.
 
 Shared-runtime local install (`build-release.md` Local install): `<root>\win-browser` is a junction to `<root>\win-browser-versions\v<ver>\win-browser`, and the ~1.3 GB Camoufox 158 runtime is stored once at `<root>\win-browser-runtime\camoufox\` (also resolvable via `camoufox/` inside the package, `WB_CAMOUFOX_PATH`, or local Camoufox cache).
 

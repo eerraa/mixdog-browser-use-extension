@@ -3,31 +3,34 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
-import { authorityMode, automationMode, camoufoxExecutable, engineMode, pluginData } from '../../src/shared/paths.mjs';
+import { authorityMode, automationMode, camoufoxExecutable, engineMode, persistentProfilesEnabled, pluginData } from '../../src/shared/paths.mjs';
 
-const mixdog = path.resolve('C:\\mixdog-data');
+const legacy = path.resolve('C:\\legacy-data');
 const own = path.resolve('C:\\wb-data');
 
-test('host hooks stay the default authority; only an explicit registration selects connection authority', () => {
-  assert.equal(authorityMode({}), 'hook');
-  assert.equal(authorityMode({ WB_AUTHORITY: '' }), 'hook');
-  assert.equal(authorityMode({ WB_AUTHORITY: 'hook' }), 'hook');
+test('connection authority is the sole mode; WB_AUTHORITY is optional and hook/unknown values fail closed', () => {
+  assert.equal(authorityMode({}), 'connection');
+  assert.equal(authorityMode({ WB_AUTHORITY: '' }), 'connection');
   assert.equal(authorityMode({ WB_AUTHORITY: 'connection' }), 'connection');
+  assert.throws(() => authorityMode({ WB_AUTHORITY: 'hook' }), /WB_AUTHORITY=hook is no longer supported/);
   for (const value of ['Connection', 'none', 'hooks', ' connection']) {
-    assert.throws(() => authorityMode({ WB_AUTHORITY: value }), /WB_AUTHORITY must be hook or connection/, value);
+    assert.throws(() => authorityMode({ WB_AUTHORITY: value }), /WB_AUTHORITY must be connection/, value);
   }
 });
 
-test('each authority reads only its own absolute data root and never falls back to the other', () => {
-  assert.equal(pluginData({ MIXDOG_PLUGIN_DATA: mixdog, WB_DATA_DIR: own }), mixdog);
-  assert.throws(() => pluginData({ WB_DATA_DIR: own }), /MIXDOG_PLUGIN_DATA is required/);
-  assert.throws(() => pluginData({ MIXDOG_PLUGIN_DATA: 'relative' }), /MIXDOG_PLUGIN_DATA is required/);
-  assert.equal(pluginData({ WB_AUTHORITY: 'connection', WB_DATA_DIR: own, MIXDOG_PLUGIN_DATA: mixdog }), own);
-  for (const env of [{ WB_AUTHORITY: 'connection' }, { WB_AUTHORITY: 'connection', MIXDOG_PLUGIN_DATA: mixdog },
-    { WB_AUTHORITY: 'connection', WB_DATA_DIR: 'relative\\data' }]) {
+test('pluginData always requires an absolute WB_DATA_DIR and never falls back to MIXDOG_PLUGIN_DATA', () => {
+  assert.equal(pluginData({ WB_DATA_DIR: own }), own);
+  assert.equal(pluginData({ WB_AUTHORITY: 'connection', WB_DATA_DIR: own, MIXDOG_PLUGIN_DATA: legacy }), own);
+  for (const env of [{}, { MIXDOG_PLUGIN_DATA: legacy }, { WB_AUTHORITY: 'connection' },
+    { WB_AUTHORITY: 'connection', MIXDOG_PLUGIN_DATA: legacy }, { WB_DATA_DIR: 'relative\\data' }]) {
     assert.throws(() => pluginData(env), /WB_DATA_DIR must be an absolute directory/);
   }
-  assert.throws(() => pluginData({ WB_AUTHORITY: 'other', MIXDOG_PLUGIN_DATA: mixdog }), /WB_AUTHORITY/);
+  assert.throws(() => pluginData({ WB_AUTHORITY: 'hook', WB_DATA_DIR: own, MIXDOG_PLUGIN_DATA: legacy }), /WB_AUTHORITY=hook is no longer supported/);
+  assert.throws(() => pluginData({ WB_AUTHORITY: 'other', WB_DATA_DIR: own }), /WB_AUTHORITY/);
+  assert.equal(persistentProfilesEnabled({}), true);
+  assert.equal(persistentProfilesEnabled({ WB_PERSISTENT_PROFILE: '1' }), true);
+  assert.equal(persistentProfilesEnabled({ WB_PERSISTENT_PROFILE: '0' }), false);
+  assert.equal(persistentProfilesEnabled({ WB_PERSISTENT_PROFILE: 'false' }), false);
 });
 
 test('automationMode is unset by default, accepts only standard or elevated, and fails closed on unknown values', () => {

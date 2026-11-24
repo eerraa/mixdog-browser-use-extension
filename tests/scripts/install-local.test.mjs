@@ -7,7 +7,7 @@ import path from 'node:path';
 import { RUNTIME, STABLE, VERSIONS, install } from '../../scripts/install-local.mjs';
 
 // A release folder as `package:clean --release` lays it out, with a few files.
-async function release(parent, version, files = { 'bin/bridge.exe': `bridge ${version}`, 'plugin.json': `{"version":"${version}"}` }) {
+async function release(parent, version, files = { 'bin/bridge.exe': `bridge ${version}`, 'browser-policy.json': `{"version":1,"mode":"delegated","release":"${version}"}` }) {
   const directory = path.join(parent, `release-v${version}`);
   const sums = [];
   for (const [name, content] of Object.entries(files)) {
@@ -108,13 +108,13 @@ test('side-by-side upgrade deduplicates byte-identical runtime files via NTFS ha
   const sharedElectron = 'electron-44.9.1-binary-payload'.repeat(1024);
   const rel1 = await release(directory, '1.0.0', {
     'bin/bridge.exe': 'bridge 1.0.0',
-    'plugin.json': '{"version":"1.0.0"}',
+    'browser-policy.json': '{"version":1,"release":"1.0.0"}',
     'runtime/electron.exe': sharedElectron,
     'runtime/icudtl.dat': 'icu-data-identical',
   });
   const rel2 = await release(directory, '1.0.1', {
     'bin/bridge.exe': 'bridge 1.0.1',
-    'plugin.json': '{"version":"1.0.1"}',
+    'browser-policy.json': '{"version":1,"release":"1.0.1"}',
     'runtime/electron.exe': sharedElectron,
     'runtime/icudtl.dat': 'icu-data-identical',
   });

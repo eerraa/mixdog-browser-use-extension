@@ -28,7 +28,7 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 | --- | --- | --- |
 | deps | `npm ci` | `node_modules/` |
 | runtime | `node node_modules/electron/install.js` (when install scripts were skipped) | `node_modules/electron/dist/` |
-| bundle | `npm run build` | `build/app/{mcp,hook,companion,companion-camoufox}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
+| bundle | `npm run build` | `build/app/{mcp,companion,companion-camoufox}.cjs` + maps, `build/app/toolbar-preload.cjs`, `build/app/runner-preload.cjs`, `build/bundle-inputs.json` |
 | native | `npm run build:native -- "<licenses dir>"` | `build/bridge.exe`, `build/native-consent.exe`, `build/licenses/native/*` |
 | package | `npm run package` | a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
 | clean package | `npm run package:clean -- "<abs licenses dir>"` | native, bundle and package in a temp copy of the working tree (Clean package build); a new `dist/win-browser-XXXXXX/win-browser/`; prints `{directory}` |
@@ -44,27 +44,25 @@ Not needed: Visual Studio, ATL/MFC, depot_tools, a custom Electron build.
 
 Build in an isolated copy so the repo `build/` stays free of native helpers (live-test caveat in `testing.md`). `npm run package:clean -- "<abs licenses dir>"` (`scripts/clean-package.mjs`) does steps 1–4 and prints `{directory}`; run `test:package` from the repo with `WB_PACKAGE_DIR` set to it.
 
-1. Copy `src`, `scripts`, `native`, `third_party`, `skills`, `hooks`, `plugin.json`, `browser-policy.json`, `README.md`, `THIRD_PARTY_NOTICES.md`, `package.json` and `LICENSE` (`SOURCES`) to a fresh temp dir (`%TEMP%\win-browser-build-*`).
+1. Copy `src`, `scripts`, `native`, `third_party`, `browser-policy.json`, `README.md`, `THIRD_PARTY_NOTICES.md`, `package.json` and `LICENSE` (`SOURCES`) to a fresh temp dir (`%TEMP%\win-browser-build-*`).
 2. Copy `node_modules` there; only `electron` may be a junction.
 3. In that dir run `node scripts/build-native.mjs <licenses dir>`, `node scripts/build.mjs`, `node scripts/package.mjs`.
-4. Copy the printed `dist/win-browser-XXXXXX` allocation into the repo `dist/`, the folder users register. Remove the `electron` junction first, then the temp copy, so no recursive delete reaches the repository runtime.
-
-Mixdog runs a registered package in place and keys its data by the folder path (`architecture.md` Data layout). Keep a registered package; a rebuilt package is a new folder that the user registers again.
+4. Copy the printed `dist/win-browser-XXXXXX` allocation into the repo `dist/`. Remove the `electron` junction first, then the temp copy, so no recursive delete reaches the repository runtime.
 
 ## Versioning
 
-Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `plugin.json` `version`, `VERSION` in `src/mcp/main.mjs` (the MCP handshake and `status` report it).
+Bump together: `package.json` `version`, `package-lock.json` (root and `packages[""]`), `VERSION` in `src/mcp/main.mjs` (the MCP handshake and `status` report it), and `AGENTS.md` Identity.
 
 ## Release (explicit user request only)
 
 1. Bump the version (Versioning) and commit. All suites pass on that tree.
-2. `npm run package:clean -- "<abs licenses dir>" --release` refuses uncommitted tracked changes, a version that differs between `package.json`, `plugin.json` and `src/mcp/main.mjs`, and an existing `dist/releases/v<ver>`. It runs the clean package build on `git archive` of `HEAD` with `core.autocrlf=false`, after checking every exported file against its blob id in the commit, and writes `dist/releases/v<ver>/`:
+2. `npm run package:clean -- "<abs licenses dir>" --release` refuses uncommitted tracked changes, a version that differs between `package.json` and `src/mcp/main.mjs`, and an existing `dist/releases/v<ver>`. It runs the clean package build on `git archive` of `HEAD` with `core.autocrlf=false`, after checking every exported file against its blob id in the commit, and writes `dist/releases/v<ver>/`:
    - `win-browser/`: the package. This path has no random part and matches the ZIP content.
    - `win-browser-v<ver>-windows-x64.zip`: `tar -a -c -f` (Windows `tar.exe`) of `win-browser`, the folder at the archive root with `/` separators; `<zip>.sha256` holds `<sha256>  <zip name>` (two spaces, LF).
    - `win-browser-v<ver>-files.sha256`: one `<sha256>  win-browser/<path>` line per packaged file; `release.json`: version, source commit, ZIP name and digest.
 3. Run `test:package` on `dist/releases/v<ver>/win-browser`, and on the `win-browser` of the ZIP extracted to a fresh temp dir.
-4. On explicit request only: tag `v<ver>` on that commit, push, then create the GitHub release on `eerraa/mixdog-browser-use-extension` with the ZIP and its `.sha256`. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler. Check that the uploaded asset digest equals the local sha256.
-5. MCP hosts receive the release through Local install: hosts registered at the stable path start it on their next connection, with no registration change. Mixdog registers a folder path itself: the `dist/releases/v<ver>/win-browser` folder, registered again for each release by the user.
+4. On explicit request only: tag `v<ver>` on that commit, push, then create the GitHub release on `eerraa/win-browser` with the ZIP and its `.sha256`. Korean notes: interface, default policy, per-layer verification counts, limits, unpinned compiler. Check that the uploaded asset digest equals the local sha256.
+5. MCP hosts receive the release through Local install: hosts registered at the stable path start it on their next connection, with no registration change.
 
 Published releases are the `v<ver>` git tags and their GitHub releases.
 

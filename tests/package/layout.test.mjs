@@ -11,34 +11,29 @@ const present = async relative => {
   assert.ok((await stat(path.join(artifact, relative))).isFile(), `Missing packaged file: ${relative}`);
 };
 
-test('folder includes its launch/runtime/skill/hook dependencies and original redistribution notices', async () => {
-  const manifest = await json('plugin.json');
-  assert.equal(manifest.name, 'win-browser');
-  // Official host registry IDs derive from the registered source basename,
-  // not manifest.name. Equal registry stem/server key yields plugin-win-browser.
+test('folder includes its launch/runtime/policy dependencies and original redistribution notices without legacy Mixdog plugin files', async () => {
   assert.equal(path.basename(artifact), 'win-browser',
     'Register the stable win-browser child, not its unique build allocation parent');
-  const server = manifest.mcpServers['win-browser'];
   const policy = await json('browser-policy.json');
   assert.equal(policy.mode, 'delegated');
   assert.deepEqual(policy.permissions, ['hid', 'usb', 'notifications', 'geolocation']);
   assert.equal(policy.origins, 'owned-pages');
   assert.equal(policy.lifetime, 'caller-generation');
   assert.equal(policy.newGrants, true);
-  assert.equal(server.command, '${MIXDOG_PLUGIN_ROOT}/bin/bridge.exe');
-  assert.deepEqual(server.args, ['--mcp']);
-  assert.equal(server.cwd, '${MIXDOG_PLUGIN_ROOT}');
   for (const relative of [
     'bin/bridge.exe', 'bin/native-consent.exe', 'runtime/electron.exe',
     'runtime/LICENSE', 'runtime/LICENSES.chromium.html', 'runtime/resources.pak',
     'runtime/resources/default_app.asar',
-    'app/mcp.cjs', 'app/hook.cjs', 'app/companion.cjs', 'app/companion-camoufox.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
-    'skills/independent-browser/SKILL.md', 'hooks/hooks.json',
+    'app/mcp.cjs', 'app/companion.cjs', 'app/companion-camoufox.cjs', 'app/toolbar-preload.cjs', 'app/runner-preload.cjs',
+    'browser-policy.json', 'README.md',
     'LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/mixdog/LICENSE', 'licenses/mixdog/NOTICE.md', 'licenses/mixdog/provenance.json',
     'licenses/camoufox/NOTICE.md', 'licenses/camoufox/provenance.json',
     'sources/native/bridge.cpp', 'sources/native/consent.cpp',
   ]) await present(relative);
-  for (const gone of ['bin/control-bar.exe', 'sources/native/control-bar.cpp']) {
+  for (const gone of [
+    'plugin.json', 'hooks/hooks.json', 'app/hook.cjs', 'skills/independent-browser/SKILL.md',
+    'bin/control-bar.exe', 'sources/native/control-bar.cpp',
+  ]) {
     await assert.rejects(stat(path.join(artifact, gone)), { code: 'ENOENT' }, `${gone} must not be shipped`);
   }
   const native = await json('licenses/native/provenance.json');

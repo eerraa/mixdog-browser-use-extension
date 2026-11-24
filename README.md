@@ -1,7 +1,6 @@
-# Independent Windows Browser
+# Independent Windows Browser (`win-browser`)
 
-Mixdog의 빌트인 Browser Use와 별개로 실행되는 Windows 브라우저 플러그인입니다.
-같은 배포 폴더를 Claude Code에 일반 MCP 서버로 등록해 쓸 수도 있습니다.
+Claude Code, Codex, Antigravity, DSH 등 모든 표준 MCP 호스트에서 사용할 수 있는 범용 Windows MCP 브라우저 자동화 서버입니다.
 기본 브라우저 엔진은 **Camoufox (패치된 Firefox 158)**이며, WebHID·WebUSB 장치 연결이
 필요한 워크플로우에서는 `WB_ENGINE=electron`(또는 `browser-policy.json` `"engine": "electron"`)으로
 내장 Electron 44.9.1 엔진을 명시적으로 선택할 수 있습니다.
@@ -9,11 +8,9 @@ Mixdog의 빌트인 Browser Use와 별개로 실행되는 Windows 브라우저 �
 
 ## 에이전트에게 제공되는 도구
 
-공개 MCP 도구는 `browse` 하나이며 `action`으로 동작을 고릅니다. 에이전트가 보는 이름은
-Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-browser__browse`입니다.
-관련 웹 작업에는 `independent-browser` 스킬이 안내를 제공하며, Claude Code에서는 MCP 서버
-지침(instructions)이 같은 안내를 전달합니다.
-훅은 Mixdog에서만 쓰는 내부 인증·호출 수명 처리용이지 추가 에이전트 도구가 아닙니다.
+공개 MCP 도구는 `browse` 하나이며 `action`으로 동작을 고릅니다(예: Claude Code에서는 `mcp__win-browser__browse`,
+Electron 하드웨어 등록에서는 `mcp__win-browser-hid__browse`). 사용법과 엔진 라우팅 안내가 MCP 서버 지침(`instructions`)으로
+자동 전달되므로 별도 플러그인 매니페스트나 훅 설정이 필요 없습니다.
 
 | 범위 | action |
 | --- | --- |
@@ -82,60 +79,42 @@ Mixdog에서 `mcp__plugin-win-browser__browse`, Claude Code에서 `mcp__win-brow
 
 ## 설치와 사용
 
-[GitHub Releases](https://github.com/eerraa/mixdog-browser-use-extension/releases)에서
+[GitHub Releases](https://github.com/eerraa/win-browser/releases)에서
 Windows x64 ZIP을 받아 압축을 풉니다. 공개된 SHA256 파일로 다운로드를 확인할 수 있습니다.
 
-1. **배포된 플러그인 폴더**를 Mixdog의 로컬 플러그인 설정에 등록하고 MCP를 활성화합니다.
-   소스 저장소 폴더가 아니라 `bin`, `runtime`, `app`, `skills`, `hooks`, `plugin.json`이
-   함께 들어 있는, 패키저가 출력한 경로 끝의 `win-browser` 폴더를 등록합니다.
-   고유 번호가 붙은 상위 폴더를 등록하거나 `win-browser` 이름을 바꾸면 안 됩니다.
-   기본 패키지는 `browser-policy.json`에 명시된 자동화 위임을 포함합니다. 등록·활성화하면
-   인증된 에이전트가 자신이 소유한 페이지에서 새 HID·USB 장치와 알림·위치 권한을
-   선택할 수 있습니다. 요청마다 별도 사람 확인을 요구하는 패키지가 아닙니다.
-2. 빌트인 Browser Use 비활성화와 필요한 앱 재시작은 사용자가 직접 진행합니다.
-3. 새 대화에서 원하는 웹 작업을 평소처럼 요청합니다. 특정 도구명이나 스킬명을
-   지시할 필요는 없습니다. 기본 MCP 이름과 플러그인 이름은 바꾸지 않습니다.
+### MCP 호스트 등록 (Claude Code · Codex · Antigravity · DSH)
 
-정상 등록 시 MCP 서버 이름은 `plugin-win-browser`여야 합니다. 별칭이나 중복 등록으로
-다른 이름이 붙는 구성은 지원하지 않습니다. 비활성화된 이전 등록도 이름 충돌을
-일으킬 수 있으므로, 충돌이 있으면 사용자가 지원되는 플러그인 설정에서 확인해야 합니다.
-새 경로의 패키지를 등록하면 별도 플러그인 ID·데이터를 사용하며 기존 로그인·설정을
-자동으로 이전하지 않습니다.
-
-### Claude Code에 등록
-
-Claude Code에서는 플러그인 마켓플레이스나 훅 없이, `win-browser` 폴더의 실행기를 일반 MCP
-서버(stdio)로 등록합니다. 아래 "고정 경로와 업데이트"의 고정 경로를 한 번 등록해 두면 버전이
-바뀌어도 다시 등록할 필요가 없습니다. 등록은 사용자 설정(`~/.claude.json`)을 바꾸므로 사용자가
-직접 실행합니다(PowerShell 예시).
+`win-browser` 폴더의 실행기(`bin\bridge.exe --mcp`)를 일반 MCP stdio 서버로 등록합니다.
+아래 "고정 경로와 업데이트"의 고정 경로를 한 번 등록해 두면 버전이 바뀌어도 다시 등록할 필요가 없습니다.
+등록은 사용자 설정을 바꾸므로 사용자가 직접 실행합니다(PowerShell 예시).
 
 ```powershell
-claude mcp add --scope user win-browser -e WB_AUTHORITY=connection -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code" -- "C:\설치루트\win-browser\bin\bridge.exe" --mcp
+claude mcp add --scope user win-browser -e WB_ENGINE=camoufox -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code" -- "C:\설치루트\win-browser\bin\bridge.exe" --mcp
 ```
 
-- `WB_AUTHORITY=connection`: Claude Code는 세션마다 MCP 서버를 따로 띄우므로 그 연결 자체를
-  호출자로 인증합니다. Mixdog 훅이 넣던 `_lease`는 쓰지 않으며, 인수로 보내면 아무것도 실행하지
-  않고 거부합니다. 같은 세션의 하위 에이전트는 탭·프로필을 함께 쓰고, 다른 세션은 별도
-  브라우저 프로세스·프로필을 씁니다.
+WebHID·WebUSB 장치 작업(`usekb.cc`, VIA/QMK 등)이 필요하면 Electron 폴백 서버를 별도 이름으로 함께 등록합니다.
+
+```powershell
+claude mcp add --scope user win-browser-hid -e WB_ENGINE=electron -e "WB_DATA_DIR=$env:LOCALAPPDATA\independent-windows-browser\claude-code-hid" -- "C:\설치루트\win-browser\bin\bridge.exe" --mcp
+```
+
+- **호출자 인증**: MCP stdio 연결 자체를 호출자로 인증합니다. 기존 등록의 `WB_AUTHORITY=connection`은
+  그대로 호환되며 생략해도 동일하게 동작합니다(`WB_AUTHORITY=hook` 및 레거시 `_lease` 인수는 거부됩니다).
+  같은 세션의 하위 에이전트는 탭·프로필을 함께 쓰고, 다른 세션은 별도 브라우저 프로세스·프로필을 씁니다.
 - 세션 도중 서버가 다시 시작되거나 `/mcp`로 다시 연결되면 새 브라우저 연결로 시작하므로 이전
   탭 ID는 닫힙니다(`CLOSED_TAB`). 다만 기본 Camoufox 엔진에서는 `WB_DATA_DIR\profiles\camoufox-default`
   영구 기본 프로필을 잠금(`camoufox-default.lock`)으로 보호해 재사용하므로, 유휴 종료나 버전 업그레이드
   뒤에도 자체 프로필의 로그인 상태가 유지됩니다(다른 브라우저 프로필은 복사하지 않으며, 동시에 다른
   연결이 잠금을 사용 중이면 자동으로 격리된 임시 프로필 `ephemeral-busy`로 떨어지고, `WB_PERSISTENT_PROFILE=0`으로
   영구 프로필을 끌 수 있습니다). 도구 정의에는 연결마다 바뀌는 값이 없어 같은 세션에서 그대로 이어서 쓸 수 있습니다.
-- `WB_DATA_DIR`: 연결별 Electron 데이터·프로필·다운로드를 둘 절대 경로입니다. Mixdog 데이터와
-  섞이지 않으며 연결 키를 디스크에 쓰지 않습니다. 연결이 끝나도 프로필 폴더는 지우지 않습니다.
-- 둘 중 하나라도 없거나 잘못되면 서버가 시작하지 않으며 `claude mcp get win-browser`에 실패로
-  표시됩니다.
+- `WB_DATA_DIR`: 연결별 브라우저 데이터·프로필·다운로드를 둘 절대 경로입니다(필수). 연결 키는 프로세스
+  메모리에만 유지되며 디스크에 쓰지 않습니다. 연결이 끝나도 프로필 폴더는 지우지 않습니다.
+- `WB_DATA_DIR`이 없거나 상대 경로이거나 허용되지 않은 환경 변수가 있으면 서버가 시작하지 않으며 `claude mcp get win-browser`에 실패로 표시됩니다.
 - 이미 실행 중인 세션에는 `/mcp`에서 다시 연결하거나 새 세션을 열어야 도구가 나타납니다.
   제거는 `claude mcp remove --scope user win-browser`입니다.
-- 사용법은 스킬 대신 서버 지침으로 전달됩니다. 매 호출 권한 확인을 없애려면 사용자가 Claude Code
-  권한 설정에서 `mcp__win-browser__browse`를 허용합니다.
-- 기본 `browser-policy.json`의 HID·USB·알림·위치 위임은 Claude Code 등록에도 같게 적용됩니다.
-  대화 턴 경계는 MCP 서버에 전달되지 않으므로 위임의 caller generation은 그 연결(세션)이
-  끝날 때까지 하나로 유지됩니다.
-- Codex·DSH 같은 다른 MCP 호스트도 같은 실행기(`bin\bridge.exe --mcp`)와 두 환경 변수로
-  등록합니다.
+- 사용법은 MCP 서버 지침(`instructions`)으로 전달됩니다. 매 호출 권한 확인을 없애려면 호스트 권한 설정에서 `mcp__win-browser__browse`를 허용합니다.
+- 기본 `browser-policy.json`의 HID·USB·알림·위치 위임 정책은 연결 시작 시 한 번 로드되어 그 연결이 끝날 때까지 유지됩니다.
+- Codex(`~/.codex/config.toml`), Antigravity(`~/.gemini/config/mcp_config.json`), DSH 등 다른 MCP 호스트도 같은 실행기(`bin\bridge.exe --mcp`)와 환경 변수(`WB_DATA_DIR`, 선택 `WB_ENGINE`)로 등록합니다.
 
 ### 고정 경로와 업데이트
 
@@ -215,9 +194,6 @@ browse({ action: "close_session", sessionId: "ctx2" });
 에이전트가 창을 열거나 조작해도 창이 포커스를 가져가지 않으므로, 다른 앱에서 치던 키가
 브라우저 창으로 새지 않습니다. 에이전트가 사람에게 넘길 때(`handoff`)는 작업 표시줄에서
 창이 깜박이기만 하며, 사용자가 창을 클릭해 이어서 조작합니다.
-이 창은 Mixdog 사이드패널이 아닌 별도 창입니다. 현재 Mixdog 플러그인이 공식적으로
-기여할 수 있는 항목은 skill·MCP 서버·hook이며, 플러그인 브라우저를 사이드패널에
-넣는 공식 API는 없습니다.
 
 에이전트가 조작하는 동안에는 페이지 위에 투명한 보호막이 덮여 있어 사용자의 클릭과
 키 입력이 페이지에 전달되지 않고, 주소창과 이동 버튼도 잠깁니다. 페이지를 클릭하거나
@@ -304,10 +280,10 @@ browse({ action: "close_session", sessionId: "ctx2" });
 
 ## 권한과 안전 경계
 
-- 자체 프로필만 사용하며 다른 브라우저나 Mixdog의 쿠키·계정·프로필을 복사하지 않습니다.
-- 웹페이지에는 실제 내장 Chromium 버전의 브라우저 식별 값을 사용합니다.
+- 자체 프로필만 사용하며 다른 브라우저의 쿠키·계정·프로필을 복사하지 않습니다.
+- 웹페이지에는 실제 내장 Chromium/Firefox 버전의 브라우저 식별 값을 사용합니다.
   Electron 앱 전용 연동으로 잘못 분류되는 것을 막으며 장치 권한·Windows 승인은 바꾸지 않습니다.
-  이 기본값은 플러그인 전용 실행기 안에만 적용되며 Mixdog 본체와 다른 브라우저는 변경하지 않습니다.
+  이 기본값은 전용 실행기 안에만 적용되며 다른 브라우저는 변경하지 않습니다.
 - 사이트 버튼 클릭, HTML 파일 입력의 파일 선택, JS 대화상자, HID·USB와 알림·위치 요청을 하나의
   `requests`/`respond` 인터페이스로 처리합니다. 실제 브라우저 이벤트에서 나온 요청과
   선택지만 사용할 수 있으며, 장치를 이름이나 첫 번째 항목만 보고 임의 선택하지 않습니다.
@@ -329,22 +305,18 @@ browse({ action: "close_session", sessionId: "ctx2" });
   프로세스 종료 확인과 실물 장치 입출력 검증은 구분해서 표시합니다.
 - 요청자와 범위를 확실히 확인할 수 없는 권한 API는 이유와 함께 거부합니다.
   OS 승인, 사용자 활성화와 Chromium의 보안 정책·장치 차단 목록을 해제하지 않습니다.
-- 훅은 이 플러그인 도구의 호출만 변경합니다. 다른 도구나 전역 세션을 차단하지 않습니다.
-  훅 종료 알림은 호스트의 best-effort 계약이므로 놓친 종료·이벤트 순서를
-  완전히 관측한다고 보장하지 않습니다.
-- 로컬 훅 자격정보는 웹페이지와 일반 MCP 인수에서 분리됩니다. 그러나 같은 OS 사용자
-  권한으로 플러그인 파일·프로세스를 바꾸거나 훅을 위조하는 프로그램을 격리하는
-  샌드박스는 아닙니다. 패키지 등록은 암호학적 동의 영수증이 아니며, 같은 사용자 권한의
-  로컬 코드 변조를 막지 못합니다. 자동화는 native 요청 adapter를 사용하며 승인창을 조작하지 않습니다.
+- 로컬 IPC 자격정보(`WB_IPC_KEY`)는 프로세스 메모리에만 유지되며 웹페이지와 MCP 인수에서 분리됩니다.
+  그러나 같은 OS 사용자 권한으로 파일·프로세스를 변조하는 로컬 프로그램을 격리하는 샌드박스는 아닙니다.
+  자동화는 native 요청 adapter를 사용하며 승인창을 조작하지 않습니다.
 
 일부 회전·왜곡 프레임과 실제 wheel 이벤트가 필요한 위젯은 지원하지 않습니다.
 JS `alert`·`confirm`은 자동 응답합니다. Electron 44.9.1의 `window.prompt()`는
-대화상자 생성 전에 `prompt() is not supported.` 오류를 내므로 지원하지 않습니다.
+대화상자 생성 전에 `prompt() is not supported.` 오류를 내므로 지원하지 않습니다(Camoufox에서는 지원).
 그 기능이 필요한 앱은 검증 완료가 아니라 runtime capability blocker로 보고합니다.
 `alert`·`confirm`의 중복 native UI 방지는 전용 companion 안의 공개 `dialog.showMessageBox`
 함수를 감싸 실제 CDP 이벤트와 연결하는 Electron 44.9.1 호환성 처리입니다.
 공식 dialog interception 확장 API는 아니므로 runtime 버전 변경 시 재검증이 필요합니다.
-설치된 Electron·Mixdog 파일이나 페이지 스크립트를 패치하지 않습니다.
+설치된 외부 브라우저 파일이나 페이지 스크립트를 패치하지 않습니다.
 파일 선택 자동 응답은 DOM에 묶인 HTML 파일 입력만 지원합니다.
 File System Access API의 `showOpenFilePicker`·`showSaveFilePicker`·`showDirectoryPicker`와
 일반 OS 파일 작업은 이 도구의 지원 범위가 아닙니다.

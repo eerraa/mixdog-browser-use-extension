@@ -136,24 +136,19 @@ test('semantic filtering is explicit, frame-scoped, and does not resolve ambigui
   assert.equal(entries.filter(e => matchesTarget(e, { name: 'save changes', exact: true })).length, 0);
 });
 
-test('only the hook schema carries _channel and _lease; the connection schema and instructions name no connection', async () => {
+test('the MCP tool schema is static without _channel or _lease and instructions name no connection', async () => {
   const { browserTool, connectionInstructions, CONNECTION_INSTRUCTIONS } = await import('../../src/mcp/tool.mjs');
-  const channel = '0f8fad5b-d9cb-469f-a165-70867728950e';
-  const hooked = browserTool(channel);
-  const connection = browserTool();
-  const electronTool = browserTool(null, { engine: 'electron' });
-  assert.equal(hooked.inputSchema.properties._lease.type, 'string');
-  assert.deepEqual(hooked.inputSchema.required, ['action', '_channel']);
-  assert.deepEqual(hooked.inputSchema.properties._channel.enum, [channel]);
+  const camoufoxTool = browserTool();
+  const electronTool = browserTool({ engine: 'electron' });
   // A host keeps a tool schema for the whole session, across server restarts.
-  assert.deepEqual(connection.inputSchema.required, ['action']);
-  assert.equal(connection.inputSchema.additionalProperties, false);
-  const { _channel, _lease, ...shared } = hooked.inputSchema.properties;
-  assert.deepEqual(connection.inputSchema.properties, shared, 'the two schemas differ only in _channel and _lease');
-  assert.deepEqual(electronTool.inputSchema, connection.inputSchema, 'camoufox and electron registrations share the exact inputSchema');
+  assert.deepEqual(camoufoxTool.inputSchema.required, ['action']);
+  assert.equal(camoufoxTool.inputSchema.additionalProperties, false);
+  assert.equal(Object.hasOwn(camoufoxTool.inputSchema.properties, '_channel'), false);
+  assert.equal(Object.hasOwn(camoufoxTool.inputSchema.properties, '_lease'), false);
+  assert.deepEqual(electronTool.inputSchema, camoufoxTool.inputSchema, 'camoufox and electron registrations share the exact inputSchema');
   assert.equal(electronTool.name, 'browse');
-  assert.match(connection.description, /^Primary independent browser \(Camoufox/);
-  assert.match(connection.description, /win-browser-hid/);
+  assert.match(camoufoxTool.description, /^Primary independent browser \(Camoufox/);
+  assert.match(camoufoxTool.description, /win-browser-hid/);
   assert.match(electronTool.description, /^Hardware-capable independent browser \(Electron/);
   assert.match(electronTool.description, /WebHID.*WebUSB.*usekb\.cc/);
   assert.match(electronTool.description, /win-browser\)/);

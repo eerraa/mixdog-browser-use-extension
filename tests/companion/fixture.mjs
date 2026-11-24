@@ -12,7 +12,8 @@ export const app = {
   exit(code) { state.exitCode = code; state.exited.resolve(code); },
 };
 export class BrowserHost {
-  constructor(options) { this.options = options; this.closed = false; state.host = this; }
+  constructor(options) { this.options = options; this.closed = false; this.calls = []; state.host = this; }
+  async execute(body, caller, signal) { this.calls.push({ body, caller, signal }); return { ok: true, callId: caller.callId }; }
   async close() { this.closed = true; }
   endSession(sessionId) { (state.endedSessions ??= []).push(sessionId); }
 }

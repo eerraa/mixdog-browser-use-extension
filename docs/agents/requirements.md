@@ -15,14 +15,14 @@ when tests pass.
 
 | ID | Requirement |
 | --- | --- |
-| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses, registered as a Mixdog plugin or as a plain MCP server in Claude Code or another MCP host (Codex, DSH), at one stable install path (`build-release.md` Local install). Users never install dev tools, build, or patch Mixdog or Claude Code. |
-| C2 | Natural selection: one raw MCP tool (`browse`) per registration and the `independent-browser` skill (in plain MCP hosts, engine-tuned server instructions; optionally dual pinned registrations `win-browser` for general Camoufox browsing and `win-browser-hid` for Electron WebHID/WebUSB); agents choose the right registration for interactive web or hardware work without being told. Own names are fine; built-in names and UI are not cloned. |
+| C1 | Folder install: the packaged `win-browser` folder runs with its bundled runtime, app, native helpers and licenses as a plain MCP stdio server across MCP hosts (Claude Code, Codex, Antigravity, DSH, etc.) at one stable install path (`build-release.md` Local install). Users never install dev tools, build, or patch host apps. |
+| C2 | Natural selection: one raw MCP tool (`browse`) per registration with engine-tuned server instructions (optionally dual pinned registrations `win-browser` for general Camoufox browsing and `win-browser-hid` for Electron WebHID/WebUSB); agents choose the right registration for interactive web or hardware work without being told. |
 | C3 | Real browser work: navigation, DOM and screenshot observation, exact targeting, click, typing, forms, tabs, frames, HTML uploads, downloads, dialogs and result checks, with ref freshness and validation, cancellation and uncertainty semantics. |
 | C4 | Independence: works with built-in Browser Use off; own windows and profiles; in default `standard` mode the person handles login, passwords, CAPTCHA and 2FA in the same window (`SENSITIVE_INPUT_REFUSED` blocks non-empty sensitive input), while an explicit out-of-band host/policy opt-in (`elevated`) may automate sensitive fields with masking, `SENSITIVE_PRESENT`, manual CAPTCHA handoff and one-way connection downgrade intact; no copying of profiles, cookies or accounts; no built-in handoff. |
 | C5 | Protected requests follow the trusted package policy (`contracts.md` Native requests and permissions). The agent never operates an approval UI; MCP arguments never create policy or approval. |
 | C6 | Denial and cancellation are never bypassed or re-asked. One requester's navigation or cancel never aborts another valid requester. Revocation removes real Chromium grants (process termination), never just caches. Unverifiable requester or scope: refuse with a reason. OS approval, user activation and browser security stay on. |
 | C7 | Change is not stop: navigation, reload, frame swap, hide, human intervention and disconnect recover through fresh observation; Stop, denial and revocation are never auto-cleared. Stale refs, points and snapshot IDs are never reused; executed or uncertain input is never resent. |
-| C8 | Isolation: tabs and browser sessions are owned per caller; browser sessions isolate login/storage and share it only among their own tabs; input is serialized per tab; ended callers' late calls are rejected; hooks affect only this plugin's tool. |
+| C8 | Isolation: each MCP stdio connection owns its companion, tabs and browser sessions; browser sessions isolate login/storage and share it only among their own tabs; input is serialized per tab; revoked or ended connections abort admitted work and reject late calls. |
 | C9 | Reuse boundary: only the Mixdog browser code forked at 1.3.4 (`third_party/mixdog/provenance.json`), not tracked afterwards; no Mixdog core, ASAR or private bridge; no agent runner or agent settings; provenance and licenses preserved. |
 | C10 | Honest verification: unit, live Electron, live Camoufox, packaged MCP and real-device evidence are reported separately. |
 
@@ -33,14 +33,13 @@ native `<name>` = `tests/native/<name>.test.mjs`, live `<name>` =
 `tests/live/<name>.test.mjs`, package `<name>` = `tests/package/<name>.test.mjs`
 (`testing.md` Suites).
 
-Real device: the package registered in Mixdog on the user's PC, or in Claude Code
-for AC21 (`testing.md` Real-device checks). `verified` = checked on a package built from the current tree;
+Real device: the package registered at the stable MCP install path on the user's PC (`testing.md` Real-device checks). `verified` = checked on a package built from the current tree;
 `not verified`; `—` = nothing beyond the suites to check.
 
 | AC | Req | Criterion | Suites | Real device |
 | --- | --- | --- | --- | --- |
-| AC1 | C1 | The package folder holds the runtime, `app/` bundles, `bin/` helpers, policy, hooks, skill and licenses, and serves MCP through `bin/bridge.exe --mcp` with nothing else installed | package `layout`, `mcp` | — |
-| AC2 | C1, C2, C8 | Registered in Mixdog with built-in Browser Use off, the tool appears, its calls pass the host hooks, and an agent picks the tool and the skill for interactive web work unprompted | package `mcp` (hook admission) | not verified |
+| AC1 | C1 | The package folder holds the runtime, `app/` bundles, `bin/` helpers, policy and licenses (without legacy Mixdog plugin files), and serves MCP through `bin/bridge.exe --mcp` with nothing else installed | package `layout`, `mcp` | — |
+| AC2 | C1, C2, C8 | Registered as a plain MCP stdio server (e.g. Claude Code, Codex, Antigravity, DSH), the tool appears with engine-tuned server instructions and an agent picks the right registration for interactive web or WebHID/WebUSB work unprompted | package `mcp` | not verified |
 | AC3 | C3 | Navigation, text and screenshot observation, exact targeting, click, typing, forms, tabs, frames, uploads, downloads and dialogs (including native `prompt` on Camoufox), with result checks, on local pages | unit `contract`, `host`, `frames`, `camoufox`, `perception`, `dialogs`, `requests`; live `browser-host`, `camoufox`, `perception`, `observation`, `review-regressions`, `workers`; package `mcp` | — |
 | AC4 | C3 | Text results and agent DevTools reads (HTTP/redirects/WebSocket/worker/inspect/performance) stay compact on large real sites (e.g. naver main and login) through the registered tool | unit `perception`, `devtools`, `camoufox`; live `perception`, `devtools`, `camoufox` (local pages) | not verified |
 | AC5 | C2, C3 | An agent chooses and completes `run` scripts through the registered package on real sites | unit `runner`; live `runner`, `camoufox`; package `mcp` (local pages) | not verified |
@@ -54,7 +53,7 @@ for AC21 (`testing.md` Real-device checks). `verified` = checked on a package bu
 | AC13 | C6 | Denial and cancellation are never bypassed or re-asked; one requester's cancel never aborts another; revocation terminates the companion | unit `host`, `permission-broker`, `requests`, `termination`; live `autonomous`, `security`; package `mcp` (teardown) | — |
 | AC14 | C7 | Navigation, reload, frame swap, hide and human intervention recover through fresh observation; Stop and denial are never auto-cleared; stale refs and points are refused; executed or uncertain input is never resent | unit `host`, `perception`, `runner`; live `browser-host`, `security`, `runner` | — |
 | AC15 | C7 | Native picker and dropdown windows (`showPicker`, date and color pickers, `select` dropdowns) used by a person during automation fail closed with `unexpected-page-input` | unit `frames`, `host`; live `security` (picker value changes, synthetic trusted input), `runner` (synthetic trusted input) | not verified |
-| AC16 | C8 | Tabs are owned per caller session, input is serialized per tab, ended callers' late calls are rejected, and hooks act only on this tool | unit `authority`, `authority-turns`, `authority-lifecycle`, `queue`, `host`; package `mcp` (hook admission) | — |
+| AC16 | C8 | Connections isolate companions, tabs and sessions, input is serialized per tab, companion IPC admits only the PSK-authenticated gateway role, and revocation aborts admitted work | unit `queue`, `host`, `termination`; package `mcp` | — |
 | AC17 | C9 | Only the forked Mixdog browser code is used, and its fork record and Mixdog's notices ship unmodified | package `layout` | — |
 | AC18 | C3, C7 | Closing every tab keeps the connection: the same channel opens new pages; only MCP EOF and revocation end the companion | package `mcp` (last tab, teardown) | not verified |
 | AC19 | C5 | Real USB devices can be selected and used under the shipped policy (requires `WB_ENGINE=electron` fallback) | unit `host`; live `browser-host` (device permission checks); package `mcp` (electron fallback) | not verified |

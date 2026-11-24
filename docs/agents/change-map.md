@@ -62,23 +62,22 @@ rule to keep.
 
 ## R8 MCP transport, timeouts, process lifecycle
 
-- Edit: `src/mcp/main.mjs` (server, error envelope, EOF); `src/mcp/gateway.mjs` (startup 20 s, call 120 s, exit wait 8 s); `src/shared/rpc.mjs` (framing, limits); `src/companion/main.mjs` (roles, methods, `terminate`); `plugin.json` (`startupTimeoutMs` 30000, `timeoutMs` 120000); `host.mjs #run` (25 s); `native/bridge.cpp`.
+- Edit: `src/mcp/main.mjs` (server, error envelope, EOF); `src/mcp/gateway.mjs` (startup 20 s, call 120 s, exit wait 8 s); `src/shared/rpc.mjs` (framing, limits); `src/companion/server.mjs` (gateway PSK auth, `terminate`); `src/companion/main.mjs` & `src/companion/camoufox-main.mjs`; `host.mjs #run` (25 s); `native/bridge.cpp`.
 - Keep: transport loss reports `replaySafe:false`; a reconnect serves new calls only.
 
-## R9 Caller identity, hooks, connection authority
+## R9 Caller identity, connection authority, IPC handshake
 
-- Edit: `src/hook/main.mjs`, `src/shared/authority.mjs`, `hooks/hooks.json` (events, matcher, timeouts 5 s and 2 s), hook role in `src/companion/main.mjs`.
-- Connection authority: `src/shared/paths.mjs` (`authorityMode`, `pluginData` per authority) → `src/mcp/gateway.mjs` (`CONNECTION_CALLER`, the issuer connection and `ticket`, the `_lease` refusal and the own-channel stamp in `execute`, no endpoint.json) → `src/mcp/main.mjs` (`browserTool` without a channel, no `_channel` check, `CONNECTION_INSTRUCTIONS`).
-- Keep: hooks act only on `BROWSER_TOOL` and deny on failure; `contracts.md` Authority and isolation. The companion admits only consumed tickets under both authorities; the authority comes from `WB_AUTHORITY` alone and never falls back.
+- Edit: `src/shared/paths.mjs` (`authorityMode` optional / `hook` refused, `pluginData` requiring absolute `WB_DATA_DIR`) → `src/mcp/gateway.mjs` (`CONNECTION_CALLER`, `_lease` refusal, D26 `_channel` restamp, single `gateway` pipe, no `endpoint.json`) → `src/companion/server.mjs` (constant-time `sameKey`, single `gateway` exclusivity, fresh `callId: randomUUID()`, connection-scoped `AbortController`) → `src/mcp/main.mjs` (`browserTool` static schema, `connectionInstructions`).
+- Keep: `contracts.md` Authority and isolation; never write pipe keys to disk; never accept `WB_AUTHORITY=hook` or `_lease`.
 
-## R19 Claude Code registration and guidance
+## R19 MCP host registration and guidance
 
-- Edit: `src/mcp/tool.mjs CONNECTION_INSTRUCTIONS` (at most 4096 characters, critical rules first; the same guidance as `SKILL.md`), `browserTool` (called without a channel: no `_channel`, no `_lease`); `src/mcp/main.mjs` (instructions only under connection authority).
-- Keep: the connection-authority schema and instructions hold nothing that differs between server processes (D26). The registration command in `README.md`, `AGENTS.md` Commands and `build-release.md` Release use one server name (`win-browser`), `WB_AUTHORITY=connection` and an absolute `WB_DATA_DIR`.
+- Edit: `src/mcp/tool.mjs` (`connectionInstructions`, `CONNECTION_INSTRUCTIONS`, at most 4096 characters, critical rules first; static `browserTool` with no `_channel`, no `_lease`); `src/mcp/main.mjs` (always passes server instructions).
+- Keep: the schema and instructions hold nothing that differs between server processes (D26). The registration command in `README.md`, `AGENTS.md` Commands and `build-release.md` Local install uses one server name (`win-browser`, plus optional `win-browser-hid`) and an absolute `WB_DATA_DIR`.
 
-## R10 Plugin, server or tool rename
+## R10 Server or tool rename
 
-Avoid: it breaks existing registrations. Change together: `plugin.json` `name` and `mcpServers` key, the `hooks.json` matcher, `authority.mjs BROWSER_TOOL`, the tool name in `mcp/tool.mjs` and the name check in `mcp/main.mjs`, `SKILL.md` `dependencies` (`plugin-win-browser`), the package folder `win-browser` in `package.mjs`.
+Avoid: it breaks existing registrations. Change together: the tool name in `mcp/tool.mjs` and the name check in `mcp/main.mjs`, and the package folder `win-browser` in `package.mjs`.
 
 ## R12 Electron upgrade
 
