@@ -9,7 +9,7 @@ import { browserTool, connectionInstructions, errorResult, toolResult } from './
 
 // The package version: the MCP handshake and `status` report it, so a host that
 // still runs an earlier install is visible to the agent and the person.
-const VERSION = '0.6.10';
+const VERSION = '0.6.11';
 
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
