@@ -1,18 +1,17 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { RpcPeer } from '../shared/rpc.mjs';
 import { bounded } from '../shared/async.mjs';
-import { BROWSER_TOOL } from '../shared/authority.mjs';
 import { fail, validateArgs } from '../shared/contract.mjs';
 import { automationMode, camoufoxExecutable, connectionPaths, engineMode, persistentProfilesEnabled } from '../shared/paths.mjs';
 import { BrowserPolicy, ELECTRON_LIST_PROFILES, camoufoxCapabilities, electronCapabilities } from '../shared/policy.mjs';
 import { inspectProfiles } from '../shared/profile-lock.mjs';
 import { loadUserPreferences, resolveAutomationMode } from '../shared/preferences.mjs';
 
-// Under connection authority the MCP connection is the only caller.
+// Under MCP stdio connection authority the MCP connection is the sole caller.
 export const CONNECTION_CALLER = 'mcp-connection';
 
 async function connect(pipe, hello) {
@@ -45,14 +44,11 @@ function awaitWithSignal(promise, signal) {
   });
 }
 
-export async function createGateway(root, data, { authority = 'hook' } = {}) {
-  if (authority !== 'hook' && authority !== 'connection') throw new Error('Unknown caller authority');
+export async function createGateway(root, data) {
   const policy = await BrowserPolicy.load(root);
   const engine = engineMode() ?? policy.engine;
-  // Connection authority defers spawning the companion (both Camoufox and
-  // Electron) until the first operational call so idle MCP registrations keep
-  // zero companion processes; hook authority stays eager for PreToolUse endpoint.json.
-  const lazy = authority === 'connection';
+  // Defer spawning the companion (both Camoufox and Electron) until the first
+  // operational call so idle MCP registrations keep zero companion processes.
   const channel = randomUUID();
   const connectionId = randomUUID();
   const paths = connectionPaths(data, channel);
@@ -61,22 +57,21 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
 
   // Freeze the trusted configuration snapshot once before admitting any call so
   // cold metadata (`status`/`list_profiles`) and a lazily spawned companion agree.
-  const camoufoxMeta = lazy && engine === 'camoufox' ? camoufoxExecutable(root) : null;
-  const usePersistent = lazy && engine === 'camoufox' ? persistentProfilesEnabled(authority) : false;
+  const camoufoxMeta = engine === 'camoufox' ? camoufoxExecutable(root) : null;
+  const usePersistent = engine === 'camoufox' ? persistentProfilesEnabled() : false;
   const profilesRoot = path.join(data, 'profiles');
-  const prefs = lazy ? await loadUserPreferences(data) : null;
-  const resolvedMode = lazy ? resolveAutomationMode({ envMode: automationMode(), policy, prefs }) : null;
-  const initSnapshot = lazy ? { connectionId, policy: policy.toSnapshot(), prefs } : null;
+  const prefs = await loadUserPreferences(data);
+  const resolvedMode = resolveAutomationMode({ envMode: automationMode(), policy, prefs });
+  const initSnapshot = { connectionId, policy: policy.toSnapshot(), prefs };
 
-  let child = null, exit = null, peer = null, issuer = null;
+  let child = null, exit = null, peer = null;
   let started = false, startFlight = null, startFailed = null;
   let terminated = null, closing = false, terminationReason = null;
 
   const helloBase = { channel, key, role: 'gateway' };
-  const issuerHello = { channel, key, role: 'hook' };
   const ended = () => Boolean(terminated || closing || terminationReason || startFailed);
   const connectionClosedError = () => Object.assign(
-    new Error('Browser connection ended; reconnect the plugin explicitly'),
+    new Error('Browser connection ended; reconnect the MCP server explicitly'),
     { code: 'CONNECTION_CLOSED', requestedInputDispatched: false },
   );
   const watch = current => current.on('event', (event, params) => {
@@ -90,7 +85,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     let startup = '', errors = '';
     const proc = spawn(path.join(root, 'bin', 'bridge.exe'), [flag], {
       cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, WB_CHANNEL: channel, WB_IPC_KEY: key, ...(lazy ? { WB_LAZY_INIT: '1' } : {}) },
+      env: { ...process.env, WB_CHANNEL: channel, WB_IPC_KEY: key, WB_LAZY_INIT: '1' },
     });
     child = proc;
     const procExit = new Promise(resolve => {
@@ -137,27 +132,13 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     try {
       await bounded(ready, 20000, 'Browser companion startup', undefined, () => { cleanupStartup(); proc.kill(); });
       if (closing) throw new Error('Browser connection closed during startup');
-      peer = await connect(paths.pipe, lazy ? { ...helloBase, snapshot: initSnapshot } : helloBase);
+      peer = await connect(paths.pipe, { ...helloBase, snapshot: initSnapshot });
       watch(peer);
-      if (closing) throw new Error('Browser connection closed during startup');
-      // Host hooks find the pipe and key through endpoint.json. Connection
-      // authority has no hooks, so its key never touches the disk.
-      if (authority === 'hook') {
-        await writeFile(`${paths.endpoint}.tmp`, JSON.stringify({ channel, key, pipe: paths.pipe, protocol: 1 }), { mode: 0o600, flag: 'wx' });
-        await rename(`${paths.endpoint}.tmp`, paths.endpoint);
-      }
-      // Connection authority: this process issues each call's single-use ticket
-      // over its own hook-role connection, so the companion admits every call
-      // through CallerAuthority.consume exactly as under host hooks.
-      issuer = authority === 'connection' ? connect(paths.pipe, issuerHello) : null;
-      if (issuer) await issuer;
       if (closing) throw new Error('Browser connection closed during startup');
       started = true;
     } catch (error) {
       peer?.close();
       peer = null;
-      if (issuer) (await issuer.catch(() => null))?.close();
-      issuer = null;
       if (!terminated) proc.kill();
       await bounded(procExit, 4000, 'Failed companion cleanup').catch(() => {});
       throw Object.assign(error, { requestedInputDispatched: false });
@@ -181,20 +162,6 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     if (ended()) throw connectionClosedError();
   }
 
-  // Hook authority needs endpoint.json before PreToolUse arrives; connection
-  // authority (both Camoufox and Electron) starts lazily on the first call.
-  if (!lazy) {
-    await startCompanion();
-  }
-
-  const ticket = args => {
-    // Chained so concurrent calls share one reconnect after a lost transport.
-    issuer = issuer.catch(() => null).then(current => (current && !current.closed ? current : connect(paths.pipe, issuerHello)));
-    return issuer.then(current => current.request('issue', {
-      sessionId: CONNECTION_CALLER, callId: randomUUID(), toolName: BROWSER_TOOL, args,
-    }, { timeoutMs: 2000 })).then(response => response.ticket);
-  };
-
   const livePeer = async () => {
     if (ended()) throw connectionClosedError();
     if (!peer || peer.closed) {
@@ -207,21 +174,20 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
 
   return {
     channel,
-    authority,
     engine,
     async status() {
       if (terminated || terminationReason || startFailed) {
         return {
           channel,
           engine,
-          ...(lazy ? { connectionId } : {}),
+          connectionId,
           state: 'connection-ended',
           companionState: 'ended',
           terminationReason: terminationReason ?? (startFailed ? 'startup-failed' : undefined),
           process: terminated,
         };
       }
-      if (lazy && !started) {
+      if (!started) {
         const companionState = startFlight ? 'starting' : 'not-started';
         const canElevate = resolvedMode.mode === 'standard' && !resolvedMode.pinned && Boolean(data);
         if (engine === 'camoufox') {
@@ -275,16 +241,15 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
       return { channel, companionState: 'running', ...await (await livePeer()).request('status', {}) };
     },
     async execute(args, signal) {
-      if (authority === 'hook' && args?._channel !== channel) throw new Error('Missing, foreign or replaced browser channel');
-      if (authority === 'connection' && Object.hasOwn(args, '_lease')) {
-        fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
+      if (Object.hasOwn(args, '_lease')) {
+        fail('INVALID_ARGUMENT', 'This server does not accept _lease; send the call without _lease',
           { requestedInputDispatched: false });
       }
       if (ended()) throw connectionClosedError();
-      // Narrow connection-authority metadata exception alongside `status`:
-      // cold `list_profiles` is strictly read-only (no companion spawn, lock,
-      // or connection directory creation) on both Electron and Camoufox.
-      if (lazy && !started && args?.action === 'list_profiles') {
+      // Narrow metadata exception alongside `status`: cold `list_profiles` is
+      // strictly read-only (no companion spawn, lock, or connection directory
+      // creation) on both Electron and Camoufox.
+      if (!started && args?.action === 'list_profiles') {
         const { _channel: _ignored, ...cleaned } = args;
         try { validateArgs(cleaned); }
         catch (error) { throw Object.assign(error, { requestedInputDispatched: false }); }
@@ -294,21 +259,13 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         }
         return { ...ELECTRON_LIST_PROFILES, profiles: [] };
       }
-      if (lazy && !started) {
+      if (!started) {
         await ensureStarted(signal);
       }
       const current = await livePeer();
-      let call = args;
-      if (authority === 'connection') {
-        // This process owns exactly one companion, so it addresses the call itself.
-        // A host that kept an earlier process's schema still sends that _channel.
-        const own = { ...args, _channel: channel };
-        try { call = { ...own, _lease: await ticket(own) }; }
-        catch (error) {
-          // No call was sent: the companion admits nothing without a ticket.
-          throw Object.assign(error, { code: error.code ?? 'UNAUTHENTICATED_CALLER', requestedInputDispatched: false });
-        }
-      }
+      // This process owns exactly one companion, so it addresses the call itself.
+      // A host that kept an earlier schema may still send a stale _channel (D26).
+      const call = { ...args, _channel: channel };
       if (signal?.aborted) throw abortError(signal);
       try {
         const result = await current.request('call', { args: call }, { signal, timeoutMs: 120000 });
@@ -329,7 +286,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
     async close() {
       if (closing) return;
       closing = true;
-      if (lazy && !started && !startFlight && !child) return;
+      if (!started && !startFlight && !child) return;
       if (startFlight) {
         if (child && !terminated && !started) child.kill();
         await startFlight.catch(() => {});
@@ -347,9 +304,6 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
         }
       }
       peer?.close();
-      if (issuer) (await issuer.catch(() => null))?.close();
-      // Only the endpoint created by THIS gateway is removed. Profiles stay.
-      if (authority === 'hook' && started) await unlink(paths.endpoint).catch(() => {});
     },
   };
 }

@@ -25,7 +25,6 @@ const sdkPatch = {
 const bundleInputs = new Set();
 for (const [entry, name] of [
   ['src/mcp/main.mjs', 'mcp'],
-  ['src/hook/main.mjs', 'hook'],
   ['src/companion/main.mjs', 'companion'],
   ['src/companion/camoufox-main.mjs', 'companion-camoufox'],
 ]) {
@@ -41,4 +40,4 @@ await writeFile(resolve(root, 'build/bundle-inputs.json'), JSON.stringify([...bu
 // The sandboxed toolbar and script-runner preloads are standalone scripts.
 await copyFile(resolve(root, 'src/browser/toolbar-preload.cjs'), resolve(root, 'build/app/toolbar-preload.cjs'));
 await copyFile(resolve(root, 'src/browser/runner/preload.cjs'), resolve(root, 'build/app/runner-preload.cjs'));
-console.log('Built independent MCP, host-hook and companion entry points and the toolbar and runner preloads.');
+console.log('Built independent MCP and companion entry points and the toolbar and runner preloads.');

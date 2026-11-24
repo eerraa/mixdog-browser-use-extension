@@ -3,7 +3,7 @@
   "version": "0.6.11",
   "private": true,
   "type": "module",
-  "description": "Independent Windows browser automation for a folder-installed Mixdog plugin.",
+  "description": "Independent Windows MCP browser automation server (Camoufox / Firefox 158 default, Electron 44.9.1 WebHID/WebUSB fallback).",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.19.0"

@@ -1,7 +1,7 @@
-// Out-of-band user preferences stored in the authority-selected data root
-// (`WB_DATA_DIR/user-preferences.json` or `MIXDOG_PLUGIN_DATA/user-preferences.json`).
+// Out-of-band user preferences stored in the configured data root
+// (`WB_DATA_DIR/user-preferences.json`).
 // Never writable by MCP arguments, page scripts, or the `run` sandbox: written
-// only by direct user file edit or authenticated parent-chrome `#nav-bar` input.
+// only by direct user file edit or authenticated browser toolbar input.
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';

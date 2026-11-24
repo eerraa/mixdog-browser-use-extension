@@ -4,10 +4,9 @@ import { actions, keys } from '../shared/contract.mjs';
 export const JSON_ACTIONS = new Set(['status', 'list_tabs', 'create_session', 'list_sessions', 'close_session', 'list_profiles', 'requests', 'respond', 'permissions', 'downloads', 'revoke',
   'console', 'network', 'inspect', 'performance']);
 
-// Server instructions under connection authority (a plain MCP registration such
-// as Claude Code, Codex, Antigravity, or DSH): the shipped skill is not loaded
-// there, so the essentials travel with the server. Fixed per registration engine
-// across restarts (D26), and kept within Claude Code's 4096-character display cap.
+// Server instructions for MCP stdio registrations (Claude Code, Codex,
+// Antigravity, DSH, etc.): fixed per registration engine across restarts (D26),
+// and kept within Claude Code's 4096-character display cap.
 const CAMOUFOX_INSTRUCTIONS = `Independent Windows Browser (primary: Camoufox/Firefox 158): browse drives real owned Firefox windows with persistent profiles (never shared with other browsers). Use this server for ordinary interactive websites, sign-in flows, named persistent profiles, forms, uploads, downloads, native alert/confirm/prompt dialogs, and HTTP/WebSocket DevTools debugging. Use web fetch/search for plain text research.
 
 Hardware routing: Firefox does not implement WebHID/WebUSB. For physical-device configurators (e.g. usekb.cc, VIA/QMK keyboards, USB/HID tools), choose the Electron hardware browser registration (win-browser-hid) before opening the page. Keep every handle (t<n>, ctx<n>, e<n>) on the registration that returned it, because each registration numbers tabs independently; never switch registrations to bypass Stop, denial, cancellation, or uncertain input.
@@ -45,25 +44,20 @@ const TOOL_DESCRIPTIONS = {
   electron: 'Hardware-capable independent browser (Electron / Chromium 44.9.1) specifically for connecting physical devices via WebHID or WebUSB, including keyboard configurators such as usekb.cc (VIA/QMK) and USB/HID tools; select the requested offered device by exact identity (vendorId/productId/name), never by list order or sole offer. For ordinary web browsing, sign-in, window.prompt(), or named persistent profiles, use the primary Camoufox registration (win-browser) instead. File System Access pickers, window.prompt(), and general OS file operations are unsupported. Results are text: a status line, signals, page header, and on-screen snapshot with e<n> refs; actions return diffs. Refs stay valid while unchanged. observe supports find, scope, mode full|text, screenshot. run executes a short Playwright-like script in a sandbox. DevTools reads (console, network, inspect, performance) return compact JSON rows. Inspect status (engine, companionState, automationMode, capabilities) and browser-generated requests, then respond with offered refs. Windows open via showInactive() with a taskbar flash cue on first top-level open (use show to cue again). Never bypass Stop/denial, switch registrations to escape Stop/denial, or repeat an executed/uncertain input.',
 };
 
-// Host hooks address a connection by `_channel` and inject `_lease`, so the hook
-// schema names its channel. Without a channel this is the connection-authority
-// schema: it holds nothing that differs between server processes of the same
-// registration, because a host may keep a tool schema across restarts (D26).
-export function browserTool(channel = null, { engine = 'camoufox' } = {}) {
+// Static MCP tool schema: holds nothing that differs between server processes
+// of the same registration, because a host may keep a tool schema across
+// restarts (D26).
+export function browserTool({ engine = 'camoufox' } = {}) {
   const description = engine === 'electron' ? TOOL_DESCRIPTIONS.electron : TOOL_DESCRIPTIONS.camoufox;
   return {
     name: 'browse',
     description,
     inputSchema: {
       type: 'object',
-      required: channel ? ['action', '_channel'] : ['action'],
+      required: ['action'],
       additionalProperties: false,
       properties: {
         action: { type: 'string', enum: actions },
-        ...(channel ? {
-          _channel: { type: 'string', enum: [channel], description: 'This server connection; copy this exact constant.' },
-          _lease: { type: 'string', description: 'Injected by the plugin host hook. Do not invent a value.' },
-        } : {}),
         tabId: { type: 'string', description: 'Tab id (t<n>) returned by this connection.' },
         sessionId: { type: 'string', pattern: '^ctx[1-9]\\d{0,9}$', description: 'open/close_session: browser session from create_session/list_sessions, never caller authority. Omit on open for the default.' },
         name: { type: 'string', maxLength: 80, description: 'create_session: human-readable display name for a temporary session or named persistent profile binding.' },

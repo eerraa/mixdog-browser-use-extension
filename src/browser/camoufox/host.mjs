@@ -79,7 +79,7 @@ export class CamoufoxHost {
 
   constructor({
     dataDir, dataRoot = null, connectionId = null, profilesRoot = null, persistentProfileDir = null,
-    persistentProfilesEnabled = undefined, authorityMode = 'connection',
+    persistentProfilesEnabled = undefined,
     executablePath, camoufoxVersion = '158.0.1-beta.41',
     onRevokeConnection, policy = new BrowserPolicy(),
     automationMode = policy.automationMode ?? 'standard',
@@ -98,7 +98,6 @@ export class CamoufoxHost {
     }
     this.dataDir = path.resolve(dataDir);
     this.dataRoot = typeof dataRoot === 'string' && path.isAbsolute(dataRoot) ? path.resolve(dataRoot) : null;
-    this.authorityMode = authorityMode;
     this.defaultProfileSlug = 'default';
     if (typeof profilesRoot === 'string' && path.isAbsolute(profilesRoot)) {
       this.profilesRoot = path.resolve(profilesRoot);
@@ -831,7 +830,7 @@ export class CamoufoxHost {
 
   async #bindPersistentProfile(owner, slug, displayName) {
     if (!this.persistentProfilesEnabled || !this.profilesRoot) {
-      fail('PERSISTENT_PROFILES_DISABLED', 'Named persistent profiles are disabled (set WB_PERSISTENT_PROFILE=1 or use connection authority)');
+      fail('PERSISTENT_PROFILES_DISABLED', 'Named persistent profiles are disabled (remove WB_PERSISTENT_PROFILE=0)');
     }
     if (slug === this.defaultProfileSlug) {
       const existingOwn = [...this.#sessions.values()].find(
@@ -841,7 +840,7 @@ export class CamoufoxHost {
       const existingOther = [...this.#sessions.values()].find(
         s => s.owner !== owner && s.state === 'open' && s.persistence === 'persistent' && s.profileSlug === slug,
       );
-      if (existingOther || (this.authorityMode === 'hook' && this.#profiles.size > 0 && !this.#profiles.has(owner))) {
+      if (existingOther) {
         fail('PROFILE_IN_USE', `Persistent profile "${slug}" is currently in use by another caller`);
       }
       const flightKey = `${owner}\0${slug}`;

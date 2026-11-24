@@ -17,7 +17,7 @@ if (!licenses || !path.isAbsolute(licenses) || flags.some(flag => flag !== '--re
 }
 const release = flags.includes('--release');
 // What a package is built from (build-release.md Clean package build, step 1).
-const SOURCES = ['src', 'scripts', 'native', 'third_party', 'skills', 'hooks', 'plugin.json', 'browser-policy.json',
+const SOURCES = ['src', 'scripts', 'native', 'third_party', 'browser-policy.json',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'package.json', 'LICENSE'];
 // Windows bsdtar: writes ZIP archives and never reads "C:" as a remote host.
 const tar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
@@ -85,12 +85,11 @@ try {
     for (const name of SOURCES) await cp(path.join(root, name), path.join(temp, name), { recursive: true });
   }
   const version = JSON.parse(await readFile(path.join(temp, 'package.json'), 'utf8')).version;
-  const manifest = JSON.parse(await readFile(path.join(temp, 'plugin.json'), 'utf8'));
   const server = await readFile(path.join(temp, 'src', 'mcp', 'main.mjs'), 'utf8');
-  if (manifest.version !== version || !server.includes(`const VERSION = '${version}';`)) {
-    throw new Error(`Version ${version} differs between package.json, plugin.json and src/mcp/main.mjs`);
+  if (!server.includes(`const VERSION = '${version}';`)) {
+    throw new Error(`Version ${version} differs between package.json and src/mcp/main.mjs`);
   }
-  // Never replace a release: Mixdog runs registered packages in place.
+  // Never replace an existing release directory.
   const out = path.join(root, 'dist', 'releases', `v${version}`);
   if (release && await exists(out)) throw new Error(`${out} already exists; releases are never replaced`);
   // A real copy of node_modules: the SDK patch matches files by their real path

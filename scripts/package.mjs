@@ -14,8 +14,7 @@ const put = async (source, target = source) => {
   await mkdir(path.dirname(output), { recursive: true });
   await copyFile(path.join(root, source), output);
 };
-for (const name of ['plugin.json', 'browser-policy.json', 'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE']) await put(name);
-for (const name of ['hooks', 'skills']) await cp(path.join(root, name), path.join(destination, name), { recursive: true });
+for (const name of ['browser-policy.json', 'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE']) await put(name);
 await cp(path.join(root, 'node_modules/electron/dist'), path.join(destination, 'runtime'), { recursive: true });
 await cp(path.join(root, 'build/app'), path.join(destination, 'app'), { recursive: true });
 await cp(path.join(root, 'build/licenses'), path.join(destination, 'licenses'), { recursive: true });

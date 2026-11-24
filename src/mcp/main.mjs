@@ -13,35 +13,29 @@ const VERSION = '0.6.11';
 
 async function main() {
   const root = path.resolve(path.dirname(process.argv[1]), '..');
-  const authority = authorityMode();
-  // Validate optional WB_AUTOMATION_MODE and WB_ENGINE fail-closed before spawning companion.
+  // Validate optional WB_AUTHORITY, WB_AUTOMATION_MODE and WB_ENGINE fail-closed before spawning companion.
+  authorityMode();
   automationMode();
   engineMode();
-  const gateway = await createGateway(root, pluginData(), { authority });
-  // A plain MCP registration loads no skill; the server instructions carry
-  // its guidance instead. Under host hooks the shipped skill does.
+  const gateway = await createGateway(root, pluginData());
   const server = new Server({ name: 'win-browser', version: VERSION }, {
     capabilities: { tools: {} },
-    ...(authority === 'connection' ? { instructions: connectionInstructions(gateway.engine) } : {}),
+    instructions: connectionInstructions(gateway.engine),
   });
-  const hooked = authority === 'hook';
-  const descriptor = browserTool(hooked ? gateway.channel : null, { engine: gateway.engine });
+  const descriptor = browserTool({ engine: gateway.engine });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [descriptor] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
-      if (request.params.name !== 'browse') throw new Error('Unknown plugin tool');
+      if (request.params.name !== 'browse') throw new Error('Unknown browser tool');
       const args = request.params.arguments;
-      // Host hooks address this connection by _channel. Under connection authority
-      // the stdio connection is the caller and the argument is not part of a call.
-      if (hooked && args?._channel !== gateway.channel) throw new Error('Missing, foreign or replaced browser channel');
       if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Browse arguments must be an object');
-      // Enforce connection-authority _lease refusal BEFORE any metadata shortcut (including `status`).
-      if (!hooked && Object.hasOwn(args, '_lease')) {
-        fail('INVALID_ARGUMENT', 'This server issues its own caller tickets; send the call without _lease',
+      // Enforce explicit _lease refusal BEFORE any metadata shortcut (including `status`).
+      if (Object.hasOwn(args, '_lease')) {
+        fail('INVALID_ARGUMENT', 'This server does not accept _lease; send the call without _lease',
           { requestedInputDispatched: false });
       }
       if (args.action === 'status') {
-        const { _channel: _c, _lease: _l, ...cleaned } = args;
+        const { _channel: _c, ...cleaned } = args;
         try { validateArgs(cleaned); }
         catch (error) { throw Object.assign(error, { requestedInputDispatched: false }); }
         return toolResult({ version: VERSION, ...await gateway.status() }, 'status');

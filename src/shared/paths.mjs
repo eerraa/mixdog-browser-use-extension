@@ -5,16 +5,17 @@ import { createHash } from 'node:crypto';
 export const validChannel = value => typeof value === 'string'
   && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 
-/** Who proves the caller of a browser call (contracts.md Authority and isolation):
- * `hook` (default), the Mixdog host's PreToolUse hook issues one ticket per call;
- * `connection`, a plain MCP registration such as Claude Code's `claude mcp add`,
- * where the MCP connection itself is the caller. Set only by the registration. */
+/** Caller authority (contracts.md Authority and isolation):
+ * Plain MCP stdio connection authority is the sole mode. `WB_AUTHORITY` is
+ * optional (unset/empty or `connection` accepted); `hook` and any other value
+ * fail closed so stale host-hook registrations receive an actionable error. */
 export function authorityMode(env = process.env) {
-  const mode = env.WB_AUTHORITY || 'hook';
-  if (mode !== 'hook' && mode !== 'connection') {
-    throw new Error('WB_AUTHORITY must be hook or connection');
+  const mode = env.WB_AUTHORITY;
+  if (mode === undefined || mode === '' || mode === 'connection') return 'connection';
+  if (mode === 'hook') {
+    throw new Error('WB_AUTHORITY=hook is no longer supported; this is a plain MCP stdio server — remove WB_AUTHORITY (or set connection) and set WB_DATA_DIR');
   }
-  return mode;
+  throw new Error('WB_AUTHORITY must be connection (or unset)');
 }
 
 /** Optional connection-wide automation opt-in from the server registration:
@@ -42,11 +43,10 @@ export function engineMode(env = process.env) {
   return engine;
 }
 
-/** Whether named persistent Camoufox profiles are enabled for this authority. */
-export function persistentProfilesEnabled(authMode = authorityMode(), env = process.env) {
-  const pref = env.WB_PERSISTENT_PROFILE;
-  return pref === '1' || pref === 'true'
-    || (authMode === 'connection' && pref !== '0' && pref !== 'false');
+/** Whether named persistent Camoufox profiles are enabled (default on; opt out with WB_PERSISTENT_PROFILE=0|false). */
+export function persistentProfilesEnabled(env = process.env) {
+  const pref = env?.WB_PERSISTENT_PROFILE;
+  return pref !== '0' && pref !== 'false';
 }
 
 function resolveCamoufoxDir(dir) {
@@ -109,20 +109,12 @@ export function camoufoxExecutable(root, env = process.env) {
   throw new Error('Camoufox runtime not found. Bundle camoufox/ in the package, install into win-browser-runtime/camoufox, or set WB_CAMOUFOX_PATH');
 }
 
-/** The data root: `MIXDOG_PLUGIN_DATA` under hook authority (assigned by Mixdog
- * per registered folder), `WB_DATA_DIR` under connection authority. */
+/** The absolute data root configured for this MCP server registration (`WB_DATA_DIR`). */
 export function pluginData(env = process.env) {
-  if (authorityMode(env) === 'connection') {
-    const directory = env.WB_DATA_DIR;
-    if (!directory || !path.isAbsolute(directory)) {
-      throw new Error('WB_DATA_DIR must be an absolute directory when WB_AUTHORITY=connection');
-    }
-    return path.resolve(directory);
-  }
-  const directory = env.MIXDOG_PLUGIN_DATA;
+  authorityMode(env);
+  const directory = env.WB_DATA_DIR;
   if (!directory || !path.isAbsolute(directory)) {
-    throw new Error('MIXDOG_PLUGIN_DATA is required; register the packaged folder as a Mixdog plugin, '
-      + 'or register bin/bridge.exe --mcp as a plain MCP server with WB_AUTHORITY=connection and WB_DATA_DIR');
+    throw new Error('WB_DATA_DIR must be an absolute directory');
   }
   return path.resolve(directory);
 }
@@ -132,7 +124,7 @@ export function connectionPaths(data, channel) {
   const directory = path.join(data, 'connections', channel);
   const digest = createHash('sha256').update(`${data}\0${channel}`).digest('hex').slice(0, 32);
   return {
-    directory, endpoint: path.join(directory, 'endpoint.json'),
+    directory,
     pipe: `\\\\.\\pipe\\independent-browser-${digest}`,
   };
 }

@@ -1,12 +1,14 @@
-// Shared companion named-pipe RPC server, caller-authority authentication, and
+// Shared companion named-pipe RPC server, gateway PSK authentication, and
 // teardown lifecycle for both the pure-Node Camoufox companion and the Electron
-// fallback companion. Keeps security-critical auth/ticket logic in one place.
+// fallback companion. Keeps security-critical auth/teardown logic in one place.
 import net from 'node:net';
-import { timingSafeEqual } from 'node:crypto';
-import { CallerAuthority, withoutLease } from '../shared/authority.mjs';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { BrowserPolicy } from '../shared/policy.mjs';
 import { loadUserPreferences } from '../shared/preferences.mjs';
 import { RpcPeer } from '../shared/rpc.mjs';
+
+// Under MCP stdio connection authority the gateway connection is the sole caller.
+export const CONNECTION_CALLER = 'mcp-connection';
 
 export function normalizePrefsSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
@@ -22,7 +24,7 @@ export function normalizePrefsSnapshot(snapshot) {
 export function createCompanionServer({ root, channel, key, pipe, dataRoot, lazyInit = false, buildHost, onExit }) {
   if (!key || !/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error('Companion launch credential is missing');
 
-  const authority = new CallerAuthority();
+  const connectionController = new AbortController();
   const peers = new Set();
   let primary = null;
   let host = null;
@@ -37,7 +39,7 @@ export function createCompanionServer({ root, channel, key, pipe, dataRoot, lazy
   function terminate(reason) {
     if (terminating) return;
     terminating = true;
-    authority.close(reason);
+    connectionController.abort(new Error(`Browser connection ended: ${reason}`));
     try {
       primary?.event('terminating', { reason, channel, scope: 'all pages of this connection' });
     } catch {
@@ -68,9 +70,9 @@ export function createCompanionServer({ root, channel, key, pipe, dataRoot, lazy
       const peer = new RpcPeer(socket, async (method, params, signal) => {
         if (!role) {
           if (method !== 'hello' || params?.channel !== channel || !sameKey(params?.key)
-            || !['gateway', 'hook'].includes(params?.role)) throw new Error('Unauthenticated local connection');
-          if (params.role === 'gateway' && primary && !primary.closed) throw new Error('Gateway already connected');
-          if (params.role === 'gateway' && !host) {
+            || params?.role !== 'gateway') throw new Error('Unauthenticated local connection');
+          if (primary && !primary.closed) throw new Error('Gateway already connected');
+          if (!host) {
             const snap = params?.snapshot;
             if (snap && typeof snap === 'object') {
               const policy = BrowserPolicy.fromSnapshot(snap.policy);
@@ -81,42 +83,32 @@ export function createCompanionServer({ root, channel, key, pipe, dataRoot, lazy
               host = buildHost({ policy, prefs });
             }
           }
-          role = params.role;
-          if (role === 'gateway') primary = peer;
+          role = 'gateway';
+          primary = peer;
           return { channel, protocol: 1 };
         }
-        if (role === 'gateway' && method === 'shutdown') {
+        if (method === 'shutdown') {
           terminate('gateway-shutdown');
           return { terminating: true };
         }
         if (terminating) throw new Error('Browser connection is terminating; it cannot be automatically resumed');
         if (!host) throw new Error('Browser companion host is not initialized');
-        if (role === 'gateway' && method === 'status') return host.status();
-        if (role === 'gateway' && method === 'call') {
+        if (method === 'status') return host.status();
+        if (method === 'call') {
           const args = params?.args;
-          if (args?._channel !== channel) throw new Error('Foreign or replaced browser channel');
-          const caller = authority.consume(args?._lease, args);
-          const { _channel, ...body } = withoutLease(args);
+          if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Browser arguments must be an object');
+          if (args._channel !== channel) throw new Error('Foreign or replaced browser channel');
+          const { _channel, _lease, ...body } = args;
+          const caller = {
+            sessionId: CONNECTION_CALLER,
+            callId: randomUUID(),
+            signal: connectionController.signal,
+            assertLive() {
+              if (terminating) throw new Error('Browser connection is terminating');
+              connectionController.signal.throwIfAborted();
+            },
+          };
           return host.execute(body, caller, signal);
-        }
-        if (role === 'hook') {
-          if (typeof params?.sessionId !== 'string' || !params.sessionId || params.sessionId.length > 256) {
-            throw new Error('Host caller identity is missing');
-          }
-          if (method === 'begin') {
-            authority.begin(params.sessionId, { newTurn: params.event === 'UserPromptSubmit' });
-            return { active: true };
-          }
-          if (method === 'end') {
-            // Keep tombstones even when end precedes the first tool request.
-            authority.end(params.sessionId, params.event);
-            host.endSession(params.sessionId);
-            return { ended: true };
-          }
-          if (method === 'issue') {
-            if (params.args?._channel !== channel) throw new Error('Foreign or dead channel');
-            return { ticket: authority.issue(params) };
-          }
         }
         throw new Error('Unsupported local operation for this connection role');
       });

@@ -5,14 +5,13 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { CamoufoxHost } from '../browser/camoufox/host.mjs';
 import { resolveAutomationMode } from '../shared/preferences.mjs';
-import { authorityMode, automationMode, camoufoxExecutable, connectionPaths, persistentProfilesEnabled, pluginData, validChannel } from '../shared/paths.mjs';
+import { automationMode, camoufoxExecutable, connectionPaths, persistentProfilesEnabled, pluginData, validChannel } from '../shared/paths.mjs';
 import { createCompanionServer } from './server.mjs';
 
 const root = path.resolve(path.dirname(process.argv[1]), '..');
 const channel = process.env.WB_CHANNEL;
 const key = process.env.WB_IPC_KEY;
 const lazyInit = process.env.WB_LAZY_INIT === '1';
-const authMode = authorityMode();
 const dataRoot = pluginData();
 const envAutomationMode = automationMode();
 const paths = connectionPaths(dataRoot, channel);
@@ -20,7 +19,7 @@ mkdirSync(paths.directory, { recursive: true });
 
 const camoufox = camoufoxExecutable(root);
 const headless = process.env.WB_HEADLESS === '1' || process.env.WB_HEADLESS === 'true';
-const usePersistent = persistentProfilesEnabled(authMode);
+const usePersistent = persistentProfilesEnabled();
 const profilesRoot = path.join(dataRoot, 'profiles');
 
 const server = createCompanionServer({
@@ -39,7 +38,6 @@ const server = createCompanionServer({
       connectionId: validChannel(connectionId) ? connectionId : null,
       profilesRoot,
       persistentProfilesEnabled: usePersistent,
-      authorityMode: authMode,
       executablePath: camoufox.executablePath,
       camoufoxVersion: camoufox.version,
       policy,
