@@ -13,6 +13,7 @@ import { clip, redactURL } from '../redact.mjs';
 import { fail } from '../../shared/contract.mjs';
 
 const L = DEVTOOLS_LIMITS;
+const EMPTY_BUFFER = Buffer.alloc(0);
 const UNSOLICITED_TYPES = new Set([
   'resource-available-form',
   'resource-updated-form',
@@ -75,7 +76,7 @@ function formatRdpGrip(value, limit = L.chars) {
  */
 export class FirefoxRdpTransport extends EventEmitter {
   #socket;
-  #buffer = Buffer.alloc(0);
+  #buffer = EMPTY_BUFFER;
   #greeted = false;
   #pending = [];
   #closed = false;
@@ -92,24 +93,35 @@ export class FirefoxRdpTransport extends EventEmitter {
 
   #onData(chunk) {
     if (this.#closed) return;
-    this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, chunk]) : Buffer.from(chunk);
-    while (true) {
-      const colon = this.#buffer.indexOf(0x3a);
+    const rawChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const buf = this.#buffer.length ? Buffer.concat([this.#buffer, rawChunk]) : rawChunk;
+    let offset = 0;
+    while (!this.#closed) {
+      const colon = buf.indexOf(0x3a, offset);
       if (colon === -1) break;
-      const len = Number(this.#buffer.subarray(0, colon).toString('ascii'));
+      const len = Number(buf.subarray(offset, colon).toString('ascii'));
       if (!Number.isFinite(len) || len < 0 || len > 32 * 1024 * 1024) {
+        this.#buffer = EMPTY_BUFFER;
         this.close(new Error('Invalid Firefox RDP frame length'));
         return;
       }
-      if (this.#buffer.length < colon + 1 + len) break;
-      const raw = this.#buffer.subarray(colon + 1, colon + 1 + len).toString('utf8');
-      this.#buffer = this.#buffer.subarray(colon + 1 + len);
+      const frameEnd = colon + 1 + len;
+      if (buf.length < frameEnd) break;
+      const raw = buf.subarray(colon + 1, frameEnd).toString('utf8');
+      offset = frameEnd;
       let msg;
       try { msg = JSON.parse(raw); }
-      catch (error) { this.close(new Error(`Malformed Firefox RDP JSON: ${error.message}`)); return; }
+      catch (error) {
+        this.#buffer = EMPTY_BUFFER;
+        this.close(new Error(`Malformed Firefox RDP JSON: ${error.message}`));
+        return;
+      }
+      const tail = offset < buf.length ? buf.subarray(offset) : EMPTY_BUFFER;
+      this.#buffer = tail;
       if (!this.#greeted) {
         this.#greeted = true;
         this.emit('greeting', msg);
+        if (this.#closed || this.#buffer !== tail) return;
         continue;
       }
       const isEvent = typeof msg.type === 'string' && UNSOLICITED_TYPES.has(msg.type);
@@ -120,10 +132,16 @@ export class FirefoxRdpTransport extends EventEmitter {
           clearTimeout(item.timer);
           if (msg.error) item.reject(new Error(`${msg.error}: ${msg.message ?? ''}`.trim()));
           else item.resolve(msg);
+          if (this.#closed || this.#buffer !== tail) return;
           continue;
         }
       }
       this.emit('event', msg);
+      if (this.#closed || this.#buffer !== tail) return;
+    }
+    if (!this.#closed) {
+      this.#buffer = offset >= buf.length ? EMPTY_BUFFER
+        : offset > 0 ? Buffer.from(buf.subarray(offset)) : buf;
     }
   }
 
@@ -167,6 +185,7 @@ export class FirefoxRdpTransport extends EventEmitter {
   close(reason) {
     if (this.#closed) return;
     this.#closed = true;
+    this.#buffer = EMPTY_BUFFER;
     const error = reason instanceof Error ? reason : new Error(reason ? String(reason) : 'Firefox RDP closed');
     for (const item of this.#pending) {
       clearTimeout(item.timer);
@@ -178,7 +197,7 @@ export class FirefoxRdpTransport extends EventEmitter {
   }
 }
 
-export class FirefoxRdpClient extends EventEmitter {
+export class FirefoxRdpClient {
   #port;
   #transport = null;
   #connectFlight = null;
@@ -191,13 +210,13 @@ export class FirefoxRdpClient extends EventEmitter {
   #closed = false;
 
   constructor(port, { connectImpl } = {}) {
-    super();
     this.#port = port;
     this.connectImpl = connectImpl ?? (p => net.createConnection({ host: '127.0.0.1', port: p }));
   }
 
   get connected() { return !!this.#transport && !this.#transport.closed; }
   get closed() { return this.#closed; }
+  hasTab(pageId) { return this.#watchers.has(pageId); }
 
   async ensureConnected(timeoutMs = 6000) {
     if (this.#closed || !this.#port) return false;

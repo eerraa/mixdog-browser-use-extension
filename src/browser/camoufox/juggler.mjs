@@ -24,6 +24,7 @@ const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 const STARTUP_TIMEOUT_MS = 20000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 15000;
 const CHUNK_SIZE = 2048;
+const EMPTY_BUFFER = Buffer.alloc(0);
 
 export async function allocateLoopbackPort() {
   return new Promise((resolve, reject) => {
@@ -105,7 +106,7 @@ export function defaultCamouPrefs({ enableRdp = true, hardenedRunner = false } =
 export class JugglerTransport extends EventEmitter {
   #write;
   #read;
-  #buffer = Buffer.alloc(0);
+  #buffer = EMPTY_BUFFER;
   #nextId = 1;
   #pending = new Map();
   #closed = false;
@@ -124,19 +125,28 @@ export class JugglerTransport extends EventEmitter {
 
   #onData(chunk) {
     if (this.#closed) return;
-    this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, chunk]) : Buffer.from(chunk);
-    if (this.#buffer.length > MAX_FRAME_BYTES) {
+    const rawChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const buf = this.#buffer.length ? Buffer.concat([this.#buffer, rawChunk]) : rawChunk;
+    if (buf.length > MAX_FRAME_BYTES) {
+      this.#buffer = EMPTY_BUFFER;
       this.close(new Error('Juggler frame exceeded size limit'));
       return;
     }
+    let offset = 0;
     let idx;
-    while ((idx = this.#buffer.indexOf(0)) !== -1) {
-      const raw = this.#buffer.subarray(0, idx).toString('utf8');
-      this.#buffer = this.#buffer.subarray(idx + 1);
+    while (!this.#closed && (idx = buf.indexOf(0, offset)) !== -1) {
+      const raw = buf.subarray(offset, idx).toString('utf8');
+      offset = idx + 1;
       if (!raw) continue;
       let msg;
       try { msg = JSON.parse(raw); }
-      catch (error) { this.close(new Error(`Malformed Juggler JSON: ${error.message}`)); return; }
+      catch (error) {
+        this.#buffer = EMPTY_BUFFER;
+        this.close(new Error(`Malformed Juggler JSON: ${error.message}`));
+        return;
+      }
+      const tail = offset < buf.length ? buf.subarray(offset) : EMPTY_BUFFER;
+      this.#buffer = tail;
       if (msg.id !== undefined) {
         const entry = this.#pending.get(msg.id);
         if (!entry) continue;
@@ -151,6 +161,11 @@ export class JugglerTransport extends EventEmitter {
       } else if (typeof msg.method === 'string') {
         this.emit('message', msg.method, msg.params ?? {}, msg.sessionId);
       }
+      if (this.#closed || this.#buffer !== tail) return;
+    }
+    if (!this.#closed) {
+      this.#buffer = offset >= buf.length ? EMPTY_BUFFER
+        : offset > 0 ? Buffer.from(buf.subarray(offset)) : buf;
     }
   }
 
@@ -190,6 +205,7 @@ export class JugglerTransport extends EventEmitter {
   close(reason) {
     if (this.#closed) return;
     this.#closed = true;
+    this.#buffer = EMPTY_BUFFER;
     const error = reason instanceof Error ? reason : new Error(reason ? String(reason) : 'Juggler transport closed');
     for (const entry of this.#pending.values()) {
       clearTimeout(entry.timer);
@@ -293,21 +309,47 @@ export class CamoufoxProcess extends EventEmitter {
     let resolveRdp;
     const rdpReady = rdpMarker ? new Promise(resolve => { resolveRdp = () => { rdpResolved = true; resolve(true); }; }) : Promise.resolve(true);
 
+    let onStdout, onStderr, onStartError, onStartExit;
+    const cleanupStartupStdio = () => {
+      if (onStartError) child.removeListener('error', onStartError);
+      if (onStartExit) child.removeListener('exit', onStartExit);
+      if (onStdout) child.stdout.removeListener('data', onStdout);
+      if (onStderr) child.stderr.removeListener('data', onStderr);
+      onStartError = onStartExit = onStdout = onStderr = null;
+      stdout = '';
+      stderr = '';
+      child.stdout.resume();
+      child.stderr.resume();
+    };
+
     const ready = new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('exit', (code, sig) => {
+      let readySettled = false;
+      const done = (fn, value) => {
+        if (readySettled) return;
+        readySettled = true;
+        if (onStartError) child.removeListener('error', onStartError);
+        if (onStartExit) child.removeListener('exit', onStartExit);
+        onStartError = onStartExit = null;
+        fn(value);
+      };
+      onStartError = error => done(reject, error);
+      onStartExit = (code, sig) => {
         if (!rdpResolved) { rdpResolved = true; resolveRdp?.(false); }
-        reject(new Error(`Camoufox exited before Juggler ready (${code ?? sig})${stderr ? `\n${stderr}` : ''}`));
-      });
-      child.stdout.on('data', chunk => {
+        done(reject, new Error(`Camoufox exited before Juggler ready (${code ?? sig})${stderr ? `\n${stderr}` : ''}`));
+      };
+      onStdout = chunk => {
         stdout += chunk.toString('utf8');
-        if (stdout.includes(READY_MARKER)) resolve();
+        if (!readySettled && stdout.includes(READY_MARKER)) done(resolve);
         if (rdpMarker && !rdpResolved && stdout.includes(rdpMarker)) resolveRdp?.();
         if (stdout.length > 65536) stdout = stdout.slice(-16384);
-      });
-      child.stderr.on('data', chunk => {
+      };
+      onStderr = chunk => {
         stderr = (stderr + chunk.toString('utf8')).slice(-16384);
-      });
+      };
+      child.once('error', onStartError);
+      child.once('exit', onStartExit);
+      child.stdout.on('data', onStdout);
+      child.stderr.on('data', onStderr);
     });
 
     try {
@@ -332,6 +374,8 @@ export class CamoufoxProcess extends EventEmitter {
     } catch (error) {
       await this.close({ force: true });
       throw error;
+    } finally {
+      cleanupStartupStdio();
     }
   }
 

@@ -100,22 +100,42 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
       });
     });
     exit = procExit;
+    let cleanupStartup = () => {};
     const ready = new Promise((resolve, reject) => {
-      proc.once('error', reject);
-      proc.once('exit', (code, signal) => {
-        reject(new Error(`Browser companion startup exited (${code ?? signal})${errors ? `\n${errors}` : ''}`));
-      });
-      proc.stderr.on('data', bytes => {
-        if (!peer) errors = (errors + bytes.toString('utf8')).slice(-16384);
-      });
-      proc.stdout.on('data', bytes => {
+      let settled = false;
+      const done = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        cleanupStartup();
+        fn(value);
+      };
+      const onError = error => done(reject, error);
+      const onExit = (code, signal) => done(reject, new Error(`Browser companion startup exited (${code ?? signal})${errors ? `\n${errors}` : ''}`));
+      const onStderr = bytes => {
+        errors = (errors + bytes.toString('utf8')).slice(-16384);
+      };
+      const onStdout = bytes => {
         startup += bytes.toString('utf8');
-        if (startup.includes(`WB_READY ${channel}\n`)) resolve();
-        if (startup.length > 65536) { proc.kill(); reject(new Error('Invalid companion startup output')); }
-      });
+        if (startup.includes(`WB_READY ${channel}\n`)) { done(resolve); return; }
+        if (startup.length > 65536) { proc.kill(); done(reject, new Error('Invalid companion startup output')); }
+      };
+      cleanupStartup = () => {
+        proc.removeListener('error', onError);
+        proc.removeListener('exit', onExit);
+        proc.stderr.removeListener('data', onStderr);
+        proc.stdout.removeListener('data', onStdout);
+        startup = '';
+        errors = '';
+        proc.stdout.resume();
+        proc.stderr.resume();
+      };
+      proc.once('error', onError);
+      proc.once('exit', onExit);
+      proc.stderr.on('data', onStderr);
+      proc.stdout.on('data', onStdout);
     });
     try {
-      await bounded(ready, 20000, 'Browser companion startup', undefined, () => proc.kill());
+      await bounded(ready, 20000, 'Browser companion startup', undefined, () => { cleanupStartup(); proc.kill(); });
       if (closing) throw new Error('Browser connection closed during startup');
       peer = await connect(paths.pipe, lazy ? { ...helloBase, snapshot: initSnapshot } : helloBase);
       watch(peer);
@@ -176,7 +196,7 @@ export async function createGateway(root, data, { authority = 'hook' } = {}) {
   };
 
   const livePeer = async () => {
-    if (ended()) throw new Error('Browser connection ended; reconnect the plugin explicitly');
+    if (ended()) throw connectionClosedError();
     if (!peer || peer.closed) {
       // Reconnect the transport for NEW calls only; never replay the lost call.
       peer = await connect(paths.pipe, helloBase);
